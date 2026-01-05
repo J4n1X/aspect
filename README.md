@@ -123,22 +123,6 @@ fn main() -> i32 {
 }
 ```
 
-## Project Structure
-
-```
-tjlb-rust/
-├── src/
-│   ├── main.rs        # CLI entry point
-│   ├── lib.rs         # Library exports
-│   ├── lexer/         # Tokenization
-│   ├── parser/        # AST generation
-│   ├── codegen/       # LLVM IR generation
-│   └── symbol/        # Symbol table management
-├── tests/             # Integration tests
-├── demos/             # Demo programs
-└── Cargo.toml
-```
-
 ## Running Tests
 
 ```bash
