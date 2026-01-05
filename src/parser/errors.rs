@@ -1,5 +1,5 @@
 use thiserror::Error;
-use crate::lexer::Position;
+use crate::lexer::{Position};
 
 /// Parser error types
 #[derive(Error, Debug)]

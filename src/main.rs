@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use clap::{Parser as ClapParser, Subcommand};
 use inkwell::context::Context as LLVMContext;
+use tjlb_rust::typechecker::TypeChecker;
+use std::fmt::Write;
 use std::fs;
 use std::path::PathBuf;
 use tjlb_rust::codegen::CodeGenerator;
@@ -168,6 +170,19 @@ fn compile_file(path: &PathBuf, output: Option<&std::path::Path>, print: bool, o
     let mut parser = Parser::new(tokens);
     let program = parser.parse_program()
         .with_context(|| format!("failed to parse '{}'", path.display()))?;
+
+    let mut typechecker = TypeChecker::new();
+    typechecker.check_program(&program)
+        .map_err(|errors| {
+            let mut err_msg = format!("Type checking failed for '{}':\n", path.display());
+            for error in errors {
+                let _ = writeln!(err_msg, "  - {error}");
+            }
+            println!("{err_msg}");
+            
+            // In the future, this should error out, probably, but for now, we just print it out.
+            // anyhow::anyhow!(err_msg)
+        }).ok();
 
     // Generate LLVM IR
     let context = LLVMContext::create();

@@ -2,7 +2,7 @@ use anyhow::{Context as AnyhowContext, Result as AnyhowResult};
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::passes::PassBuilderOptions;
-use inkwell::targets::{CodeModel, RelocMode, Target, TargetMachine};
+use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine};
 use inkwell::module::Module;
 use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::values::{
@@ -65,7 +65,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let builder = context.create_builder();
         
         // Initialize target
-        Target::initialize_native(&Default::default()).expect("Failed to initialize native target");
+        Target::initialize_native(&InitializationConfig::default()).expect("Failed to initialize native target");
 
         // TODO: Make target configurable
         let target = Target::from_triple(&TargetMachine::get_default_triple())
@@ -351,152 +351,130 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Generate code for a statement
-    #[allow(clippy::too_many_lines)]
     fn generate_statement(&mut self, stmt: &Statement) -> Result<(), CodegenError> {
         match &stmt.kind {
-            StatementKind::Expression(expr) => {
-                // For expression statements, we might have void function calls
-                // Handle them specially
-                if let ExprKind::FunctionCall { name, args } = &expr.kind {
-                    self.generate_function_call_statement(name, args, expr.pos)?;
-                    Ok(())
-                } else {
-                    self.generate_expression(expr)?;
-                    Ok(())
-                }
+            StatementKind::Expression(expr) => self.generate_expression_statement(expr),
+            StatementKind::VarDecl { var_type, name, initializer } => {
+                self.generate_var_decl(stmt.pos, var_type, name, initializer.as_ref())
             }
-
-            StatementKind::VarDecl {
-                var_type, name, initializer,
-            } => {
-                // Variables are pre-allocated at the entry block, just look up and initialize
-                let alloca = self
-                    .lookup_variable(name)
-                    .ok_or_else(|| CodegenError::UndefinedVariable(name.clone(), stmt.pos))?;
-
-                // For array types, they're already zero-initialized and don't need an initializer
-                if var_type.is_array() {
-                    // Arrays are already allocated and zero-initialized
-                    // If there's an initializer, it would be an initializer list (not yet supported)
-                    return Ok(());
-                }
-
-                let llvm_type = lang_type_to_llvm(self.context, var_type)?;
-
-                // Initialize if provided
-                if let Some(init_expr) = initializer {
-                    let mut init_value = self.generate_expression(init_expr)?;
-
-                    // If types don't match, insert implicit cast
-                    if init_value.get_type() != llvm_type {
-                        init_value = self.cast_value(init_value, llvm_type, &init_expr.expr_type)?;
-                    }
-
-                    self.builder
-                        .build_store(alloca, init_value)
-                        ?;
-                } else {
-                    // Initialize to zero
-                    let zero = llvm_type.const_zero();
-                    self.builder
-                        .build_store(alloca, zero)
-                        ?;
-                }
-
-                Ok(())
-            }
-
             StatementKind::VarAssign { name, value } => {
-                let var_ptr = self
-                    .lookup_variable(name)
-                    .ok_or_else(|| CodegenError::UndefinedVariable(name.clone(), stmt.pos))?;
-
-                let var_type = self
-                    .lookup_variable_type(name)
-                    .ok_or_else(|| CodegenError::UndefinedVariable(name.clone(), stmt.pos))?;
-
-                let mut value_llvm = self.generate_expression(value)?;
-
-                // If types don't match, insert implicit cast
-                if value_llvm.get_type() != var_type {
-                    value_llvm = self.cast_value(value_llvm, var_type, &value.expr_type)?;
-                }
-
-                self.builder
-                    .build_store(var_ptr, value_llvm)
-                    ?;
-
-                Ok(())
+                self.generate_var_assign(stmt.pos, name, value)
             }
-
             StatementKind::DerefAssign { target, value } => {
-                // Extract the pointer from the dereference expression
-                match &target.kind {
-                    ExprKind::Dereference(ptr_expr) => {
-                        // Generate the pointer expression (not the dereference itself)
-                        let ptr = self.generate_expression(ptr_expr)?;
-
-                        // Generate the value to store
-                        let value_llvm = self.generate_expression(value)?;
-
-                        // Store the value at the dereferenced location
-                        self.builder
-                            .build_store(ptr.into_pointer_value(), value_llvm)?;
-
-                        Ok(())
-                    }
-                    _ => Err(CodegenError::InvalidOperation(
-                        "DerefAssign target must be a dereference expression".to_string(),
-                        target.pos,
-                    )),
-                }
+                self.generate_deref_assign(target, value)
             }
-
-            StatementKind::Return(expr) => {
-                if let Some(expr) = expr {
-                    let value = self.generate_expression(expr)?;
-                    self.builder
-                        .build_return(Some(&value))?;
-                } else {
-                    self.builder
-                        .build_return(None)?;
-                }
-                Ok(())
+            StatementKind::Return(expr) => self.generate_return(expr.as_ref()),
+            StatementKind::If { condition, then_block, else_block } => {
+                self.generate_if_statement(condition, then_block, else_block.as_deref())
             }
-
-            StatementKind::If {
-                condition,
-                then_block,
-                else_block,
-            } => {
-                self.generate_if_statement(condition, then_block, else_block.as_ref().map(Vec::as_slice))?;
-                Ok(())
-            }
-
             StatementKind::While { condition, body } => {
-                self.generate_while_loop(condition, body)?;
-                Ok(())
+                self.generate_while_loop(condition, body)
             }
-
-            StatementKind::For {
-                init,
-                condition,
-                increment,
-                body,
-            } => {
-                self.generate_for_loop(init.clone(), condition.as_ref(), increment.clone(), body)?;
-                Ok(())
+            StatementKind::For { init, condition, increment, body } => {
+                self.generate_for_loop(init.clone(), condition.as_ref(), increment.clone(), body)
             }
-
-            StatementKind::Block(statements) => {
-                self.enter_scope();
-                for stmt in statements {
-                    self.generate_statement(stmt)?;
-                }
-                self.exit_scope();
-                Ok(())
-            }
+            StatementKind::Block(statements) => self.generate_block(statements),
         }
+    }
+
+    fn generate_expression_statement(&mut self, expr: &Expression) -> Result<(), CodegenError> {
+        if let ExprKind::FunctionCall { name, args } = &expr.kind {
+            self.generate_function_call_statement(name, args, expr.pos)
+        } else {
+            self.generate_expression(expr)?;
+            Ok(())
+        }
+    }
+
+    fn generate_var_decl(
+        &mut self,
+        pos: crate::lexer::Position,
+        var_type: &LangType,
+        name: &str,
+        initializer: Option<&Expression>,
+    ) -> Result<(), CodegenError> {
+        let alloca = self
+            .lookup_variable(name)
+            .ok_or_else(|| CodegenError::UndefinedVariable(name.to_string(), pos))?;
+
+        if var_type.is_array() {
+            return Ok(());
+        }
+
+        let llvm_type = lang_type_to_llvm(self.context, var_type)?;
+
+        if let Some(init_expr) = initializer {
+            let mut init_value = self.generate_expression(init_expr)?;
+            if init_value.get_type() != llvm_type {
+                init_value = self.cast_value(init_value, llvm_type, &init_expr.expr_type)?;
+            }
+            self.builder.build_store(alloca, init_value)?;
+        } else {
+            self.builder.build_store(alloca, llvm_type.const_zero())?;
+        }
+
+        Ok(())
+    }
+
+    fn generate_var_assign(
+        &mut self,
+        pos: crate::lexer::Position,
+        name: &str,
+        value: &Expression,
+    ) -> Result<(), CodegenError> {
+        let var_ptr = self
+            .lookup_variable(name)
+            .ok_or_else(|| CodegenError::UndefinedVariable(name.to_string(), pos))?;
+
+        let var_type = self
+            .lookup_variable_type(name)
+            .ok_or_else(|| CodegenError::UndefinedVariable(name.to_string(), pos))?;
+
+        let mut value_llvm = self.generate_expression(value)?;
+        if value_llvm.get_type() != var_type {
+            value_llvm = self.cast_value(value_llvm, var_type, &value.expr_type)?;
+        }
+
+        self.builder.build_store(var_ptr, value_llvm)?;
+        Ok(())
+    }
+
+    fn generate_deref_assign(
+        &mut self,
+        target: &Expression,
+        value: &Expression,
+    ) -> Result<(), CodegenError> {
+        match &target.kind {
+            ExprKind::Dereference(ptr_expr) => {
+                let ptr = self.generate_expression(ptr_expr)?;
+                let value_llvm = self.generate_expression(value)?;
+                self.builder.build_store(ptr.into_pointer_value(), value_llvm)?;
+                Ok(())
+            }
+            _ => Err(CodegenError::InvalidOperation(
+                "DerefAssign target must be a dereference expression".to_string(),
+                target.pos,
+            )),
+        }
+    }
+
+    fn generate_return(&mut self, expr: Option<&Expression>) -> Result<(), CodegenError> {
+        if let Some(expr) = expr {
+            let value = self.generate_expression(expr)?;
+            self.builder.build_return(Some(&value))?;
+        } else {
+            self.builder.build_return(None)?;
+        }
+        Ok(())
+    }
+
+    fn generate_block(&mut self, statements: &[Statement]) -> Result<(), CodegenError> {
+        self.enter_scope();
+        for stmt in statements {
+            self.generate_statement(stmt)?;
+        }
+        self.exit_scope();
+        Ok(())
     }
 
     /// Generate an if statement
