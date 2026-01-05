@@ -15,7 +15,14 @@ struct FunctionSig {
 ///
 /// Works in two phases:
 /// 1. Collect phase: Walk the AST and collect type constraints
-/// 2. Check phase: Verify all constraints and report errors
+/// 2. Check & Fix phase: Verify all constraints and report fatal errors.
+///    Where possible, apply implicit conversions (TODO).
+/// 
+/// TODO: notes on what needs to be done next:
+/// - Refine arithmetic rules (e.g., pointer arithmetic MUST work correctly)
+/// - Implement implicit conversions where applicable.
+///   Do note that array variables will have to decay and thus the TODO
+///   for better scope handling must be completed first.
 pub struct TypeChecker {
     /// Known function signatures
     functions: HashMap<String, FunctionSig>,
