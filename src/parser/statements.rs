@@ -23,6 +23,12 @@ impl Parser {
             // For loop
             TokenKind::Keyword(Keyword::For) => self.parse_for_statement(),
 
+            // Break statement
+            TokenKind::Keyword(Keyword::Break) => self.parse_break_statement(),
+
+            // Continue statement
+            TokenKind::Keyword(Keyword::Continue) => self.parse_continue_statement(),
+
             // Variable declaration (starts with type)
             TokenKind::LangType(_) => self.parse_var_decl_or_assignment(),
 
@@ -191,6 +197,22 @@ impl Parser {
             StatementKind::While { condition, body },
             pos,
         ))
+    }
+
+    /// Parse a break statement
+    fn parse_break_statement(&mut self) -> Result<Statement, ParserError> {
+        let pos = self.peek().pos;
+        self.advance(); // consume 'break'
+        self.match_token(&[TokenKind::Semicolon, TokenKind::Newline]);
+        Ok(Statement::new(StatementKind::Break, pos))
+    }
+
+    /// Parse a continue statement
+    fn parse_continue_statement(&mut self) -> Result<Statement, ParserError> {
+        let pos = self.peek().pos;
+        self.advance(); // consume 'continue'
+        self.match_token(&[TokenKind::Semicolon, TokenKind::Newline]);
+        Ok(Statement::new(StatementKind::Continue, pos))
     }
 
     /// Parse a for loop

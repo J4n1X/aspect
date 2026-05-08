@@ -8,6 +8,7 @@ use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::values::{
     BasicValueEnum, FunctionValue, IntValue, PointerValue,
 };
+use inkwell::basic_block::BasicBlock;
 use inkwell::{AddressSpace, OptimizationLevel};
 use inkwell::IntPredicate;
 use std::collections::HashMap;
@@ -19,7 +20,20 @@ use crate::parser::{
     Statement, StatementKind,
 };
 use crate::parser::LangType;
-use std::collections::HashSet;
+
+/// Info for a local variable in a scope
+struct LocalVar<'ctx> {
+    ptr: PointerValue<'ctx>,
+    llvm_type: BasicTypeEnum<'ctx>,
+    lang_type: LangType,
+}
+
+/// Info for a global variable
+struct GlobalVarInfo<'ctx> {
+    ptr: PointerValue<'ctx>,
+    llvm_type: BasicTypeEnum<'ctx>,
+    lang_type: LangType,
+}
 
 pub struct CodeGenerator<'ctx> {
     context: &'ctx Context,
@@ -27,30 +41,19 @@ pub struct CodeGenerator<'ctx> {
     builder: Builder<'ctx>,
     target: Target,
 
-    // Track function declarations
     functions: HashMap<String, FunctionValue<'ctx>>,
 
-    // Track local variables (stack allocations)
-    // We use a Vec of HashMaps to handle nested scopes
-    variables: Vec<HashMap<String, PointerValue<'ctx>>>,
+    // Unified local variable scope stack (RT-11: merged variables + variable_types + array tracking)
+    variables: Vec<HashMap<String, LocalVar<'ctx>>>,
 
-    // Track variable types for implicit casting
-    variable_types: Vec<HashMap<String, BasicTypeEnum<'ctx>>>,
+    // Global variables (unified tracking)
+    global_variables: HashMap<String, GlobalVarInfo<'ctx>>,
 
-    // Track which variables are arrays (for array-to-pointer decay)
-    array_variables: HashSet<String>,
-
-    // Track global variables
-    global_variables: HashMap<String, PointerValue<'ctx>>,
-
-    // Track global variable types for implicit casting
-    global_variable_types: HashMap<String, BasicTypeEnum<'ctx>>,
-
-    // Track which global variables are arrays
-    global_array_variables: HashSet<String>,
-
-    // Current function being generated
     current_function: Option<FunctionValue<'ctx>>,
+
+    // Loop stack for break/continue support (RT-4)
+    // Each entry is (break_bb, continue_bb)
+    loop_stack: Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>,
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -77,13 +80,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             builder,
             target,
             functions: HashMap::new(),
-            variables: vec![HashMap::new()], // Start with global scope
-            variable_types: vec![HashMap::new()], // Start with global scope
-            array_variables: HashSet::new(),
+            variables: vec![HashMap::new()],
             global_variables: HashMap::new(),
-            global_variable_types: HashMap::new(),
-            global_array_variables: HashSet::new(),
             current_function: None,
+            loop_stack: Vec::new(),
         }
     }
 
@@ -162,46 +162,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(function)
     }
 
-    /// Collect all variable declarations from a list of statements (recursive)
-    /// Returns a vector of (name, type) pairs for all variables that need to be allocated
-    fn collect_variable_declarations(statements: &[Statement]) -> Vec<(String, LangType)> {
-        let mut vars = Vec::new();
-        
-        for stmt in statements {
-            match &stmt.kind {
-                StatementKind::VarDecl { var_type, name, .. } => {
-                    vars.push((name.clone(), *var_type));
-                }
-                StatementKind::Block(inner_stmts) => {
-                    vars.extend(Self::collect_variable_declarations(inner_stmts));
-                }
-                StatementKind::If { then_block, else_block, .. } => {
-                    vars.extend(Self::collect_variable_declarations(then_block));
-                    if let Some(else_stmts) = else_block {
-                        vars.extend(Self::collect_variable_declarations(else_stmts));
-                    }
-                }
-                StatementKind::While { body, .. } => {
-                    vars.extend(Self::collect_variable_declarations(body));
-                }
-                StatementKind::For { init, body, .. } => {
-                    // Check if init is a VarDecl
-                    if let Some(init_stmt) = init {
-                        if let StatementKind::VarDecl { var_type, name, .. } = &init_stmt.kind {
-                            vars.push((name.clone(), *var_type));
-                        }
-                    }
-                    vars.extend(Self::collect_variable_declarations(body));
-                }
-                // Other statement kinds don't contain variable declarations
-                _ => {}
-            }
-        }
-        
-        vars
-    }
-
-    /// Generate a function with its body
+    /// Generate code for a statement
     fn generate_function(&mut self, func: &Function) -> Result<(), CodegenError> {
         let function = *self.functions.get(&func.proto.name).ok_or_else(|| {
             CodegenError::UndefinedFunction(func.proto.name.clone(), func.proto.pos)
@@ -216,58 +177,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Enter function scope
         self.enter_scope();
 
-        // Allocate space for parameters and store them
+        // Allocate space for parameters and store them (in the entry block)
         for (i, (param_type, param_name)) in func.proto.params.iter().enumerate() {
             let param_value = function.get_nth_param(u32::try_from(i).expect("Parameter index out of bounds")).unwrap();
             let param_llvm_type = lang_type_to_llvm(self.context, param_type)?;
 
-            // Allocate stack space for parameter
-            let alloca = self
-                .builder
-                .build_alloca(param_llvm_type, param_name)
-                ?;
+            let alloca = self.builder.build_alloca(param_llvm_type, param_name)?;
+            self.builder.build_store(alloca, param_value)?;
 
-            // Store parameter value
-            self.builder
-                .build_store(alloca, param_value)
-                ?;
-
-            // Add to variables
-            self.add_variable(param_name.clone(), alloca, param_llvm_type);
+            self.add_variable(param_name.clone(), alloca, param_llvm_type, *param_type);
         }
 
-        // Clear array variables tracking for this function
-        self.array_variables.clear();
-
-        // Pre-allocate ALL local variables at entry block
-        // This is required by LLVM for proper optimization (mem2reg pass)
-        let local_vars = Self::collect_variable_declarations(&func.body);
-        for (var_name, var_type) in &local_vars {
-            let llvm_type = if var_type.is_array() {
-                // For array types, allocate the actual array
-                // Track that this variable is an array
-                self.array_variables.insert(var_name.clone());
-                lang_type_to_llvm_array(self.context, var_type)?.into()
-            } else {
-                lang_type_to_llvm(self.context, var_type)?
-            };
-            
-            let alloca = self
-                .builder
-                .build_alloca(llvm_type, var_name)
-                ?;
-            
-            // For array types, store the decayed pointer type in the variable map
-            let stored_type = if var_type.is_array() {
-                self.context.ptr_type(AddressSpace::default()).into()
-            } else {
-                llvm_type
-            };
-            
-            self.add_variable(var_name.clone(), alloca, stored_type);
-        }
-
-        // Generate function body
+        // Generate function body (variables are allocated at their declaration site)
         for stmt in &func.body {
             self.generate_statement(stmt)?;
         }
@@ -275,19 +196,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         // If function doesn't have an explicit return, add one
         if !self.block_has_terminator() {
             if is_void_type(&func.proto.return_type) {
-                self.builder
-                    .build_return(None)
-                    ?;
+                self.builder.build_return(None)?;
             } else {
-                // Return a zero value for non-void functions without explicit return
                 let zero = self.get_zero_value(&func.proto.return_type)?;
-                self.builder
-                    .build_return(Some(&zero))
-                    ?;
+                self.builder.build_return(Some(&zero))?;
             }
         }
 
-        // Exit function scope
         self.exit_scope();
         self.current_function = None;
 
@@ -296,8 +211,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Generate a global variable
     fn generate_global_variable(&mut self, global: &GlobalVar) -> Result<(), CodegenError> {
-        // Check if this is an array type
-        let (global_type, is_array) = if global.var_type.is_array() {
+        let (global_type, _is_array) = if global.var_type.is_array() {
             (lang_type_to_llvm_array(self.context, &global.var_type)?.into(), true)
         } else {
             (lang_type_to_llvm(self.context, &global.var_type)?, false)
@@ -307,29 +221,21 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.module
                 .add_global(global_type, Some(AddressSpace::default()), &global.name);
 
-        // Set initializer
         if let Some(init_expr) = &global.initializer {
-            // For now, global initializers must be constants
-            // This is a simplification - LLVM requires constant expressions for globals
-
-            // TODO: Handle non-constant initializers via a "preamble"
-            //       which is called before main to set up globals
             let init_value = self.generate_constant_expression(init_expr)?;
             global_var.set_initializer(&init_value);
         } else {
-            // Initialize to zero
             global_var.set_initializer(&global_type.const_zero());
         }
 
-        // Track array variables for array-to-pointer decay
-        if is_array {
-            self.global_array_variables.insert(global.name.clone());
-        }
-
-        self.global_variables
-            .insert(global.name.clone(), global_var.as_pointer_value());
-        self.global_variable_types
-            .insert(global.name.clone(), global_type);
+        self.global_variables.insert(
+            global.name.clone(),
+            GlobalVarInfo {
+                ptr: global_var.as_pointer_value(),
+                llvm_type: global_type,
+                lang_type: global.var_type,
+            },
+        );
         Ok(())
     }
 
@@ -345,9 +251,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         global_string.set_initializer(&string_value);
         global_string.set_constant(true);
 
-        // Store in global variables with special naming
-        self.global_variables
-            .insert(string_name, global_string.as_pointer_value());
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        self.global_variables.insert(
+            string_name,
+            GlobalVarInfo {
+                ptr: global_string.as_pointer_value(),
+                llvm_type: ptr_ty.into(),
+                lang_type: LangType::new(TypeBase::UInt, 8, 1, false),
+            },
+        );
     }
 
     /// Generate code for a statement
@@ -374,6 +286,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.generate_for_loop(init.clone(), condition.as_ref(), increment.clone(), body)
             }
             StatementKind::Block(statements) => self.generate_block(statements),
+            StatementKind::Break => {
+                let (break_bb, _) = self.loop_stack.last()
+                    .ok_or_else(|| CodegenError::InvalidOperation(
+                        "'break' outside of loop".to_string(), stmt.pos,
+                    ))?;
+                self.builder.build_unconditional_branch(*break_bb)?;
+                let dead_bb = self.context.append_basic_block(
+                    self.current_function.unwrap(), "break.dead",
+                );
+                self.builder.position_at_end(dead_bb);
+                Ok(())
+            }
+            StatementKind::Continue => {
+                let (_, continue_bb) = self.loop_stack.last()
+                    .ok_or_else(|| CodegenError::InvalidOperation(
+                        "'continue' outside of loop".to_string(), stmt.pos,
+                    ))?;
+                self.builder.build_unconditional_branch(*continue_bb)?;
+                let dead_bb = self.context.append_basic_block(
+                    self.current_function.unwrap(), "continue.dead",
+                );
+                self.builder.position_at_end(dead_bb);
+                Ok(())
+            }
         }
     }
 
@@ -393,21 +329,58 @@ impl<'ctx> CodeGenerator<'ctx> {
         name: &str,
         initializer: Option<&Expression>,
     ) -> Result<(), CodegenError> {
-        let alloca = self
-            .lookup_variable(name)
-            .ok_or_else(|| CodegenError::UndefinedVariable(name.to_string(), pos))?;
+        let llvm_type = if var_type.is_array() {
+            lang_type_to_llvm_array(self.context, var_type)?.into()
+        } else {
+            lang_type_to_llvm(self.context, var_type)?
+        };
+
+        // Allocate in the entry block for mem2reg compatibility (RT-1 fix)
+        let function = self.current_function
+            .ok_or_else(|| CodegenError::UnexpectedStatement(pos))?;
+        let entry_block = function.get_first_basic_block()
+            .ok_or_else(|| CodegenError::UnexpectedStatement(pos))?;
+        let current_block = self.builder.get_insert_block().unwrap();
+
+        // Position at the start of the entry block (before any instructions/terminators)
+        if let Some(first_instr) = entry_block.get_first_instruction() {
+            self.builder.position_before(&first_instr);
+        } else {
+            self.builder.position_at_end(entry_block);
+        }
+        let alloca = self.builder.build_alloca(llvm_type, name)?;
+        self.builder.position_at_end(current_block);
+
+        // Store in scope with LangType for array tracking (RT-2 fix)
+        self.add_variable(name.to_string(), alloca, llvm_type, *var_type);
 
         if var_type.is_array() {
             return Ok(());
         }
 
-        let llvm_type = lang_type_to_llvm(self.context, var_type)?;
-
         if let Some(init_expr) = initializer {
-            let mut init_value = self.generate_expression(init_expr)?;
-            if init_value.get_type() != llvm_type {
-                init_value = self.cast_value(init_value, llvm_type, &init_expr.expr_type)?;
-            }
+            // For integer/float literals assigned to numeric types, generate with
+            // the target type directly so the literal type matches its context.
+            // Skip for pointer/array targets — those need the default path.
+            let init_value = match &init_expr.kind {
+                ExprKind::Literal(lit @ LiteralValue::Integer(_))
+                    if var_type.pointer_depth == 0 && !var_type.is_array() =>
+                {
+                    self.generate_literal_typed(lit, var_type, init_expr.pos)?
+                }
+                ExprKind::Literal(lit @ LiteralValue::Float(_))
+                    if var_type.pointer_depth == 0 && !var_type.is_array() =>
+                {
+                    self.generate_literal_typed(lit, var_type, init_expr.pos)?
+                }
+                _ => {
+                    let mut val = self.generate_expression(init_expr)?;
+                    if val.get_type() != llvm_type {
+                        val = self.cast_value(val, llvm_type, &init_expr.expr_type, var_type)?;
+                    }
+                    val
+                }
+            };
             self.builder.build_store(alloca, init_value)?;
         } else {
             self.builder.build_store(alloca, llvm_type.const_zero())?;
@@ -422,18 +395,33 @@ impl<'ctx> CodeGenerator<'ctx> {
         name: &str,
         value: &Expression,
     ) -> Result<(), CodegenError> {
-        let var_ptr = self
-            .lookup_variable(name)
+        let var_info = self
+            .lookup_var_info(name)
             .ok_or_else(|| CodegenError::UndefinedVariable(name.to_string(), pos))?;
 
-        let var_type = self
-            .lookup_variable_type(name)
-            .ok_or_else(|| CodegenError::UndefinedVariable(name.to_string(), pos))?;
+        let var_ptr = var_info.ptr;
+        let var_type = var_info.llvm_type;
+        let var_lang_type = var_info.lang_type;
 
-        let mut value_llvm = self.generate_expression(value)?;
-        if value_llvm.get_type() != var_type {
-            value_llvm = self.cast_value(value_llvm, var_type, &value.expr_type)?;
-        }
+        let value_llvm = match &value.kind {
+            ExprKind::Literal(lit @ LiteralValue::Integer(_))
+                if var_lang_type.pointer_depth == 0 && !var_lang_type.is_array() =>
+            {
+                self.generate_literal_typed(lit, &var_lang_type, value.pos)?
+            }
+            ExprKind::Literal(lit @ LiteralValue::Float(_))
+                if var_lang_type.pointer_depth == 0 && !var_lang_type.is_array() =>
+            {
+                self.generate_literal_typed(lit, &var_lang_type, value.pos)?
+            }
+            _ => {
+                let mut val = self.generate_expression(value)?;
+                if val.get_type() != var_type {
+                    val = self.cast_value(val, var_type, &value.expr_type, &var_lang_type)?;
+                }
+                val
+            }
+        };
 
         self.builder.build_store(var_ptr, value_llvm)?;
         Ok(())
@@ -545,18 +533,17 @@ impl<'ctx> CodeGenerator<'ctx> {
         let body_bb = self.context.append_basic_block(function, "while.body");
         let end_bb = self.context.append_basic_block(function, "while.end");
 
+        // Push loop context for break/continue (RT-4)
+        self.loop_stack.push((end_bb, cond_bb));
+
         // Jump to condition
-        self.builder
-            .build_unconditional_branch(cond_bb)
-            ?;
+        self.builder.build_unconditional_branch(cond_bb)?;
 
         // Generate condition
         self.builder.position_at_end(cond_bb);
         let cond_value = self.generate_expression(condition)?;
         let cond_int = self.value_to_bool(cond_value)?;
-        self.builder
-            .build_conditional_branch(cond_int, body_bb, end_bb)
-            ?;
+        self.builder.build_conditional_branch(cond_int, body_bb, end_bb)?;
 
         // Generate body
         self.builder.position_at_end(body_bb);
@@ -564,12 +551,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.generate_statement(stmt)?;
         }
         if !self.block_has_terminator() {
-            self.builder
-                .build_unconditional_branch(cond_bb)
-                ?;
+            self.builder.build_unconditional_branch(cond_bb)?;
         }
 
-        // Continue after loop
+        // Pop loop context and continue after loop
+        self.loop_stack.pop();
         self.builder.position_at_end(end_bb);
 
         Ok(())
@@ -600,10 +586,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         let inc_bb = self.context.append_basic_block(function, "for.inc");
         let end_bb = self.context.append_basic_block(function, "for.end");
 
+        // Push loop context for break/continue (RT-4)
+        // break jumps to end_bb, continue jumps to inc_bb
+        self.loop_stack.push((end_bb, inc_bb));
+
         // Jump to condition
-        self.builder
-            .build_unconditional_branch(cond_bb)
-            ?;
+        self.builder.build_unconditional_branch(cond_bb)?;
 
         // Generate condition
         self.builder.position_at_end(cond_bb);
@@ -611,12 +599,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             let cond_val = self.generate_expression(cond_expr)?;
             self.value_to_bool(cond_val)?
         } else {
-            // No condition means infinite loop (true)
             self.context.bool_type().const_all_ones()
         };
-        self.builder
-            .build_conditional_branch(cond_value, body_bb, end_bb)
-            ?;
+        self.builder.build_conditional_branch(cond_value, body_bb, end_bb)?;
 
         // Generate body
         self.builder.position_at_end(body_bb);
@@ -624,9 +609,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.generate_statement(stmt)?;
         }
         if !self.block_has_terminator() {
-            self.builder
-                .build_unconditional_branch(inc_bb)
-                ?;
+            self.builder.build_unconditional_branch(inc_bb)?;
         }
 
         // Generate increment
@@ -634,11 +617,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         if let Some(inc_stmt) = increment {
             self.generate_statement(&inc_stmt)?;
         }
-        self.builder
-            .build_unconditional_branch(cond_bb)
-            ?;
+        self.builder.build_unconditional_branch(cond_bb)?;
 
-        // Continue after loop
+        // Pop loop context and continue after loop
+        self.loop_stack.pop();
         self.builder.position_at_end(end_bb);
 
         // Exit loop scope
@@ -656,21 +638,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             ExprKind::Literal(lit) => self.generate_literal(lit, &expr.expr_type),
 
             ExprKind::Variable(name) => {
-                let var_ptr = self
-                    .lookup_variable(name)
+                let var_info = self
+                    .lookup_var_info(name)
                     .ok_or_else(|| CodegenError::UndefinedVariable(name.clone(), expr.pos))?;
 
-                // Check if this is an array variable - if so, return the pointer directly
-                // (array-to-pointer decay)
-                if self.array_variables.contains(name) || self.global_array_variables.contains(name) {
-                    // For arrays, the alloca pointer IS the pointer to the first element
-                    return Ok(var_ptr.into());
+                // Array-to-pointer decay (RT-2: use lang_type instead of HashSet)
+                if var_info.lang_type.is_array() {
+                    return Ok(var_info.ptr.into());
                 }
 
-                let var_type = lang_type_to_llvm(self.context, &expr.expr_type)?;
-
-                Ok(self.builder
-                    .build_load(var_type, var_ptr, name)?)
+                Ok(self.builder.build_load(var_info.llvm_type, var_info.ptr, name)?)
             }
 
             ExprKind::Binary { left, op, right } => self.generate_binary_op(left, op, right),
@@ -678,14 +655,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             ExprKind::Comparison { left, op, right } => self.generate_comparison(left, op, right),
 
             ExprKind::Reference(expr) => {
-                // Get the address of the expression
                 match &expr.kind {
                     ExprKind::Variable(name) => {
-                        let var_ptr = self.lookup_variable(name)
-                        .ok_or_else(|| {
-                            CodegenError::UndefinedVariable(name.clone(), expr.pos)
-                        })?;
-                        Ok(var_ptr.into())
+                        let var_info = self.lookup_var_info(name)
+                            .ok_or_else(|| {
+                                CodegenError::UndefinedVariable(name.clone(), expr.pos)
+                            })?;
+                        Ok(var_info.ptr.into())
                     }
                     ExprKind::Dereference(inner) => {
                         // &*ptr = ptr
@@ -729,10 +705,86 @@ impl<'ctx> CodeGenerator<'ctx> {
             ExprKind::Alloc { alloc_type, count } => {
                 self.generate_alloc(alloc_type, count)
             }
+
+            ExprKind::UnaryNot(inner) => {
+                let val = self.generate_expression(inner)?.into_int_value();
+                let zero = val.get_type().const_zero();
+                let cmp = self.builder.build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    val,
+                    zero,
+                    "nottmp",
+                )?;
+                Ok(self.builder.build_int_z_extend(cmp, self.context.i32_type(), "nottmp_ext")?.into())
+            }
+
+            ExprKind::BitwiseNot(inner) => {
+                let val = self.generate_expression(inner)?.into_int_value();
+                Ok(self.builder.build_not(val, "nottmp")?.into())
+            }
         }
     }
 
-    /// Generate a literal value
+    /// Generate a literal value, using the given type for the literal.
+    /// Includes overflow detection for integer literals.
+    #[allow(clippy::cast_sign_loss)]
+    fn generate_literal_typed(
+        &self,
+        lit: &LiteralValue,
+        ty: &crate::lexer::LangType,
+        pos: crate::lexer::Position,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        match lit {
+            LiteralValue::Integer(val) => {
+                let llvm_type = lang_type_to_llvm(self.context, ty)?;
+                match llvm_type {
+                    BasicTypeEnum::IntType(int_ty) => {
+                        let bits = int_ty.get_bit_width();
+                        if bits < 64 {
+                            let fits = if matches!(ty.base, TypeBase::SInt) {
+                                let min = -(1i64 << (bits - 1));
+                                let max = (1i64 << (bits - 1)) - 1;
+                                *val >= min && *val <= max
+                            } else {
+                                *val >= 0 && (*val as u64) < (1u64 << bits)
+                            };
+                            if !fits {
+                                return Err(CodegenError::TypeError(
+                                    format!("integer literal {} overflows {}", val, ty),
+                                    pos,
+                                ));
+                            }
+                        }
+                        Ok(int_ty.const_int(*val as u64, true).into())
+                    }
+                    _ => Err(CodegenError::TypeError(
+                        "Integer literal must have integer type".to_string(),
+                        pos,
+                    )),
+                }
+            }
+            LiteralValue::Float(val) => {
+                let llvm_type = lang_type_to_llvm(self.context, ty)?;
+                match llvm_type {
+                    BasicTypeEnum::FloatType(float_ty) => Ok(float_ty.const_float(*val).into()),
+                    _ => Err(CodegenError::TypeError(
+                        "Float literal must have float type".to_string(),
+                        pos,
+                    )),
+                }
+            }
+            LiteralValue::String(index) => {
+                let string_name = format!(".str.{index}");
+                let global_info = self.global_variables.get(&string_name)
+                    .expect("Internal error: String literal global not found");
+                let i8_ptr_type = self.context.ptr_type(AddressSpace::default());
+                let casted = self.builder.build_pointer_cast(global_info.ptr, i8_ptr_type, "str")?;
+                Ok(casted.into())
+            }
+        }
+    }
+
+    /// Generate a literal value (default path, no overflow checking)
     #[allow(clippy::cast_sign_loss)]
     fn generate_literal(
         &self,
@@ -765,17 +817,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
 
             LiteralValue::String(index) => {
-                // Look up the string global
                 let string_name = format!(".str.{index}");
-                let global_ptr = self.global_variables.get(&string_name)
+                let global_info = self.global_variables.get(&string_name)
                     .expect("Internal error: String literal global not found");
 
-                // Cast to i8*
                 let i8_ptr_type = self.context.ptr_type(AddressSpace::default());
                 let casted = self
                     .builder
-                    .build_pointer_cast(*global_ptr, i8_ptr_type, "str")
-                    ?;
+                    .build_pointer_cast(global_info.ptr, i8_ptr_type, "str")?;
 
                 Ok(casted.into())
             }
@@ -789,8 +838,33 @@ impl<'ctx> CodeGenerator<'ctx> {
         right: &Expression,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         let is_signed = matches!(left.expr_type.base, TypeBase::SInt);
-        let left_int = self.generate_expression(left)?.into_int_value();
-        let right_int = self.generate_expression(right)?.into_int_value();
+        let mut left_int = self.generate_expression(left)?.into_int_value();
+        let mut right_int = self.generate_expression(right)?.into_int_value();
+
+        // Ensure both integers have the same bit width
+        if left_int.get_type().get_bit_width() != right_int.get_type().get_bit_width() {
+            let left_bits = left_int.get_type().get_bit_width();
+            let right_bits = right_int.get_type().get_bit_width();
+            let right_is_signed = matches!(right.expr_type.base, TypeBase::SInt);
+            if left_bits > right_bits {
+                eprintln!("warning: implicit cast: {} ({}-bit) widened to {}-bit to match left operand in binary expression at {}:{}",
+                    right.expr_type, right_bits, left_bits, right.pos.line, right.pos.column);
+                right_int = if right_is_signed {
+                    self.builder.build_int_s_extend(right_int, left_int.get_type(), "sext")?
+                } else {
+                    self.builder.build_int_z_extend(right_int, left_int.get_type(), "zext")?
+                };
+            } else {
+                eprintln!("warning: implicit cast: {} ({}-bit) widened to {}-bit to match right operand in binary expression at {}:{}",
+                    left.expr_type, left_bits, right_bits, left.pos.line, left.pos.column);
+                left_int = if is_signed {
+                    self.builder.build_int_s_extend(left_int, right_int.get_type(), "sext")?
+                } else {
+                    self.builder.build_int_z_extend(left_int, right_int.get_type(), "zext")?
+                };
+            }
+        }
+
         let res = match op {
             BinaryOp::Add => self
                 .builder
@@ -852,6 +926,58 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .build_right_shift(left_int, right_int, false, "lshr")
                         .map(Into::into)?
                 }
+            }
+            BinaryOp::LogicalAnd => {
+                let is_zero = self.builder.build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    left_int,
+                    left_int.get_type().const_zero(),
+                    "land_l",
+                )?;
+                let right_is_nonzero = self.builder.build_int_compare(
+                    inkwell::IntPredicate::NE,
+                    right_int,
+                    right_int.get_type().const_zero(),
+                    "land_r",
+                )?;
+                let i1_false = self.context.bool_type().const_int(0, false);
+                let result = self.builder.build_select(
+                    is_zero,
+                    i1_false,
+                    right_is_nonzero,
+                    "landtmp",
+                )?;
+                self.builder.build_int_z_extend(
+                    result.into_int_value(),
+                    self.context.i32_type(),
+                    "landtmp_ext",
+                )?.into()
+            }
+            BinaryOp::LogicalOr => {
+                let is_nonzero = self.builder.build_int_compare(
+                    inkwell::IntPredicate::NE,
+                    left_int,
+                    left_int.get_type().const_zero(),
+                    "lor_l",
+                )?;
+                let right_is_nonzero = self.builder.build_int_compare(
+                    inkwell::IntPredicate::NE,
+                    right_int,
+                    right_int.get_type().const_zero(),
+                    "lor_r",
+                )?;
+                let i1_true = self.context.bool_type().const_int(1, false);
+                let result = self.builder.build_select(
+                    is_nonzero,
+                    i1_true,
+                    right_is_nonzero,
+                    "lortmp",
+                )?;
+                self.builder.build_int_z_extend(
+                    result.into_int_value(),
+                    self.context.i32_type(),
+                    "lortmp_ext",
+                )?.into()
             }
         };
         Ok(res)
@@ -962,8 +1088,23 @@ impl<'ctx> CodeGenerator<'ctx> {
         let is_float = matches!(left.expr_type.base, TypeBase::SFloat);
 
         if is_float {
-            let left_float = left_val.into_float_value();
-            let right_float = right_val.into_float_value();
+            let mut left_float = left_val.into_float_value();
+            let mut right_float = right_val.into_float_value();
+
+            // Ensure both floats have the same type (f32 vs f64)
+            if left_float.get_type() != right_float.get_type() {
+                let left_bits = if left_float.get_type() == self.context.f32_type() { 32 } else { 64 };
+                let right_bits = if right_float.get_type() == self.context.f32_type() { 32 } else { 64 };
+                if left_bits > right_bits {
+                    eprintln!("warning: implicit cast: {} ({}-bit) widened to {}-bit to match left operand in comparison at {}:{}",
+                        right.expr_type, right_bits, left_bits, right.pos.line, right.pos.column);
+                    right_float = self.builder.build_float_ext(right_float, left_float.get_type(), "fpext")?;
+                } else {
+                    eprintln!("warning: implicit cast: {} ({}-bit) widened to {}-bit to match right operand in comparison at {}:{}",
+                        left.expr_type, left_bits, right_bits, left.pos.line, left.pos.column);
+                    left_float = self.builder.build_float_ext(left_float, right_float.get_type(), "fpext")?;
+                }
+            }
 
             let predicate = match op {
                 ComparisonOp::Equal => inkwell::FloatPredicate::OEQ,
@@ -984,9 +1125,33 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .build_int_z_extend(cmp, self.context.i32_type(), "cmp_ext")
                 .map(Into::into)?)
         } else {
-            let left_int = left_val.into_int_value();
-            let right_int = right_val.into_int_value();
+            let mut left_int = left_val.into_int_value();
+            let mut right_int = right_val.into_int_value();
             let is_signed = matches!(left.expr_type.base, TypeBase::SInt);
+
+            // Ensure both integers have the same bit width
+            if left_int.get_type().get_bit_width() != right_int.get_type().get_bit_width() {
+                let left_bits = left_int.get_type().get_bit_width();
+                let right_bits = right_int.get_type().get_bit_width();
+                let right_is_signed = matches!(right.expr_type.base, TypeBase::SInt);
+                if left_bits > right_bits {
+                    eprintln!("warning: implicit cast: {} ({}-bit) widened to {}-bit to match left operand in comparison at {}:{}",
+                        right.expr_type, right_bits, left_bits, right.pos.line, right.pos.column);
+                    right_int = if right_is_signed {
+                        self.builder.build_int_s_extend(right_int, left_int.get_type(), "sext")?
+                    } else {
+                        self.builder.build_int_z_extend(right_int, left_int.get_type(), "zext")?
+                    };
+                } else {
+                    eprintln!("warning: implicit cast: {} ({}-bit) widened to {}-bit to match right operand in comparison at {}:{}",
+                        left.expr_type, left_bits, right_bits, left.pos.line, left.pos.column);
+                    left_int = if is_signed {
+                        self.builder.build_int_s_extend(left_int, right_int.get_type(), "sext")?
+                    } else {
+                        self.builder.build_int_z_extend(left_int, right_int.get_type(), "zext")?
+                    };
+                }
+            }
 
             let predicate = match op {
                 ComparisonOp::Equal => IntPredicate::EQ,
@@ -1096,7 +1261,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         let value = self.generate_expression(expr)?;
         let target_llvm_type = lang_type_to_llvm(self.context, target_type)?;
-        self.cast_value(value, target_llvm_type, &expr.expr_type)
+        self.cast_value(value, target_llvm_type, &expr.expr_type, target_type)
     }
 
     /// Cast a value to a target LLVM type
@@ -1105,6 +1270,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         value: BasicValueEnum<'ctx>,
         target_llvm_type: BasicTypeEnum<'ctx>,
         source_lang_type: &crate::lexer::LangType,
+        target_lang_type: &crate::lexer::LangType,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         // If types already match, no cast needed
         if value.get_type() == target_llvm_type {
@@ -1161,19 +1327,20 @@ impl<'ctx> CodeGenerator<'ctx> {
             });
         }
 
-        // Handle float to int
+        // Handle float to int (RT-3: use target type's signedness)
         if target_is_int && value.is_float_value() {
             let float_val = value.into_float_value();
             let target_int_type = target_llvm_type.into_int_type();
-            // Assume unsigned for now if we don't have type info
-            // TODO: Pass target lang type to know if signed/unsigned
-            return Ok(self.builder
-                .build_float_to_signed_int(
-                    float_val,
-                    target_int_type,
-                    "fptosi",
-                )
-                .map(Into::into)?);
+            let target_is_signed = matches!(target_lang_type.base, TypeBase::SInt);
+            return Ok(if target_is_signed {
+                self.builder
+                    .build_float_to_signed_int(float_val, target_int_type, "fptosi")
+                    .map(Into::into)?
+            } else {
+                self.builder
+                    .build_float_to_unsigned_int(float_val, target_int_type, "fptoui")
+                    .map(Into::into)?
+            });
         }
 
         // Handle pointer to int
@@ -1271,16 +1438,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
 
             LiteralValue::String(index) => {
-                // Look up the string global
                 let string_name = format!(".str.{index}");
-                let global_ptr = self.global_variables.get(&string_name).expect(
+                let global_info = self.global_variables.get(&string_name).expect(
                     "Internal error: String literal global not found",
                 );
 
-                // For constants, we can just use the global pointer directly
-                // Cast to i8* using const_cast
                 let i8_ptr_type = self.context.ptr_type(AddressSpace::default());
-                Ok(global_ptr.const_cast(i8_ptr_type).into())
+                Ok(global_info.ptr.const_cast(i8_ptr_type).into())
             }
         }
     }
@@ -1323,46 +1487,28 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(llvm_type.const_zero())
     }
 
-    // Scope management
+    // Scope management (RT-11: unified variable tracking)
     fn enter_scope(&mut self) {
         self.variables.push(HashMap::new());
-        self.variable_types.push(HashMap::new());
     }
 
     fn exit_scope(&mut self) {
         self.variables.pop();
-        self.variable_types.pop();
     }
 
-    fn add_variable(&mut self, name: String, ptr: PointerValue<'ctx>, ty: BasicTypeEnum<'ctx>) {
+    fn add_variable(&mut self, name: String, ptr: PointerValue<'ctx>, llvm_type: BasicTypeEnum<'ctx>, lang_type: LangType) {
         if let Some(scope) = self.variables.last_mut() {
-            scope.insert(name.clone(), ptr);
-        }
-        if let Some(type_scope) = self.variable_types.last_mut() {
-            type_scope.insert(name, ty);
+            scope.insert(name, LocalVar { ptr, llvm_type, lang_type });
         }
     }
 
-    fn lookup_variable(&self, name: &str) -> Option<PointerValue<'ctx>> {
-        // Search from innermost to outermost scope
+    fn lookup_var_info(&self, name: &str) -> Option<LocalVar<'ctx>> {
         for scope in self.variables.iter().rev() {
-            if let Some(ptr) = scope.get(name) {
-                return Some(*ptr);
+            if let Some(var) = scope.get(name) {
+                return Some(LocalVar { ptr: var.ptr, llvm_type: var.llvm_type, lang_type: var.lang_type });
             }
         }
-        // Check globals
-        self.global_variables.get(name).copied()
-    }
-
-    fn lookup_variable_type(&self, name: &str) -> Option<BasicTypeEnum<'ctx>> {
-        // Search from innermost to outermost scope
-        for scope in self.variable_types.iter().rev() {
-            if let Some(ty) = scope.get(name) {
-                return Some(*ty);
-            }
-        }
-        // Check globals
-        self.global_variable_types.get(name).copied()
+        self.global_variables.get(name).map(|g| LocalVar { ptr: g.ptr, llvm_type: g.llvm_type, lang_type: g.lang_type })
     }
 
     /// Get the LLVM module

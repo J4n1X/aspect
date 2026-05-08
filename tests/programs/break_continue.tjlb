@@ -1,0 +1,35 @@
+# Test break and continue
+fn main() -> i32 {
+    i32 sum = 0
+
+    # Test break: sum 1..5, break at 4
+    for (i32 i = 1; i <= 10; i = i + 1) {
+        if i == 5 {
+            break
+        }
+        sum = sum + i
+    }
+    # sum = 1+2+3+4 = 10
+
+    # Test continue: skip even numbers
+    for (i32 j = 1; j <= 5; j = j + 1) {
+        if j % 2 == 0 {
+            continue
+        }
+        sum = sum + j
+    }
+    # sum = 10 + 1 + 3 + 5 = 19
+
+    # Test break in while loop
+    i32 k = 0
+    while k < 100 {
+        k = k + 1
+        if k == 3 {
+            break
+        }
+    }
+    # k = 3, sum = 19 + 3 = 22
+    sum = sum + k
+
+    return sum  # 22
+}

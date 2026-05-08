@@ -149,3 +149,31 @@ fn test_array_access() {
 
     assert_eq!(result, arg_len, "Expected exit code {arg_len}, got {result}");
 }
+
+#[test]
+fn test_break_continue() {
+    let result = compile_and_run("tests/programs/break_continue.tjlb")
+        .expect("Failed to compile and run break_continue.tjlb");
+    assert_eq!(result, 22, "Expected exit code 22, got {result}");
+}
+
+#[test]
+fn test_logical_ops() {
+    let result = compile_and_run("tests/programs/logical_ops.tjlb")
+        .expect("Failed to compile and run logical_ops.tjlb");
+    assert_eq!(result, 121, "Expected exit code 121, got {result}");
+}
+
+#[test]
+fn test_bitwise_not() {
+    let result = compile_and_run("tests/programs/bitwise_not.tjlb")
+        .expect("Failed to compile and run bitwise_not.tjlb");
+    assert_eq!(result, 42, "Expected exit code 42, got {result}");
+}
+
+#[test]
+fn test_variable_shadowing() {
+    let result = compile_and_run("tests/programs/variable_shadowing.tjlb")
+        .expect("Failed to compile and run variable_shadowing.tjlb");
+    assert_eq!(result, 10, "Expected exit code 10, got {result}");
+}

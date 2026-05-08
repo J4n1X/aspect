@@ -111,7 +111,17 @@ impl Parser {
 
     /// Parse an expression
     pub(crate) fn parse_expression(&mut self) -> Result<Expression, ParserError> {
-        self.parse_comparison()
+        self.parse_logical_or()
+    }
+
+    /// Parse logical OR expressions (||)
+    fn parse_logical_or(&mut self) -> Result<Expression, ParserError> {
+        self.parse_binary_expr(Self::parse_logical_and, &[TokenKind::LogicalOr])
+    }
+
+    /// Parse logical AND expressions (&&)
+    fn parse_logical_and(&mut self) -> Result<Expression, ParserError> {
+        self.parse_binary_expr(Self::parse_comparison, &[TokenKind::LogicalAnd])
     }
 
     /// Parse comparison expressions (==, !=, <, >, <=, >=)
@@ -227,6 +237,8 @@ impl Parser {
             TokenKind::Caret => Ok(BinaryOp::Xor),
             TokenKind::LeftShift => Ok(BinaryOp::LeftShift),
             TokenKind::RightShift => Ok(BinaryOp::RightShift),
+            TokenKind::LogicalAnd => Ok(BinaryOp::LogicalAnd),
+            TokenKind::LogicalOr => Ok(BinaryOp::LogicalOr),
             _ => Err(ParserError::InvalidBinaryOperation(self.peek().pos)),
         }
     }
@@ -323,22 +335,23 @@ impl Parser {
             TokenKind::LogicalNot => {
                 self.advance();
                 let expr = self.parse_unary()?;
-                let zero_pos = pos;
 
-                // Logical not as expr == 0
+                // Logical not returns i32 (boolean as integer)
                 let result_type = LangType::new(TypeBase::SInt, 32, 0, false);
-                let zero = Expression::new(
-                    ExprKind::Literal(LiteralValue::Integer(0)),
-                    result_type,
-                    zero_pos,
-                );
 
                 Ok(Expression::new(
-                    ExprKind::Comparison {
-                        left: Box::new(expr),
-                        op: ComparisonOp::Equal,
-                        right: Box::new(zero),
-                    },
+                    ExprKind::UnaryNot(Box::new(expr)),
+                    result_type,
+                    pos,
+                ))
+            }
+            TokenKind::Tilde => {
+                self.advance();
+                let expr = self.parse_unary()?;
+                let result_type = expr.expr_type;
+
+                Ok(Expression::new(
+                    ExprKind::BitwiseNot(Box::new(expr)),
                     result_type,
                     pos,
                 ))
@@ -458,8 +471,12 @@ impl Parser {
                 let value = *value;
                 self.advance();
 
-                // Default type is i32
-                let expr_type = LangType::new(TypeBase::SInt, 32, 0, false);
+                // Choose the smallest signed type that fits the value
+                let expr_type = if value >= i32::MIN as i64 && value <= i32::MAX as i64 {
+                    LangType::new(TypeBase::SInt, 32, 0, false)
+                } else {
+                    LangType::new(TypeBase::SInt, 64, 0, false)
+                };
 
                 Ok(Expression::new(
                     ExprKind::Literal(LiteralValue::Integer(value)),

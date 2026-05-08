@@ -81,4 +81,10 @@ pub enum TypeCheckError {
         to: LangType,
         position: Position,
     },
+
+    #[error("Cannot assign to const variable '{name}' at {position}")]
+    AssignmentToConst {
+        name: String,
+        position: Position,
+    },
 }

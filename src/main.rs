@@ -178,11 +178,8 @@ fn compile_file(path: &PathBuf, output: Option<&std::path::Path>, print: bool, o
             for error in errors {
                 let _ = writeln!(err_msg, "  - {error}");
             }
-            println!("{err_msg}");
-            
-            // In the future, this should error out, probably, but for now, we just print it out.
-            // anyhow::anyhow!(err_msg)
-        }).ok();
+            anyhow::anyhow!(err_msg)
+        })?;
 
     // Generate LLVM IR
     let context = LLVMContext::create();

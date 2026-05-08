@@ -24,12 +24,18 @@ pub enum BinaryOp {
     Xor,
     LeftShift,
     RightShift,
+
+    // Logical (short-circuit)
+    LogicalAnd,
+    LogicalOr,
 }
 
 impl BinaryOp {
     #[must_use]
     pub fn precedence(&self) -> i32 {
         match self {
+            BinaryOp::LogicalOr => 0,
+            BinaryOp::LogicalAnd => 1,
             BinaryOp::LeftShift | BinaryOp::RightShift => 2,
             BinaryOp::Or => 3,
             BinaryOp::And => 4,
@@ -68,6 +74,8 @@ pub enum ExprKind {
     },
     Reference(Box<Expression>),     // &expr
     Dereference(Box<Expression>),   // *expr
+    UnaryNot(Box<Expression>),      // !expr (logical not)
+    BitwiseNot(Box<Expression>),    // ~expr (bitwise not)
     FunctionCall {
         name: String,
         args: Vec<Expression>,
@@ -135,6 +143,8 @@ pub enum StatementKind {
         target: Expression,  // Must be a dereference expression
         value: Expression,
     },
+    Break,
+    Continue,
 }
 
 /// Statement with position information

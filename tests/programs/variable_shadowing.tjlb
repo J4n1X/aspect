@@ -1,0 +1,14 @@
+# Test variable shadowing (RT-1 fix)
+fn main() -> i32 {
+    i32 x = 10
+
+    {
+        i32 x = 20
+        # inner x = 20
+        x = x + 5
+        # inner x = 25
+    }
+    # outer x should still be 10
+
+    return x  # 10
+}

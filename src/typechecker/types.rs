@@ -118,6 +118,11 @@ pub enum TypeConstraint {
         found: LangType,
         pos: Position,
     },
+    /// Assignment to a const variable
+    AssignmentToConst {
+        name: String,
+        pos: Position,
+    },
 }
 
 /// Context for where a constraint originated (for better error messages)

@@ -130,6 +130,12 @@ impl TypeChecker {
 
             StatementKind::VarAssign { name, value } => {
                 if let Some(var_type) = self.lookup_var(name) {
+                    if var_type.is_const {
+                        self.constraints.push(TypeConstraint::AssignmentToConst {
+                            name: name.clone(),
+                            pos: value.pos,
+                        });
+                    }
                     let value_type = self.resolve_expression_type(value);
                     self.constraints.push(TypeConstraint::Compatible {
                         expected: var_type,
@@ -145,24 +151,14 @@ impl TypeChecker {
                 let target_type = self.resolve_expression_type(target);
                 let value_type = self.resolve_expression_type(value);
 
-                // Target must be a pointer, and value must match pointed-to type
-                if target_type.pointer_depth > 0 {
-                    let pointed_type = LangType {
-                        pointer_depth: target_type.pointer_depth - 1,
-                        ..target_type
-                    };
-                    self.constraints.push(TypeConstraint::Compatible {
-                        expected: pointed_type,
-                        found: value_type,
-                        pos: value.pos,
-                        context: ConstraintContext::Assignment,
-                    });
-                } else {
-                    self.constraints.push(TypeConstraint::Dereference {
-                        operand: target_type,
-                        pos: target.pos,
-                    });
-                }
+                // target_type is already the pointee type (dereferenced).
+                // Pointer validity is checked by resolve_expression_type's Dereference constraint.
+                self.constraints.push(TypeConstraint::Compatible {
+                    expected: target_type,
+                    found: value_type,
+                    pos: value.pos,
+                    context: ConstraintContext::Assignment,
+                });
             }
 
             StatementKind::Return(opt_expr) => {
@@ -267,6 +263,10 @@ impl TypeChecker {
                 // Just resolve the type to collect any constraints within
                 self.resolve_expression_type(expr);
             }
+
+            StatementKind::Break | StatementKind::Continue => {
+                // No type constraints to check for break/continue
+            }
         }
     }
 
@@ -369,6 +369,27 @@ impl TypeChecker {
                 });
                 expr.expr_type
             }
+
+            ExprKind::UnaryNot(inner) => {
+                let inner_type = self.resolve_expression_type(inner);
+                self.constraints.push(TypeConstraint::UnaryOp {
+                    operand: inner_type,
+                    operator: "!".to_string(),
+                    pos: expr.pos,
+                });
+                // Logical not returns i32
+                LangType::new(TypeBase::SInt, 32, 0, false)
+            }
+
+            ExprKind::BitwiseNot(inner) => {
+                let inner_type = self.resolve_expression_type(inner);
+                self.constraints.push(TypeConstraint::UnaryOp {
+                    operand: inner_type,
+                    operator: "~".to_string(),
+                    pos: expr.pos,
+                });
+                expr.expr_type
+            }
         }
     }
 
@@ -423,7 +444,16 @@ impl TypeChecker {
                 operator,
                 pos,
             } => {
-                if !Self::types_compatible(left, right) {
+                // Allow pointer + integer and pointer - integer arithmetic
+                let left_is_ptr = left.pointer_depth > 0 || left.is_array();
+                let right_is_ptr = right.pointer_depth > 0 || right.is_array();
+                let left_is_int = matches!(left.base, TypeBase::SInt | TypeBase::UInt) && left.pointer_depth == 0 && !left.is_array();
+                let right_is_int = matches!(right.base, TypeBase::SInt | TypeBase::UInt) && right.pointer_depth == 0 && !right.is_array();
+
+                let is_ptr_arith = (left_is_ptr && right_is_int) || (left_is_int && right_is_ptr);
+                let is_valid_op = matches!(operator.as_str(), "Add" | "Sub");
+
+                if !(Self::types_compatible(left, right) || (is_ptr_arith && is_valid_op)) {
                     return Err(TypeCheckError::InvalidBinaryOperation {
                         operator: operator.clone(),
                         left: *left,
@@ -524,6 +554,13 @@ impl TypeChecker {
                 }
                 Ok(())
             }
+
+            TypeConstraint::AssignmentToConst { name, pos } => {
+                Err(TypeCheckError::AssignmentToConst {
+                    name: name.clone(),
+                    position: *pos,
+                })
+            }
         }
     }
 
@@ -531,6 +568,21 @@ impl TypeChecker {
     fn types_compatible(expected: &LangType, actual: &LangType) -> bool {
         // Exact match
         if expected == actual {
+            return true;
+        }
+
+        // Array-to-pointer decay: an array T[N] is compatible with T*
+        let decayed_actual = if actual.is_array() {
+            actual.decay_to_pointer()
+        } else {
+            *actual
+        };
+        let decayed_expected = if expected.is_array() {
+            expected.decay_to_pointer()
+        } else {
+            *expected
+        };
+        if decayed_expected == *actual || decayed_actual == *expected || decayed_expected == decayed_actual {
             return true;
         }
 
@@ -545,18 +597,13 @@ impl TypeChecker {
         }
 
         // Numeric types can be implicitly converted between same category
-        if matches!(
+        matches!(
             (&expected.base, &actual.base),
             (
                 TypeBase::SInt | TypeBase::UInt,
                 TypeBase::SInt | TypeBase::UInt
             ) | (TypeBase::SFloat, TypeBase::SFloat)
-        ) {
-            println!("Implicitly converting {actual} to {expected}");
-            true
-        } else {
-            false
-        }
+        )
     }
 
     /// Check if a cast is valid

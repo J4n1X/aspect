@@ -1,0 +1,24 @@
+# Test bitwise NOT operator (~)
+fn main() -> i32 {
+    # ~0xFF = 0xFFFFFF00 for 32-bit
+    # But we only care about the low 8 bits of the exit code
+    # So let's use a simpler test
+
+    # ~0 = -1 (all bits set) for signed
+    # ~255 = -256 for signed 32-bit
+    # Let's test with: ~5 = -6, then negate back and add offset
+
+    i32 x = 5
+    i32 y = ~x
+    # y = ~5 = -6 (in two's complement i32)
+
+    # We need exit code > 0, so let's compute ~(some value) and mask
+    # ~0b1010 = ...11110101 = -11 for signed i32
+    # Use absolute value approach: result = (~5 + 6) + 42
+    i32 result = y + 6
+    # result = 0
+    result = result + 42
+    # result = 42
+
+    return result  # 42
+}

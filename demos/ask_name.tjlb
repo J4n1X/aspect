@@ -1,58 +1,52 @@
-#- 
-This demo will ask you your username and then loop it back.
-It was written to test external function accessibility, pointer arithmetic
-and general function calling flow.
+#-
+  Asks the user for their name and greets them.
+  Demonstrates: extern functions, pointer arithmetic,
+  arrays, string manipulation, loops, and I/O.
 -#
 
-const i32 STDIN = 0
-
 extern fn puts(u8 *str) -> u0
-extern fn read(i32 fd, u8* buf, u64 size) -> i64
+extern fn read(i32 fd, u8 *buf, u64 len) -> i64
 
 fn strlen(u8 *str) -> i32 {
-  i32 counter = 0
-  while(str[counter] != 0 as u8) {
-    counter = counter + 1 
-  }
-  return counter
+    i32 len = 0
+    while str[len] != 0 as u8 {
+        len += 1
+    }
+    return len
 }
 
-fn strcat(u8 *dst, u8* src) -> u8* {
-  while(*dst != 0 as u8) {
-    dst += 1
-  }
-  while(*src != 0 as u8) {
-    *dst = *src
-    src += 1
-    dst += 1
-  }
-  *dst = 0 as u8
-  return dst
+fn strcpy(u8 *dst, u8 *src) -> u8 * {
+    u8 *start = dst
+    while *src != 0 as u8 {
+        *dst = *src
+        dst += 1
+        src += 1
+    }
+    *dst = 0 as u8
+    return start
 }
 
-fn memset(u8 *dst, u64 len, u8 c) -> u0 {
-  for(u64 i = 0; i < len; i += 1 as u64){
-    dst[i] = c
-  }
+fn strcat(u8 *dst, u8 *src) -> u8 * {
+    while *dst != 0 as u8 {
+        dst += 1
+    }
+    strcpy(dst, src)
 }
 
-fn main(i32 argc, i8** argv) -> i32 {
-  const u8 *question = "What is your name?"
-  const u8 *prefix = "Hello, "
+fn main() -> i32 {
+    u8[256] input
+    u8[512] output
 
-  u8[1024] input_buffer
-  memset(&input_buffer as u8*, 1024 as u64, 0 as u8)
+    puts("What is your name?")
 
-  puts(question)
-  
-  i64 read_len = read(STDIN, &input_buffer as u8*, 1024 as u64)
-  input_buffer[read_len - 1 as i64] = 0 as u8
-  
-  u8[1024] response_buffer
-  memset(response_buffer, 1024 as u64, 0 as u8)
-  strcat(response_buffer, prefix)
-  strcat(response_buffer, &input_buffer as u8*)
-  puts(response_buffer)
+    i64 n = read(0, &input as u8*, 255 as u64)
+    if n > 0 && input[n - 1] == 10 as u8 {
+        input[n - 1] = 0 as u8
+    }
 
-  return 0 as i32
+    strcpy(output, "Hello, ")
+    strcat(output, &input as u8*)
+    puts(output)
+
+    return 0
 }

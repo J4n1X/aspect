@@ -1,0 +1,43 @@
+# Test logical operators (&&, ||, !)
+fn main() -> i32 {
+    i32 result = 0
+
+    # Test logical AND (short-circuit)
+    i32 a = 5
+    if a > 0 && a < 10 {
+        result = result + 1
+    }
+    # result = 1
+
+    # Test logical AND false case
+    if a > 10 && a < 20 {
+        result = result + 100  # should not execute
+    }
+    # result = 1
+
+    # Test logical OR
+    if a > 10 || a > 0 {
+        result = result + 10
+    }
+    # result = 11
+
+    # Test logical OR false case
+    if a > 10 || a < 0 {
+        result = result + 100  # should not execute
+    }
+    # result = 11
+
+    # Test logical NOT
+    if !0 {
+        result = result + 100
+    }
+    # result = 111
+
+    # Test logical NOT on comparison
+    if !(a > 10) {
+        result = result + 10
+    }
+    # result = 121
+
+    return result  # 121
+}
