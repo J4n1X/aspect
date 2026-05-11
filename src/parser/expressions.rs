@@ -1,12 +1,51 @@
+use tjlb_macros::parse_rule;
 use crate::lexer::{Token, TokenKind, Keyword, LangType, TypeBase};
-use crate::parser::{Expression, ExprKind, BinaryOp, ComparisonOp, LiteralValue, ParserError};
+use crate::parser::{Expression, ExprKind, BinaryOp, ComparisonOp, LiteralValue, ParserError,
+                    Statement, StatementKind};
 use crate::symbol::table::SymbolTable;
+
+#[derive(Clone, Copy)]
+enum OpKind {
+    Binary(BinaryOp),
+    Comparison(ComparisonOp),
+}
+
+struct InfixEntry {
+    token: TokenKind,
+    op: OpKind,
+    prec: i32,
+    right_assoc: bool,
+}
+
+const INFIX_OPS: &[InfixEntry] = &[
+    InfixEntry { token: TokenKind::LogicalOr,    op: OpKind::Binary(BinaryOp::LogicalOr),              prec: 1,  right_assoc: false },
+    InfixEntry { token: TokenKind::LogicalAnd,   op: OpKind::Binary(BinaryOp::LogicalAnd),             prec: 2,  right_assoc: false },
+    InfixEntry { token: TokenKind::Equal,        op: OpKind::Comparison(ComparisonOp::Equal),          prec: 3,  right_assoc: false },
+    InfixEntry { token: TokenKind::NotEqual,     op: OpKind::Comparison(ComparisonOp::NotEqual),       prec: 3,  right_assoc: false },
+    InfixEntry { token: TokenKind::Less,         op: OpKind::Comparison(ComparisonOp::Less),           prec: 3,  right_assoc: false },
+    InfixEntry { token: TokenKind::Greater,      op: OpKind::Comparison(ComparisonOp::Greater),        prec: 3,  right_assoc: false },
+    InfixEntry { token: TokenKind::LessEqual,    op: OpKind::Comparison(ComparisonOp::LessEqual),      prec: 3,  right_assoc: false },
+    InfixEntry { token: TokenKind::GreaterEqual, op: OpKind::Comparison(ComparisonOp::GreaterEqual),   prec: 3,  right_assoc: false },
+    InfixEntry { token: TokenKind::Pipe,         op: OpKind::Binary(BinaryOp::Or),                     prec: 4,  right_assoc: false },
+    InfixEntry { token: TokenKind::Caret,        op: OpKind::Binary(BinaryOp::Xor),                    prec: 5,  right_assoc: false },
+    InfixEntry { token: TokenKind::Ampersand,    op: OpKind::Binary(BinaryOp::And),                    prec: 6,  right_assoc: false },
+    InfixEntry { token: TokenKind::LeftShift,    op: OpKind::Binary(BinaryOp::LeftShift),              prec: 7,  right_assoc: false },
+    InfixEntry { token: TokenKind::RightShift,   op: OpKind::Binary(BinaryOp::RightShift),             prec: 7,  right_assoc: false },
+    InfixEntry { token: TokenKind::Plus,         op: OpKind::Binary(BinaryOp::Add),                    prec: 10, right_assoc: false },
+    InfixEntry { token: TokenKind::Minus,        op: OpKind::Binary(BinaryOp::Sub),                    prec: 10, right_assoc: false },
+    InfixEntry { token: TokenKind::Asterisk,     op: OpKind::Binary(BinaryOp::Mul),                    prec: 20, right_assoc: false },
+    InfixEntry { token: TokenKind::Slash,        op: OpKind::Binary(BinaryOp::Div),                    prec: 20, right_assoc: false },
+    InfixEntry { token: TokenKind::Percent,      op: OpKind::Binary(BinaryOp::Mod),                    prec: 20, right_assoc: false },
+];
 
 pub struct Parser {
     tokens: Vec<Token>,
-    current: usize,
+    pub(crate) current: usize,
     symbol_table: SymbolTable,
-    string_literals: Vec<String>,
+    pub(crate) string_literals: Vec<String>,
+    pub(crate) context_stack: Vec<&'static str>,
+    pub(crate) errors: Vec<ParserError>,
+    source_file: String,
 }
 
 impl Parser {
@@ -17,6 +56,45 @@ impl Parser {
             current: 0,
             symbol_table: SymbolTable::new(),
             string_literals: Vec::new(),
+            context_stack: Vec::new(),
+            errors: Vec::new(),
+            source_file: String::new(),
+        }
+    }
+
+    /// Set the source file name used in error messages.
+    #[must_use]
+    pub fn with_source_file(mut self, path: impl Into<String>) -> Self {
+        self.source_file = path.into();
+        self
+    }
+
+    /// Format a single error prefixed with the source file and position.
+    #[must_use]
+    pub fn format_error(&self, err: &ParserError) -> String {
+        match err.position() {
+            Some(pos) if !self.source_file.is_empty() =>
+                format!("{}:{}:{}: {}", self.source_file, pos.line, pos.column, err),
+            _ => err.to_string(),
+        }
+    }
+
+    /// Advance past tokens until a safe recovery point.
+    /// Stops BEFORE `}` or statement-starting keywords, AFTER `;`/`\n`.
+    pub(crate) fn synchronize(&mut self) {
+        while !self.is_at_end() {
+            match &self.peek().kind {
+                TokenKind::CloseBrace => return,
+                TokenKind::Keyword(k) if matches!(k,
+                    Keyword::Fn | Keyword::If | Keyword::While | Keyword::For |
+                    Keyword::Return | Keyword::Break | Keyword::Continue
+                ) => return,
+                TokenKind::Newline | TokenKind::Semicolon => {
+                    self.advance();
+                    return;
+                }
+                _ => { self.advance(); }
+            }
         }
     }
 
@@ -45,11 +123,6 @@ impl Parser {
     /// Peek at current token without consuming it
     pub(crate) fn peek(&self) -> &Token {
         &self.tokens[self.current]
-    }
-
-    /// Peek ahead n tokens
-    pub(crate) fn peek_ahead(&self, n: usize) -> Option<&Token> {
-        self.tokens.get(self.current + n)
     }
 
     /// Get previous token
@@ -89,6 +162,19 @@ impl Parser {
         false
     }
 
+    /// Expect a specific keyword and consume it (validates the inner keyword, unlike `expect`)
+    pub(crate) fn expect_keyword(&mut self, keyword: &Keyword, message: &str) -> Result<&Token, ParserError> {
+        if self.check_keyword(keyword) {
+            Ok(self.advance())
+        } else {
+            Err(ParserError::ExpectedToken(
+                message.to_string(),
+                format!("{}", self.peek().kind),
+                self.peek().pos,
+            ))
+        }
+    }
+
     /// Expect a specific token kind and consume it
     pub(crate) fn expect(&mut self, kind: &TokenKind, message: &str) -> Result<&Token, ParserError> {
         if self.check(kind) {
@@ -109,144 +195,63 @@ impl Parser {
         }
     }
 
+    /// True when the current token is a statement terminator or EOF.
+    pub(crate) fn check_terminator(&self) -> bool {
+        matches!(self.peek().kind, TokenKind::Newline | TokenKind::Semicolon)
+            || self.is_at_end()
+    }
+
     /// Parse an expression
     pub(crate) fn parse_expression(&mut self) -> Result<Expression, ParserError> {
-        self.parse_logical_or()
+        self.parse_expr_prec(0)
     }
 
-    /// Parse logical OR expressions (||)
-    fn parse_logical_or(&mut self) -> Result<Expression, ParserError> {
-        self.parse_binary_expr(Self::parse_logical_and, &[TokenKind::LogicalOr])
-    }
+    fn parse_expr_prec(&mut self, min_prec: i32) -> Result<Expression, ParserError> {
+        let mut left = self.parse_cast_or_alloc()?;
 
-    /// Parse logical AND expressions (&&)
-    fn parse_logical_and(&mut self) -> Result<Expression, ParserError> {
-        self.parse_binary_expr(Self::parse_comparison, &[TokenKind::LogicalAnd])
-    }
+        loop {
+            let Some(entry) = INFIX_OPS.iter()
+                .find(|e| self.check(&e.token) && e.prec >= min_prec)
+            else { break };
 
-    /// Parse comparison expressions (==, !=, <, >, <=, >=)
-    fn parse_comparison(&mut self) -> Result<Expression, ParserError> {
-        let mut left = self.parse_bitwise_or()?;
-
-        while let Some(op) = self.match_comparison_op() {
-            let right = self.parse_bitwise_or()?;
-            let pos = left.pos;
-
-            // Comparisons return i32 (boolean as integer)
-            let result_type = LangType::new(TypeBase::SInt, 32, 0, false);
-
-            left = Expression::new(
-                ExprKind::Comparison {
-                    left: Box::new(left),
-                    op,
-                    right: Box::new(right),
-                },
-                result_type,
-                pos,
-            );
-        }
-
-        Ok(left)
-    }
-
-    fn match_comparison_op(&mut self) -> Option<ComparisonOp> {
-        let op = match &self.peek().kind {
-            TokenKind::Equal => ComparisonOp::Equal,
-            TokenKind::NotEqual => ComparisonOp::NotEqual,
-            TokenKind::Less => ComparisonOp::Less,
-            TokenKind::Greater => ComparisonOp::Greater,
-            TokenKind::LessEqual => ComparisonOp::LessEqual,
-            TokenKind::GreaterEqual => ComparisonOp::GreaterEqual,
-            _ => return None,
-        };
-        self.advance();
-        Some(op)
-    }
-
-    /// Parse bitwise OR expressions
-    fn parse_bitwise_or(&mut self) -> Result<Expression, ParserError> {
-        self.parse_binary_expr(Self::parse_bitwise_xor, &[TokenKind::Pipe])
-    }
-
-    /// Parse bitwise XOR expressions
-    fn parse_bitwise_xor(&mut self) -> Result<Expression, ParserError> {
-        self.parse_binary_expr(Self::parse_bitwise_and, &[TokenKind::Caret])
-    }
-
-    /// Parse bitwise AND expressions
-    fn parse_bitwise_and(&mut self) -> Result<Expression, ParserError> {
-        self.parse_binary_expr(Self::parse_shift, &[TokenKind::Ampersand])
-    }
-
-    /// Parse shift expressions
-    fn parse_shift(&mut self) -> Result<Expression, ParserError> {
-        self.parse_binary_expr(Self::parse_additive, &[TokenKind::LeftShift, TokenKind::RightShift])
-    }
-
-    /// Parse additive expressions (+, -)
-    fn parse_additive(&mut self) -> Result<Expression, ParserError> {
-        self.parse_binary_expr(Self::parse_multiplicative, &[TokenKind::Plus, TokenKind::Minus])
-    }
-
-    /// Parse multiplicative expressions (*, /, %)
-    fn parse_multiplicative(&mut self) -> Result<Expression, ParserError> {
-        self.parse_binary_expr(Self::parse_other, &[TokenKind::Asterisk, TokenKind::Slash, TokenKind::Percent])
-    }
-
-    /// Generic binary expression parser
-    fn parse_binary_expr<F>(&mut self, next_level: F, operators: &[TokenKind]) -> Result<Expression, ParserError>
-    where
-        F: Fn(&mut Self) -> Result<Expression, ParserError>,
-    {
-        let mut left = next_level(self)?;
-
-        while operators.iter().any(|op| self.check(op)) {
-            let op_kind = self.peek().kind.clone();
+            let (op, prec, right_assoc) = (entry.op, entry.prec, entry.right_assoc);
             self.advance();
-            let op = self.token_to_binary_op(&op_kind)?;
-            let right = next_level(self)?;
+            let next_min = if right_assoc { prec } else { prec + 1 };
+            let right = self.parse_expr_prec(next_min)?;
             let pos = left.pos;
 
-            // For now, use left's type as result type (proper type checking would go here)
-            let result_type = left.expr_type;
-
-            left = Expression::new(
-                ExprKind::Binary {
-                    left: Box::new(left),
-                    op,
-                    right: Box::new(right),
-                },
-                result_type,
-                pos,
-            );
+            left = match op {
+                OpKind::Binary(bop) => {
+                    let result_type = left.expr_type;
+                    Expression::new(
+                        ExprKind::Binary { left: Box::new(left), op: bop, right: Box::new(right) },
+                        result_type,
+                        pos,
+                    )
+                }
+                OpKind::Comparison(cop) => {
+                    let result_type = LangType::new(TypeBase::SInt, 32, 0, false);
+                    Expression::new(
+                        ExprKind::Comparison { left: Box::new(left), op: cop, right: Box::new(right) },
+                        result_type,
+                        pos,
+                    )
+                }
+            };
         }
 
         Ok(left)
     }
 
-    /// Convert token to binary operator
-    fn token_to_binary_op(&self, kind: &TokenKind) -> Result<BinaryOp, ParserError> {
-        match kind {
-            TokenKind::Plus => Ok(BinaryOp::Add),
-            TokenKind::Minus => Ok(BinaryOp::Sub),
-            TokenKind::Asterisk => Ok(BinaryOp::Mul),
-            TokenKind::Slash => Ok(BinaryOp::Div),
-            TokenKind::Percent => Ok(BinaryOp::Mod),
-            TokenKind::Ampersand => Ok(BinaryOp::And),
-            TokenKind::Pipe => Ok(BinaryOp::Or),
-            TokenKind::Caret => Ok(BinaryOp::Xor),
-            TokenKind::LeftShift => Ok(BinaryOp::LeftShift),
-            TokenKind::RightShift => Ok(BinaryOp::RightShift),
-            TokenKind::LogicalAnd => Ok(BinaryOp::LogicalAnd),
-            TokenKind::LogicalOr => Ok(BinaryOp::LogicalOr),
-            _ => Err(ParserError::InvalidBinaryOperation(self.peek().pos)),
+    fn parse_cast_or_alloc(&mut self) -> Result<Expression, ParserError> {
+        let saved = self.current;
+        let saved_strlits = self.string_literals.len();
+        if let Ok(expr) = self.parse_alloc() {
+            return Ok(expr);
         }
-    }
-
-    // TODO: This needs a better name (and it should be written better)
-    fn parse_other(&mut self) -> Result<Expression, ParserError> {
-        self.parse_alloc()
-            .or_else(|_| self.parse_cast())
+        self.current = saved;
+        self.string_literals.truncate(saved_strlits);
+        self.parse_cast()
     }
 
     /// Parse cast expressions (expr as type)
@@ -360,20 +365,23 @@ impl Parser {
         }
     }
 
-    /// Parse postfix expressions (function calls, array access)
+    /// Parse postfix expressions (function calls, array access).
+    /// Loops so that chained operations like arr[i][j] or f()() parse correctly.
     fn parse_postfix(&mut self) -> Result<Expression, ParserError> {
         let mut expr = self.parse_primary()?;
 
-        if let TokenKind::OpenParen = &self.peek().kind {
-            // Function call
-            self.advance();
-            expr = self.parse_function_call(&expr)?;
-        } else if let TokenKind::OpenBracket = &self.peek().kind {
-            // Array access
-            self.advance();
-            expr = self.parse_array_access(&expr)?;
-        } else {
-            return Ok(expr);
+        loop {
+            expr = match &self.peek().kind {
+                TokenKind::OpenParen => {
+                    self.advance();
+                    self.parse_function_call(&expr)?
+                }
+                TokenKind::OpenBracket => {
+                    self.advance();
+                    self.parse_array_access(&expr)?
+                }
+                _ => break,
+            };
         }
 
         Ok(expr)
@@ -607,33 +615,43 @@ impl Parser {
         }
     }
 
-    /// Parse a complete program
+    /// Parse a complete program.
+    /// Returns all accumulated errors if any were encountered during parsing.
     /// # Errors
-    /// If parsing fails at any point.
-    pub fn parse_program(&mut self) -> Result<crate::parser::Program, ParserError> {
-        use crate::parser::{Program};
+    /// Returns `Err(Vec<ParserError>)` if one or more parse errors occurred.
+    pub fn parse_program(&mut self) -> Result<crate::parser::Program, Vec<ParserError>> {
+        let result = self.do_parse_program();
+        let mut errs = std::mem::take(&mut self.errors);
+        match result {
+            Ok(prog) if errs.is_empty() => Ok(prog),
+            Ok(_) => {
+                errs.sort_by_key(|e| e.position().map_or((usize::MAX, usize::MAX), |p| (p.line, p.column)));
+                Err(errs)
+            }
+            Err(e) => {
+                errs.push(e);
+                errs.sort_by_key(|e| e.position().map_or((usize::MAX, usize::MAX), |p| (p.line, p.column)));
+                Err(errs)
+            }
+        }
+    }
+
+    #[parse_rule]
+    fn do_parse_program(&mut self) -> Result<crate::parser::Program, ParserError> {
+        use crate::parser::Program;
 
         let mut functions = Vec::new();
         let mut global_vars = Vec::new();
 
-        self.skip_newlines();
+        skip_nl!();
 
         while !self.is_at_end() {
-            // Check if this is a function or global variable
-            let is_extern = self.check_keyword(&Keyword::Extern);
-
-            if is_extern {
-                self.advance(); // consume 'extern'
-            }
+            let is_extern = kw_if!(Extern);
 
             if self.check_keyword(&Keyword::Fn) {
-                // Parse function
                 let func = self.parse_function(is_extern)?;
                 functions.push(func);
-            } else if self.check(&TokenKind::LangType(LangType::new(TypeBase::Void, 0, 0, false)))
-                || matches!(self.peek().kind, TokenKind::LangType(_))
-            {
-                // Parse global variable
+            } else if matches!(self.peek().kind, TokenKind::LangType(_)) {
                 if is_extern {
                     return Err(ParserError::UnexpectedToken(
                         "extern can only be used with functions".to_string(),
@@ -649,7 +667,7 @@ impl Parser {
                 ));
             }
 
-            self.skip_newlines();
+            skip_nl!();
         }
 
         Ok(Program {
@@ -660,167 +678,89 @@ impl Parser {
     }
 
     /// Parse a function definition
+    #[parse_rule]
     fn parse_function(&mut self, is_extern: bool) -> Result<crate::parser::Function, ParserError> {
         use crate::parser::{Function, FunctionProto};
         use crate::symbol::table::FunctionSymbol;
 
-        let pos = self.peek().pos;
+        let pos = pos!();
+        kw!(Fn);
+        let name = ident!();
+        token!(OpenParen);
 
-        self.expect(&TokenKind::Keyword(Keyword::Fn), "fn")?;
-
-        // Parse function name
-        let name = match &self.peek().kind {
-            TokenKind::Identifier(name) => {
-                let name = name.clone();
-                self.advance();
-                name
-            }
-            _ => {
-                return Err(ParserError::ExpectedToken(
-                    "identifier".to_string(),
-                    format!("{}", self.peek().kind),
-                    self.peek().pos,
-                ))
-            }
-        };
-
-        self.expect(&TokenKind::OpenParen, "(")?;
-
-        // Parse parameters
         let mut params = Vec::new();
-
         if !self.check(&TokenKind::CloseParen) {
             loop {
-                let param_type = self.parse_type()?;
-
-                let param_name = match &self.peek().kind {
-                    TokenKind::Identifier(name) => {
-                        let name = name.clone();
-                        self.advance();
-                        name
-                    }
-                    _ => {
-                        return Err(ParserError::ExpectedToken(
-                            "parameter name".to_string(),
-                            format!("{}", self.peek().kind),
-                            self.peek().pos,
-                        ))
-                    }
-                };
-
+                let param_type = lang_type!();
+                let param_name = ident!();
                 params.push((param_type, param_name));
-
-                if !self.match_token(&[TokenKind::Comma]) {
-                    break;
-                }
+                if !self.match_token(&[TokenKind::Comma]) { break; }
             }
         }
+        token!(CloseParen);
 
-        self.expect(&TokenKind::CloseParen, ")")?;
-
-        // Parse return type (optional, defaults to void)
         let return_type = if self.match_token(&[TokenKind::Arrow]) {
-            self.parse_type()?
+            lang_type!()
         } else {
             LangType::new(TypeBase::Void, 0, 0, false)
         };
 
-        let proto = FunctionProto {
-            name: name.clone(),
-            params: params.clone(),
-            return_type,
-            is_extern,
-            pos,
-        };
-
-        // Add function to symbol table
-        let func_symbol = FunctionSymbol {
-            name: name.clone(),
-            params: params.clone(),
-            return_type,
-            is_extern,
-            has_body: !is_extern,
-            pos,
-        };
+        let proto = FunctionProto { name: name.clone(), params: params.clone(), return_type, is_extern, pos };
 
         self.symbol_table_mut()
-            .add_function(func_symbol)
+            .add_function(FunctionSymbol {
+                name: name.clone(),
+                params: params.clone(),
+                return_type,
+                is_extern,
+                has_body: !is_extern,
+                pos,
+            })
             .map_err(|e| ParserError::UnexpectedToken(e, pos))?;
 
-        self.skip_newlines();
+        skip_nl!();
 
-        // Parse function body (not for extern functions)
         let body = if is_extern {
-            // Extern functions have no body
-            self.match_token(&[TokenKind::Semicolon, TokenKind::Newline]);
+            term!();
             Vec::new()
         } else {
-            // Enter function scope and add parameters as variables
-            self.symbol_table_mut().enter_scope();
-
-            for (param_type, param_name) in &params {
-                self.symbol_table_mut()
-                    .add_variable(param_name.clone(), *param_type, pos)
-                    .map_err(|e| ParserError::UnexpectedToken(e, pos))?;
-            }
-
-            // Parse function body block
-            let body_stmt = self.parse_block_statement()?;
-
-            self.symbol_table_mut().exit_scope();
-
-            match body_stmt.kind {
-                crate::parser::StatementKind::Block(stmts) => stmts,
-                _ => unreachable!(),
-            }
+            scoped!({
+                for (param_type, param_name) in &params {
+                    self.symbol_table_mut()
+                        .add_variable(param_name.clone(), *param_type, pos)
+                        .map_err(|e| ParserError::UnexpectedToken(e, pos))?;
+                }
+                match self.parse_block_statement()? {
+                    Statement { kind: StatementKind::Block(stmts), .. } => stmts,
+                    _ => unreachable!(),
+                }
+            })
         };
 
         Ok(Function { proto, body })
     }
 
     /// Parse a global variable declaration
+    #[parse_rule]
     fn parse_global_var(&mut self) -> Result<crate::parser::GlobalVar, ParserError> {
         use crate::parser::GlobalVar;
 
-        let pos = self.peek().pos;
+        let pos = pos!();
+        let var_type = lang_type!();
+        let name = ident!();
 
-        let var_type = self.parse_type()?;
-
-        let name = match &self.peek().kind {
-            TokenKind::Identifier(name) => {
-                let name = name.clone();
-                self.advance();
-                name
-            }
-            _ => {
-                return Err(ParserError::ExpectedToken(
-                    "identifier".to_string(),
-                    format!("{}", self.peek().kind),
-                    self.peek().pos,
-                ))
-            }
-        };
-
-        // Parse optional initializer
         let initializer = if self.match_token(&[TokenKind::Assign]) {
             Some(self.parse_expression()?)
         } else {
             None
         };
 
-        // Add global variable to symbol table (at global scope)
         self.symbol_table_mut()
             .add_variable(name.clone(), var_type, pos)
             .map_err(|e| ParserError::UnexpectedToken(e, pos))?;
 
-        // Consume optional semicolon or newline
-        self.match_token(&[TokenKind::Semicolon, TokenKind::Newline]);
+        term!();
 
-        Ok(GlobalVar {
-            var_type,
-            name,
-            initializer,
-            pos,
-        })
+        Ok(GlobalVar { var_type, name, initializer, pos })
     }
 }

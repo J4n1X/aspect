@@ -1,434 +1,188 @@
+use tjlb_macros::parse_rule;
 use crate::lexer::{TokenKind, Keyword, Position};
-use crate::parser::{Statement, StatementKind, Expression, ParserError};
+use crate::parser::{Statement, StatementKind, Expression, ExprKind, ParserError};
 use crate::parser::expressions::Parser;
+
+type StatementPred    = fn(&Parser) -> bool;
+type StatementHandler = fn(&mut Parser) -> Result<Statement, ParserError>;
+
+const STATEMENT_TABLE: &[(StatementPred, StatementHandler)] = &[
+    (|p| p.check(&TokenKind::OpenBrace),                    Parser::parse_block_statement),
+    (|p| p.check_keyword(&Keyword::Return),                 Parser::parse_return_statement),
+    (|p| p.check_keyword(&Keyword::If),                     Parser::parse_if_statement),
+    (|p| p.check_keyword(&Keyword::While),                  Parser::parse_while_statement),
+    (|p| p.check_keyword(&Keyword::For),                    Parser::parse_for_statement),
+    (|p| p.check_keyword(&Keyword::Break),                  Parser::parse_break_statement),
+    (|p| p.check_keyword(&Keyword::Continue),               Parser::parse_continue_statement),
+    (|p| matches!(p.peek().kind, TokenKind::LangType(_)),   Parser::parse_var_decl_or_assignment),
+];
 
 impl Parser {
     /// Parse a statement
     pub(crate) fn parse_statement(&mut self) -> Result<Statement, ParserError> {
         self.skip_newlines();
-
-        match &self.peek().kind {
-            // Block statement
-            TokenKind::OpenBrace => self.parse_block_statement(),
-
-            // Return statement
-            TokenKind::Keyword(Keyword::Return) => self.parse_return_statement(),
-
-            // If statement
-            TokenKind::Keyword(Keyword::If) => self.parse_if_statement(),
-
-            // While loop
-            TokenKind::Keyword(Keyword::While) => self.parse_while_statement(),
-
-            // For loop
-            TokenKind::Keyword(Keyword::For) => self.parse_for_statement(),
-
-            // Break statement
-            TokenKind::Keyword(Keyword::Break) => self.parse_break_statement(),
-
-            // Continue statement
-            TokenKind::Keyword(Keyword::Continue) => self.parse_continue_statement(),
-
-            // Variable declaration (starts with type)
-            TokenKind::LangType(_) => self.parse_var_decl_or_assignment(),
-
-            // Expression statement or assignment
-            TokenKind::Identifier(_) => {
-                // Look ahead to see if this is a simple assignment (identifier = value)
-                if let Some(next) = self.peek_ahead(1) {
-                    if matches!(next.kind,
-                        TokenKind::Assign | TokenKind::PlusAssign | TokenKind::MinusAssign |
-                        TokenKind::MultAssign | TokenKind::DivAssign | TokenKind::ModAssign |
-                        TokenKind::AndAssign | TokenKind::OrAssign | TokenKind::XorAssign |
-                        TokenKind::LeftShiftAssign | TokenKind::RightShiftAssign
-                    ) {
-                        return self.parse_assignment_statement();
-                    }
-                }
-                // Could be array access assignment (arr[i] = value) or expression statement
-                self.parse_expression_or_indexed_assignment()
+        for &(pred, handler) in STATEMENT_TABLE {
+            if pred(self) {
+                return handler(self);
             }
-
-            // Dereference - parse it and check if it's an assignment
-            TokenKind::Asterisk => {
-                let pos = self.peek().pos;
-                let expr = self.parse_unary()?;
-
-                // Check if this is an assignment
-                if self.check(&TokenKind::Assign) {
-                    // Verify it's actually a dereference
-                    if !matches!(expr.kind, crate::parser::ExprKind::Dereference(_)) {
-                        return Err(ParserError::UnexpectedToken(
-                            "Expected dereference expression for assignment".to_string(),
-                            pos,
-                        ));
-                    }
-
-                    self.advance(); // consume '='
-                    let value = self.parse_expression()?;
-                    self.match_token(&[TokenKind::Semicolon, TokenKind::Newline]);
-
-                    Ok(Statement::new(
-                        StatementKind::DerefAssign { target: expr, value },
-                        pos,
-                    ))
-                } else {
-                    // Just an expression statement
-                    self.match_token(&[TokenKind::Semicolon, TokenKind::Newline]);
-                    Ok(Statement::new(StatementKind::Expression(expr), pos))
-                }
-            }
-
-            _ => self.parse_expression_statement(),
         }
+        self.parse_expression_or_assign_statement()
     }
 
     /// Parse a block statement { ... }
+    #[parse_rule]
     pub(crate) fn parse_block_statement(&mut self) -> Result<Statement, ParserError> {
-        let pos = self.peek().pos;
-        self.expect(&TokenKind::OpenBrace, "{")?;
-
-        self.symbol_table_mut().enter_scope();
-
-        let mut statements = Vec::new();
-
-        self.skip_newlines();
-
-        while !self.check(&TokenKind::CloseBrace) && !self.is_at_end() {
-            statements.push(self.parse_statement()?);
-            self.skip_newlines();
-        }
-
-        self.expect(&TokenKind::CloseBrace, "}")?;
-
-        self.symbol_table_mut().exit_scope();
-
+        let pos = pos!();
+        token!(OpenBrace);
+        let statements = scoped!({
+            let mut stmts = Vec::new();
+            loop {
+                skip_nl!();
+                if self.check(&TokenKind::CloseBrace) || self.is_at_end() { break; }
+                if let Some(s) = sync!(parse_statement) {
+                    stmts.push(s);
+                }
+            }
+            stmts
+        });
+        token!(CloseBrace);
         Ok(Statement::new(StatementKind::Block(statements), pos))
     }
 
     /// Parse a return statement
+    #[parse_rule]
     fn parse_return_statement(&mut self) -> Result<Statement, ParserError> {
-        let pos = self.peek().pos;
-        self.advance(); // consume 'return'
-
-        let value = if self.check(&TokenKind::Newline) || self.check(&TokenKind::Semicolon) {
-            None
-        } else {
-            Some(self.parse_expression()?)
-        };
-
-        // Consume optional semicolon or newline
-        self.match_token(&[TokenKind::Semicolon, TokenKind::Newline]);
-
+        let pos = pos!();
+        kw!(Return);
+        let value = opt_unless_term!(parse_expression);
+        term!();
         Ok(Statement::new(StatementKind::Return(value), pos))
     }
 
     /// Parse an if statement
+    #[parse_rule]
     fn parse_if_statement(&mut self) -> Result<Statement, ParserError> {
-        let pos = self.peek().pos;
-        self.advance(); // consume 'if'
-
+        let pos = pos!();
+        kw!(If);
         let condition = self.parse_expression()?;
-
-        self.skip_newlines();
-
-        // Parse then block
-        let then_block = if self.check(&TokenKind::OpenBrace) {
-            match self.parse_block_statement()? {
-                Statement { kind: StatementKind::Block(stmts), .. } => stmts,
-                _ => unreachable!(),
-            }
-        } else {
-            vec![self.parse_statement()?]
-        };
-
-        self.skip_newlines();
-
-        // Parse optional else block
-        let else_block = if self.check_keyword(&Keyword::Else) {
-            self.advance(); // consume 'else'
-            self.skip_newlines();
-
-            if self.check(&TokenKind::OpenBrace) {
-                match self.parse_block_statement()? {
-                    Statement { kind: StatementKind::Block(stmts), .. } => Some(stmts),
-                    _ => unreachable!(),
-                }
-            } else {
-                Some(vec![self.parse_statement()?])
-            }
-        } else if self.check_keyword(&Keyword::Elif) {
-            // Handle elif as else { if ... }
+        skip_nl!();
+        let then_block = block_body!(parse_block_statement);
+        skip_nl!();
+        let else_block = if kw_if!(Else) {
+            skip_nl!();
+            Some(block_body!(parse_block_statement))
+        } else if kw_if!(Elif) {
             Some(vec![self.parse_if_statement()?])
         } else {
             None
         };
-
-        Ok(Statement::new(
-            StatementKind::If {
-                condition,
-                then_block,
-                else_block,
-            },
-            pos,
-        ))
+        Ok(Statement::new(StatementKind::If { condition, then_block, else_block }, pos))
     }
 
     /// Parse a while loop
+    #[parse_rule]
     fn parse_while_statement(&mut self) -> Result<Statement, ParserError> {
-        let pos = self.peek().pos;
-        self.advance(); // consume 'while'
-
+        let pos = pos!();
+        kw!(While);
         let condition = self.parse_expression()?;
-
-        self.skip_newlines();
-
-        // Parse body
-        let body = if self.check(&TokenKind::OpenBrace) {
-            match self.parse_block_statement()? {
-                Statement { kind: StatementKind::Block(stmts), .. } => stmts,
-                _ => unreachable!(),
-            }
-        } else {
-            vec![self.parse_statement()?]
-        };
-
-        Ok(Statement::new(
-            StatementKind::While { condition, body },
-            pos,
-        ))
+        skip_nl!();
+        let body = block_body!(parse_block_statement);
+        Ok(Statement::new(StatementKind::While { condition, body }, pos))
     }
 
     /// Parse a break statement
+    #[parse_rule]
     fn parse_break_statement(&mut self) -> Result<Statement, ParserError> {
-        let pos = self.peek().pos;
-        self.advance(); // consume 'break'
-        self.match_token(&[TokenKind::Semicolon, TokenKind::Newline]);
+        let pos = pos!();
+        kw!(Break);
+        term!();
         Ok(Statement::new(StatementKind::Break, pos))
     }
 
     /// Parse a continue statement
+    #[parse_rule]
     fn parse_continue_statement(&mut self) -> Result<Statement, ParserError> {
-        let pos = self.peek().pos;
-        self.advance(); // consume 'continue'
-        self.match_token(&[TokenKind::Semicolon, TokenKind::Newline]);
+        let pos = pos!();
+        kw!(Continue);
+        term!();
         Ok(Statement::new(StatementKind::Continue, pos))
     }
 
     /// Parse a for loop
+    #[parse_rule]
     fn parse_for_statement(&mut self) -> Result<Statement, ParserError> {
-        let pos = self.peek().pos;
-        self.advance(); // consume 'for'
-
-        self.expect(&TokenKind::OpenParen, "(")?;
-
-        self.symbol_table_mut().enter_scope();
-
-        // Parse init (can be declaration or expression)
-        let init = if self.check(&TokenKind::Semicolon) {
-            None
-        } else if self.check(&TokenKind::LangType(crate::lexer::LangType::new(
-            crate::lexer::TypeBase::Void,
-            0,
-            0,
-            false,
-        ))) || matches!(self.peek().kind, TokenKind::LangType(_))
-        {
-            Some(Box::new(self.parse_var_decl_for_loop()?))
-        } else {
-            Some(Box::new(self.parse_expression_statement_for_loop()?))
-        };
-
-        self.expect(&TokenKind::Semicolon, ";")?;
-
-        // Parse condition
-        let condition = if self.check(&TokenKind::Semicolon) {
-            None
-        } else {
-            Some(self.parse_expression()?)
-        };
-
-        self.expect(&TokenKind::Semicolon, ";")?;
-
-        // Parse increment (can be expression statement or assignment statement)
-        let increment = if self.check(&TokenKind::CloseParen) {
-            None
-        } else {
-            // Check if this is an assignment
-            if let TokenKind::Identifier(_) = &self.peek().kind {
-                if let Some(next_tok) = self.peek_ahead(1) {
-                    if matches!(next_tok.kind,
-                        TokenKind::Assign | TokenKind::PlusAssign | TokenKind::MinusAssign |
-                        TokenKind::MultAssign | TokenKind::DivAssign | TokenKind::ModAssign |
-                        TokenKind::AndAssign | TokenKind::OrAssign | TokenKind::XorAssign |
-                        TokenKind::LeftShiftAssign | TokenKind::RightShiftAssign
-                    ) {
-                        // Parse as assignment statement
-                        Some(Box::new(self.parse_assignment_statement_for_loop()?))
-                    } else {
-                        // Parse as expression statement
-                        Some(Box::new(self.parse_expression_statement_for_loop()?))
-                    }
-                } else {
-                    Some(Box::new(self.parse_expression_statement_for_loop()?))
-                }
+        let pos = pos!();
+        kw!(For);
+        token!(OpenParen);
+        let (init, condition, increment, body) = scoped!({
+            let init = if self.check(&TokenKind::Semicolon) {
+                None
+            } else if matches!(self.peek().kind, TokenKind::LangType(_)) {
+                Some(Box::new(self.parse_var_decl_inner()?))
             } else {
-                Some(Box::new(self.parse_expression_statement_for_loop()?))
-            }
-        };
-
-        self.expect(&TokenKind::CloseParen, ")")?;
-
-        self.skip_newlines();
-
-        // Parse body
-        let body = if self.check(&TokenKind::OpenBrace) {
-            match self.parse_block_statement()? {
-                Statement { kind: StatementKind::Block(stmts), .. } => stmts,
-                _ => unreachable!(),
-            }
-        } else {
-            vec![self.parse_statement()?]
-        };
-
-        self.symbol_table_mut().exit_scope();
-
-        Ok(Statement::new(
-            StatementKind::For {
-                init,
-                condition,
-                increment,
-                body,
-            },
-            pos,
-        ))
+                Some(Box::new(self.parse_expression_or_assign_inner()?))
+            };
+            token!(Semicolon);
+            let condition = if self.check(&TokenKind::Semicolon) {
+                None
+            } else {
+                Some(self.parse_expression()?)
+            };
+            token!(Semicolon);
+            let increment = if self.check(&TokenKind::CloseParen) {
+                None
+            } else {
+                Some(Box::new(self.parse_expression_or_assign_inner()?))
+            };
+            token!(CloseParen);
+            skip_nl!();
+            let body = block_body!(parse_block_statement);
+            (init, condition, increment, body)
+        });
+        Ok(Statement::new(StatementKind::For { init, condition, increment, body }, pos))
     }
 
-    /// Parse variable declaration or assignment
-    fn parse_var_decl_or_assignment(&mut self) -> Result<Statement, ParserError> {
-        let pos = self.peek().pos;
-
-        // Parse type
-        let var_type = self.parse_type()?;
-
-        // Expect identifier
-        let name = match &self.peek().kind {
-            TokenKind::Identifier(name) => {
-                let name = name.clone();
-                self.advance();
-                name
-            }
-            _ => {
-                return Err(ParserError::ExpectedToken(
-                    "identifier".to_string(),
-                    format!("{}", self.peek().kind),
-                    self.peek().pos,
-                ))
-            }
-        };
-
-        // Parse optional initializer
+    /// Variable declaration inner (no trailing terminator).
+    /// Called by `parse_var_decl_or_assignment` (adds term) and the for-loop init.
+    #[parse_rule]
+    fn parse_var_decl_inner(&mut self) -> Result<Statement, ParserError> {
+        let pos = pos!();
+        let var_type = lang_type!();
+        let name = ident!();
         let initializer = if self.match_token(&[TokenKind::Assign]) {
             Some(self.parse_expression()?)
         } else {
             None
         };
-
-        // Add variable to symbol table
         self.symbol_table_mut()
             .add_variable(name.clone(), var_type, pos)
             .map_err(|e| ParserError::UnexpectedToken(e, pos))?;
-
-        // Consume optional semicolon or newline
-        self.match_token(&[TokenKind::Semicolon, TokenKind::Newline]);
-
-        Ok(Statement::new(
-            StatementKind::VarDecl {
-                var_type,
-                name,
-                initializer,
-            },
-            pos,
-        ))
+        Ok(Statement::new(StatementKind::VarDecl { var_type, name, initializer }, pos))
     }
 
-    /// Parse assignment statement
-    fn parse_assignment_statement(&mut self) -> Result<Statement, ParserError> {
-        let pos = self.peek().pos;
-
-        // Parse variable name
-        let name = match &self.peek().kind {
-            TokenKind::Identifier(name) => {
-                let name = name.clone();
-                self.advance();
-                name
-            }
-            _ => {
-                return Err(ParserError::ExpectedToken(
-                    "identifier".to_string(),
-                    format!("{}", self.peek().kind),
-                    self.peek().pos,
-                ))
-            }
-        };
-
-        // Check if variable exists
-        let var_type = self.symbol_table()
-            .lookup_variable(&name)
-            .ok_or_else(|| ParserError::UndefinedVariable(name.clone(), pos))?
-            .symbol_type;
-
-        // Parse assignment operator
-        let op_token = self.advance().clone();
-
-        // Parse value expression
-        let value_expr = self.parse_expression()?;
-
-        // Convert compound assignments (+=, -=, etc.) to regular assignment
-        let value = match op_token.kind {
-            TokenKind::Assign => value_expr,
-            TokenKind::PlusAssign => {
-                Self::create_compound_assignment(&name, var_type, value_expr, crate::parser::BinaryOp::Add, pos)
-            }
-            TokenKind::MinusAssign => {
-                Self::create_compound_assignment(&name, var_type, value_expr, crate::parser::BinaryOp::Sub, pos)
-            }
-            TokenKind::MultAssign => {
-                Self::create_compound_assignment(&name, var_type, value_expr, crate::parser::BinaryOp::Mul, pos)
-            }
-            TokenKind::DivAssign => {
-                Self::create_compound_assignment(&name, var_type, value_expr, crate::parser::BinaryOp::Div, pos)
-            }
-            TokenKind::ModAssign => {
-                Self::create_compound_assignment(&name, var_type, value_expr, crate::parser::BinaryOp::Mod, pos)
-            }
-            TokenKind::AndAssign => {
-                Self::create_compound_assignment(&name, var_type, value_expr, crate::parser::BinaryOp::And, pos)
-            }
-            TokenKind::OrAssign => {
-                Self::create_compound_assignment(&name, var_type, value_expr, crate::parser::BinaryOp::Or, pos)
-            }
-            TokenKind::XorAssign => {
-                Self::create_compound_assignment(&name, var_type, value_expr, crate::parser::BinaryOp::Xor, pos)
-            }
-            TokenKind::LeftShiftAssign => {
-                Self::create_compound_assignment(&name, var_type, value_expr, crate::parser::BinaryOp::LeftShift, pos)
-            }
-            TokenKind::RightShiftAssign => {
-                Self::create_compound_assignment(&name, var_type, value_expr, crate::parser::BinaryOp::RightShift, pos)
-            }
-            _ => {
-                return Err(ParserError::UnexpectedToken(
-                    format!("{}", op_token.kind),
-                    pos,
-                ))
-            }
-        };
-
-        // Consume optional semicolon or newline
+    /// Parse variable declaration (with trailing terminator)
+    fn parse_var_decl_or_assignment(&mut self) -> Result<Statement, ParserError> {
+        let stmt = self.parse_var_decl_inner()?;
         self.match_token(&[TokenKind::Semicolon, TokenKind::Newline]);
+        Ok(stmt)
+    }
 
-        Ok(Statement::new(StatementKind::VarAssign { name, value }, pos))
+    /// Map a compound-assignment token to its underlying binary operator.
+    fn compound_op_for_token(kind: &TokenKind) -> Option<crate::parser::BinaryOp> {
+        use crate::parser::BinaryOp;
+        match kind {
+            TokenKind::PlusAssign       => Some(BinaryOp::Add),
+            TokenKind::MinusAssign      => Some(BinaryOp::Sub),
+            TokenKind::MultAssign       => Some(BinaryOp::Mul),
+            TokenKind::DivAssign        => Some(BinaryOp::Div),
+            TokenKind::ModAssign        => Some(BinaryOp::Mod),
+            TokenKind::AndAssign        => Some(BinaryOp::And),
+            TokenKind::OrAssign         => Some(BinaryOp::Or),
+            TokenKind::XorAssign        => Some(BinaryOp::Xor),
+            TokenKind::LeftShiftAssign  => Some(BinaryOp::LeftShift),
+            TokenKind::RightShiftAssign => Some(BinaryOp::RightShift),
+            _ => None,
+        }
     }
 
     /// Create a compound assignment expression (e.g., x += 5 becomes x = x + 5)
@@ -440,13 +194,12 @@ impl Parser {
         pos: Position,
     ) -> Expression {
         let var_expr = Expression::new(
-            crate::parser::ExprKind::Variable(name.to_string()),
+            ExprKind::Variable(name.to_string()),
             var_type,
             pos,
         );
-
         Expression::new(
-            crate::parser::ExprKind::Binary {
+            ExprKind::Binary {
                 left: Box::new(var_expr),
                 op,
                 right: Box::new(value_expr),
@@ -456,175 +209,51 @@ impl Parser {
         )
     }
 
-    /// Parse expression statement
-    fn parse_expression_statement(&mut self) -> Result<Statement, ParserError> {
+    /// Parse expression or assignment without trailing terminator.
+    /// Called by `parse_expression_or_assign_statement` (adds term) and the for-loop.
+    fn parse_expression_or_assign_inner(&mut self) -> Result<Statement, ParserError> {
         let pos = self.peek().pos;
         let expr = self.parse_expression()?;
 
-        // Consume optional semicolon or newline
-        self.match_token(&[TokenKind::Semicolon, TokenKind::Newline]);
-
-        Ok(Statement::new(StatementKind::Expression(expr), pos))
-    }
-
-    /// Parse an expression that might be followed by an assignment (for array access like arr[i] = value)
-    fn parse_expression_or_indexed_assignment(&mut self) -> Result<Statement, ParserError> {
-        let pos = self.peek().pos;
-        let expr = self.parse_expression()?;
-
-        // Check if this is followed by an assignment operator
         if self.check(&TokenKind::Assign) {
-            // This must be an indexed/dereference assignment
-            // The expression should be a dereference (array access becomes ptr arithmetic + deref)
-            if !matches!(expr.kind, crate::parser::ExprKind::Dereference(_)) {
-                return Err(ParserError::UnexpectedToken(
-                    "Cannot assign to this expression - expected array access or dereference".to_string(),
-                    pos,
-                ));
-            }
-
-            self.advance(); // consume '='
+            self.advance();
             let value = self.parse_expression()?;
-            self.match_token(&[TokenKind::Semicolon, TokenKind::Newline]);
-
-            Ok(Statement::new(
-                StatementKind::DerefAssign { target: expr, value },
-                pos,
-            ))
+            if let ExprKind::Variable(name) = expr.kind {
+                Ok(Statement::new(StatementKind::VarAssign { name, value }, pos))
+            } else if matches!(expr.kind, ExprKind::Dereference(_)) {
+                Ok(Statement::new(StatementKind::DerefAssign { target: expr, value }, pos))
+            } else {
+                Err(ParserError::UnexpectedToken(
+                    "cannot assign to this expression".to_string(),
+                    pos,
+                ))
+            }
         } else {
-            // Just an expression statement
-            self.match_token(&[TokenKind::Semicolon, TokenKind::Newline]);
-            Ok(Statement::new(StatementKind::Expression(expr), pos))
+            let compound_op = Self::compound_op_for_token(&self.peek().kind.clone());
+            if let Some(op) = compound_op {
+                if let ExprKind::Variable(ref name) = expr.kind {
+                    let name = name.clone();
+                    let var_type = expr.expr_type;
+                    self.advance();
+                    let value_expr = self.parse_expression()?;
+                    let value = Self::create_compound_assignment(&name, var_type, value_expr, op, pos);
+                    Ok(Statement::new(StatementKind::VarAssign { name, value }, pos))
+                } else {
+                    Err(ParserError::UnexpectedToken(
+                        "compound assignment requires a variable".to_string(),
+                        pos,
+                    ))
+                }
+            } else {
+                Ok(Statement::new(StatementKind::Expression(expr), pos))
+            }
         }
     }
 
-    /// Parse expression statement without consuming terminator (for use in for loops)
-    fn parse_expression_statement_for_loop(&mut self) -> Result<Statement, ParserError> {
-        let pos = self.peek().pos;
-        let expr = self.parse_expression()?;
-
-        Ok(Statement::new(StatementKind::Expression(expr), pos))
+    /// Parse expression or assignment statement (with trailing terminator)
+    fn parse_expression_or_assign_statement(&mut self) -> Result<Statement, ParserError> {
+        let stmt = self.parse_expression_or_assign_inner()?;
+        self.match_token(&[TokenKind::Semicolon, TokenKind::Newline]);
+        Ok(stmt)
     }
-
-    /// Parse variable declaration without consuming terminator (for use in for loops)
-    fn parse_var_decl_for_loop(&mut self) -> Result<Statement, ParserError> {
-        let pos = self.peek().pos;
-
-        // Parse type
-        let var_type = self.parse_type()?;
-
-        // Expect identifier
-        let name = match &self.peek().kind {
-            TokenKind::Identifier(name) => {
-                let name = name.clone();
-                self.advance();
-                name
-            }
-            _ => {
-                return Err(ParserError::ExpectedToken(
-                    "identifier".to_string(),
-                    format!("{}", self.peek().kind),
-                    self.peek().pos,
-                ))
-            }
-        };
-
-        // Parse optional initializer
-        let initializer = if self.match_token(&[TokenKind::Assign]) {
-            Some(self.parse_expression()?)
-        } else {
-            None
-        };
-
-        // Add variable to symbol table
-        self.symbol_table_mut()
-            .add_variable(name.clone(), var_type, pos)
-            .map_err(|e| ParserError::UnexpectedToken(e, pos))?;
-
-        Ok(Statement::new(
-            StatementKind::VarDecl {
-                var_type,
-                name,
-                initializer,
-            },
-            pos,
-        ))
-    }
-
-    /// Parse assignment statement without consuming terminator (for use in for loops)
-    fn parse_assignment_statement_for_loop(&mut self) -> Result<Statement, ParserError> {
-        let pos = self.peek().pos;
-
-        // Parse variable name
-        let name = match &self.peek().kind {
-            TokenKind::Identifier(name) => {
-                let name = name.clone();
-                self.advance();
-                name
-            }
-            _ => {
-                return Err(ParserError::ExpectedToken(
-                    "identifier".to_string(),
-                    format!("{}", self.peek().kind),
-                    self.peek().pos,
-                ))
-            }
-        };
-
-        // Check if variable exists
-        let var_type = self.symbol_table()
-            .lookup_variable(&name)
-            .ok_or_else(|| ParserError::UndefinedVariable(name.clone(), pos))?
-            .symbol_type;
-
-        // Parse assignment operator
-        let op_token = self.advance().clone();
-
-        // Parse value expression
-        let value_expr = self.parse_expression()?;
-
-        // Convert compound assignments (+=, -=, etc.) to regular assignment
-        let value = match op_token.kind {
-            TokenKind::Assign => value_expr,
-            TokenKind::PlusAssign => {
-                Self::create_compound_assignment(&name, var_type, value_expr, crate::parser::BinaryOp::Add, pos)
-            }
-            TokenKind::MinusAssign => {
-                Self::create_compound_assignment(&name, var_type, value_expr, crate::parser::BinaryOp::Sub, pos)
-            }
-            TokenKind::MultAssign => {
-                Self::create_compound_assignment(&name, var_type, value_expr, crate::parser::BinaryOp::Mul, pos)
-            }
-            TokenKind::DivAssign => {
-                Self::create_compound_assignment(&name, var_type, value_expr, crate::parser::BinaryOp::Div, pos)
-            }
-            TokenKind::ModAssign => {
-                Self::create_compound_assignment(&name, var_type, value_expr, crate::parser::BinaryOp::Mod, pos)
-            }
-            TokenKind::AndAssign => {
-                Self::create_compound_assignment(&name, var_type, value_expr, crate::parser::BinaryOp::And, pos)
-            }
-            TokenKind::OrAssign => {
-                Self::create_compound_assignment(&name, var_type, value_expr, crate::parser::BinaryOp::Or, pos)
-            }
-            TokenKind::XorAssign => {
-                Self::create_compound_assignment(&name, var_type, value_expr, crate::parser::BinaryOp::Xor, pos)
-            }
-            TokenKind::LeftShiftAssign => {
-                Self::create_compound_assignment(&name, var_type, value_expr, crate::parser::BinaryOp::LeftShift, pos)
-            }
-            TokenKind::RightShiftAssign => {
-                Self::create_compound_assignment(&name, var_type, value_expr, crate::parser::BinaryOp::RightShift, pos)
-            }
-            _ => {
-                return Err(ParserError::UnexpectedToken(
-                    format!("{}", op_token.kind),
-                    pos,
-                ))
-            }
-        };
-
-        Ok(Statement::new(StatementKind::VarAssign { name, value }, pos))
-    }
-
 }

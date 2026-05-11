@@ -1,5 +1,5 @@
 use thiserror::Error;
-use crate::lexer::{Position};
+use crate::lexer::Position;
 
 /// Parser error types
 #[derive(Error, Debug)]
@@ -42,4 +42,25 @@ pub enum ParserError {
     
     #[error("Lexer error: {0}")]
     LexerError(#[from] crate::lexer::LexerError),
+}
+
+impl ParserError {
+    /// Extract the source position from this error, if any.
+    #[must_use]
+    pub fn position(&self) -> Option<Position> {
+        match self {
+            ParserError::UnexpectedToken(_, pos)             => Some(*pos),
+            ParserError::ExpectedToken(_, _, pos)            => Some(*pos),
+            ParserError::TypeMismatch(_, _, pos)             => Some(*pos),
+            ParserError::UndefinedVariable(_, pos)           => Some(*pos),
+            ParserError::UndefinedFunction(_, pos)           => Some(*pos),
+            ParserError::ArgumentCountMismatch(_, _, _, pos) => Some(*pos),
+            ParserError::InvalidDereference(pos)             => Some(*pos),
+            ParserError::FunctionRedefinition(_, pos)        => Some(*pos),
+            ParserError::InvalidBinaryOperation(pos)         => Some(*pos),
+            ParserError::ExpectedExpression(pos)             => Some(*pos),
+            ParserError::ExpectedStatement(pos)              => Some(*pos),
+            ParserError::UnexpectedEof | ParserError::LexerError(_) => None,
+        }
+    }
 }

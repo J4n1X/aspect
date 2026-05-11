@@ -102,9 +102,12 @@ fn parse_file(path: &PathBuf) -> Result<()> {
         .with_context(|| format!("failed to tokenize '{}'", path.display()))?;
 
     // Parse
-    let mut parser = Parser::new(tokens);
-    let program = parser.parse_program()
-        .with_context(|| format!("failed to parse '{}'", path.display()))?;
+    let mut parser = Parser::new(tokens).with_source_file(path.display().to_string());
+    let parse_result = parser.parse_program();
+    let program = parse_result.map_err(|errors| {
+        let msgs: Vec<String> = errors.iter().map(|e| parser.format_error(e)).collect();
+        anyhow::anyhow!("{}", msgs.join("\n"))
+    })?;
 
     // Print AST
     println!("Program AST:");
@@ -167,9 +170,12 @@ fn compile_file(path: &PathBuf, output: Option<&std::path::Path>, print: bool, o
         .with_context(|| format!("failed to tokenize '{}'", path.display()))?;
 
     // Parse
-    let mut parser = Parser::new(tokens);
-    let program = parser.parse_program()
-        .with_context(|| format!("failed to parse '{}'", path.display()))?;
+    let mut parser = Parser::new(tokens).with_source_file(path.display().to_string());
+    let parse_result = parser.parse_program();
+    let program = parse_result.map_err(|errors| {
+        let msgs: Vec<String> = errors.iter().map(|e| parser.format_error(e)).collect();
+        anyhow::anyhow!("{}", msgs.join("\n"))
+    })?;
 
     let mut typechecker = TypeChecker::new();
     typechecker.check_program(&program)

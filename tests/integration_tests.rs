@@ -27,9 +27,11 @@ fn compile_and_run_with_args(source_path: &str, args: &[String]) -> Result<i32, 
         .map_err(|e| format!("Tokenization failed: {e}"))?;
 
     // Parse
-    let mut parser = Parser::new(tokens);
-    let program = parser.parse_program()
-        .map_err(|e| format!("Parsing failed: {e}"))?;
+    let mut parser = Parser::new(tokens).with_source_file(source_path.to_string());
+    let parse_result = parser.parse_program();
+    let program = parse_result.map_err(|errors| {
+        errors.iter().map(|e| parser.format_error(e)).collect::<Vec<_>>().join("\n")
+    })?;
 
     // Generate LLVM IR
     let context = Context::create();

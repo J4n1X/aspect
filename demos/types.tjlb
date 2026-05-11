@@ -1,0 +1,151 @@
+#-
+  types.tjlb  --  A guided tour of TJLB's numeric type system.
+
+  Demonstrates:
+    * Integer widths:  i8 / i32 / i64 / u8 / u32 / u64
+    * Signed vs. unsigned:  u32 for bit ops; i32 for arithmetic
+    * Explicit widening:  i32 -> i64 to prevent overflow
+    * Saturating narrowing:  i32 -> i8 with clamping
+    * Hex and binary literals:  0xFF  0b10110101
+    * Typed pointer walk:  u8[N]  /  u8*
+    * Floating-point:  f64
+
+  Compile:  tjlb-rust compile demos/types.tjlb -o types.ll
+  Run:      lli types.ll          (exit code 5)
+-#
+
+extern fn puts(u8 *msg) -> u0
+extern fn write(i32 fd, u8 *buf, u64 len) -> i64
+
+# Return the byte length of a null-terminated u8 string.
+fn strlen(u8 *s) -> u64 {
+    u64 n = 0
+    while s[n] != 0 as u8 {
+        n += 1 as u64
+    }
+    return n
+}
+
+#-
+  rgba -- pack four u8 colour channels into one u32.
+
+  Using u32 rather than i32 keeps the bit manipulation sign-free:
+  shifting a u32 right always inserts zeros (logical shift), whereas
+  shifting a negative i32 right is arithmetic (inserts sign bits).
+-#
+fn rgba(u8 r, u8 g, u8 b, u8 a) -> u32 {
+    return (r as u32 << 24) | (g as u32 << 16) | (b as u32 << 8) | a as u32
+}
+
+# Extract byte n (0 = least-significant) from a packed u32.
+fn byte_of(u32 v, u32 n) -> u8 {
+    return ((v >> (n * 8)) & 0xFF) as u8
+}
+
+#-
+  popcount -- count the set bits (Hamming weight) of a u32.
+
+  The loop right-shifts v until it is zero, accumulating set bits.
+  Declaring v as u32 instead of i32 makes the shift unambiguous:
+  no sign-extension, no implementation-defined behaviour.
+-#
+fn popcount(u32 v) -> u32 {
+    u32 count = 0
+    while v != 0 {
+        count += v & 1
+        v >>= 1
+    }
+    return count
+}
+
+#-
+  wide_mul -- multiply two i32 values and return i64.
+
+  100 000 * 100 000 = 10^10, which overflows i32 (max ~2.1 * 10^9).
+  Widening both operands to i64 before the multiply keeps the full result.
+-#
+fn wide_mul(i32 a, i32 b) -> i64 {
+    return (a as i64) * (b as i64)
+}
+
+#-
+  clamp_i8 -- saturating narrowing from i32 to i8.
+
+  Rather than letting the bit pattern wrap silently, we clamp to the
+  representable range [-128, 127] and then apply the explicit `as i8` cast.
+  TJLB requires `as` for all narrowing conversions -- nothing is implicit.
+-#
+fn clamp_i8(i32 v) -> i8 {
+    if v > 127 {
+        return 127 as i8
+    }
+    i32 min_val = 0 - 128
+    if v < min_val {
+        return min_val as i8
+    }
+    return v as i8
+}
+
+fn main() -> i32 {
+    puts("=== TJLB Type System Demo ===")
+    puts("")
+
+    # -- 1. u32 packed colour ------------------------------------------
+    # Four independent u8 channels packed tightly into one u32 (RGBA, r=MSB).
+    # Extracting a channel requires a right-shift, a mask, and a cast to u8.
+    u32 coral  = rgba(255 as u8, 127 as u8,  80 as u8, 255 as u8)
+    u32 indigo = rgba( 75 as u8,   0 as u8, 130 as u8, 255 as u8)
+
+    u8 coral_r = byte_of(coral, 3)    # 0xFF = 255
+    u8 coral_g = byte_of(coral, 2)    # 0x7F = 127
+    u8 coral_b = byte_of(coral, 1)    # 0x50 =  80
+
+    puts("1. u32 packed RGBA:  coral red=255 green=127 blue=80")
+
+    # -- 2. u32 bit counting -------------------------------------------
+    # Binary literal 0b10110101 = 181d, with 5 bits set.
+    # u32 ensures the right-shift in popcount is logical (zero-fill).
+    u32 mask = 0b10110101
+    u32 bits = popcount(mask)
+    puts("2. u32 popcount(0b10110101=181) = 5  [logical shift, no sign bit]")
+
+    # -- 3. widening multiply ------------------------------------------
+    # The product 10^10 overflows i32; widening to i64 first is safe.
+    i32 big     = 100000
+    i64 product = wide_mul(big, big)
+    puts("3. i64 wide_mul(100000,100000) = 10000000000  [no i32 overflow]")
+
+    # -- 4. saturating narrowing cast ----------------------------------
+    # Values outside [-128, 127] are clamped before the `as i8` truncation.
+    i8 hi = clamp_i8(200)        #  200 -> 127  (i8 max)
+    i8 lo = clamp_i8(0 - 200)    # -200 -> -128 (i8 min)
+    puts("4. clamp_i8: 200->127  -200->-128  [saturating i32->i8]")
+
+    # -- 5. f64 floating-point -----------------------------------------
+    # All numeric literals with a decimal point are f64.
+    # Binary ops on f64 use IEEE 754 double-precision arithmetic.
+    f64 pi   = 3.14159265358979
+    f64 rad  = 5.0
+    f64 area = pi * rad * rad    # ~78.5398
+    puts("5. f64 circle area: pi * 5.0^2 = ~78.54")
+
+    # -- 6. u8 array walked via typed pointer --------------------------
+    # A preallocated u8[8] array decays to u8* in expressions.
+    # &buf gives u8**, which we cast to u8* to match write/strlen.
+    u8[8] buf
+    buf[0] = 72 as u8    # 'H'
+    buf[1] = 105 as u8   # 'i'
+    buf[2] = 33 as u8    # '!'
+    buf[3] = 10 as u8    # '\n'
+    buf[4] = 0 as u8     # null terminator
+
+    u8 *p   = &buf as u8*
+    u64 len = strlen(p)
+    write(1, p, len)
+    puts("6. u8[8] buf walked through u8* pointer -- wrote 'Hi!' above")
+
+    puts("")
+    puts("Exit code = popcount(0b10110101) = 5")
+
+    return bits as i32    # exit code: 5
+}

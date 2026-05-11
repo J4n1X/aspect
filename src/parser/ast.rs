@@ -9,7 +9,7 @@ pub enum LiteralValue {
 }
 
 /// Binary operators
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BinaryOp {
     // Arithmetic
     Add,
@@ -47,7 +47,7 @@ impl BinaryOp {
 }
 
 /// Comparison operators
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ComparisonOp {
     Greater,
     Less,
