@@ -1,14 +1,16 @@
 # Type Checker
 
-The type checker (`src/typechecker/`) performs semantic validation after parsing. It uses a **constraint-based** approach: collect constraints in one pass, verify them all in another.
+The type checker (`src/typechecker/`) performs semantic validation after parsing.
+It uses a **single-pass** approach: errors are emitted immediately as statements
+and expressions are walked.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `checker.rs` | `TypeChecker` struct — three-phase checking |
-| `types.rs` | `TypeConstraint` enum (12 variants), `TypeExpr`, `ConstraintContext` |
-| `errors.rs` | `TypeCheckError` enum (13+ variants) |
+| `checker.rs` | `TypeChecker` struct — single-pass checking |
+| `types.rs` | Pure helper functions for type coercibility and literal compatibility |
+| `errors.rs` | `TypeCheckError` enum (15 variants) |
 
 ## TypeChecker Struct
 
@@ -17,69 +19,77 @@ pub struct TypeChecker {
     functions: HashMap<String, FunctionSig>,  // Known function signatures
     scopes: Vec<HashMap<String, LangType>>,   // Variable type scopes (stack)
     globals: HashMap<String, LangType>,       // Global variable types
-    constraints: Vec<TypeConstraint>,          // Collected constraints
+    source_file: String,                      // Source file path for diagnostics
     current_function: Option<String>,          // Current function being checked
 }
 ```
 
 The typechecker has its own **independent** scope system, separate from the parser's `SymbolTable`.
 
-## Three-Phase Checking
+## Entry Points
 
-### Phase 1: Register Declarations (`register_declarations`)
+```rust
+// Basic construction
+TypeChecker::new()
+
+// Set source file for diagnostics (returns self for chaining)
+TypeChecker::new().with_source_file(path: String)
+
+// Run the checker; returns all errors at once
+checker.check_program(&program) -> Result<(), Vec<TypeCheckError>>
+
+// Format an error with source-file prefix
+checker.format_error(&error) -> String
+// Output: "path/to/file.tjlb:12:5: error: ..."
+```
+
+## Checking Phases
+
+### Phase 1: Register Declarations
 
 - Records all global variable types into `self.globals`
 - Records all function signatures (param types + return type) into `self.functions`
 
-### Phase 2: Collect Constraints (`collect_function_constraints`)
+### Phase 2: Single-Pass Statement/Expression Walk
 
-Walks each function body:
+Walks each function body in a single pass:
 - Creates scopes for blocks, if/else branches, while bodies, for loops
 - Adds parameters to scope
-- For each statement/expression, resolves types and pushes `TypeConstraint` entries into `self.constraints`
+- For each statement, calls `check_statement()`; for each expression, calls `check_expression()`
+- Errors are pushed into a `Vec<TypeCheckError>` and all returned at the end
 
-### Phase 3: Verify Constraints (`verify_constraints`)
+## Type Helpers (`types.rs`)
 
-Iterates all collected constraints and checks each one via `verify_constraint()`. Errors are collected into `Vec<TypeCheckError>` and returned all at once (not fatal on first error).
+All functions are pure (no side effects):
 
-## Entry Point
+| Function | Purpose |
+|----------|---------|
+| `types_coercible(from, to)` | Returns `true` if `from` can be implicitly coerced to `to` |
+| `literal_int_fits(val: i64, to)` | Returns `true` if integer `val` fits in type `to` |
+| `literal_float_compatible(to)` | Returns `true` if type `to` can hold a float literal |
+| `cast_valid(from, to)` | Returns `true` if explicit `as` cast is valid |
 
-```rust
-TypeChecker::new().check_program(&program) -> Result<(), Vec<TypeCheckError>>
-```
+### Coercibility Rules (`types_coercible`)
 
-## Constraint Types
+1. **Exact match** → `true`
+2. **Array-to-pointer decay**: `i32[10]` is coercible to `i32*`
+3. **Void**: only compatible with void
+4. **Pointer depth mismatch** (after decay) → `false`
+5. **Integer widening** (non-pointer, non-array): `size_bits(from) <= size_bits(to)` → `true`
+   - Both `SInt↔UInt` families are treated as integers here (widening is allowed even across sign)
+6. **Float widening**: `from.size_bits <= to.size_bits` AND both `SFloat` → `true`
+7. **Int ↔ Float cross-family** → `false` (requires explicit `as` cast)
 
-| Constraint | Verification Rule |
-|-----------|-------------------|
-| `Equal { expected, found, context }` | Strict type equality |
-| `Compatible { expected, found, context }` | `types_compatible()` — allows implicit conversions |
-| `BinaryOp { left, right, pos }` | `types_compatible(left, right)` OR pointer arithmetic (`ptr ± int`) |
-| `UnaryOp { operand, pos }` | Operand must not be `Void` |
-| `Dereference { operand, pos }` | Must have `pointer_depth > 0` |
-| `Reference { operand, pos }` | Always passes |
-| `FunctionCall { name, expected_args, found_args, pos }` | Arg count match + each arg `types_compatible` with param |
-| `Return { expected, found, pos }` | `types_compatible` with function signature |
-| `Cast { from, to, pos }` | `cast_valid()` — nearly everything is valid |
-| `Condition { operand, pos }` | Must not be `void` non-pointer |
-| `AssignmentToConst { name, pos }` | Always fails |
+### Literal Compatibility
 
-## Type Compatibility Rules
+- Integer literals: checked by **value** — `literal_int_fits(val, to)` passes if the value
+  fits in the target type's range (signed or unsigned), regardless of the literal's parser-assigned
+  type. Example: `42` fits in `u8`, `i8`, `i16`, `u16`, etc.
+- Float literals: pass for any `SFloat` target type (`literal_float_compatible`)
 
-`types_compatible(expected, actual)` implements these rules:
+This means `u8 x = 255` is valid but `u8 x = 256` is a type error at compile time.
 
-1. **Exact match** → compatible
-2. **Array-to-pointer decay**: if either type is an array, decay it (`pointer_depth + 1`, clear `array_size`), then check match. E.g., `i32[10]` is compatible with `i32*`.
-3. **Void rule**: void is only compatible with void
-4. **Pointer depth mismatch** (after decay) → incompatible
-5. **Numeric implicit conversion** (non-pointer, non-array):
-   - `SInt ↔ UInt` (any bit width) → compatible
-   - `SFloat ↔ SFloat` (any bit width) → compatible
-   - `SInt/UInt ↔ SFloat` → **NOT** compatible (requires explicit cast)
-
-## Cast Rules
-
-`cast_valid(from, to)`:
+### Cast Rules (`cast_valid`)
 
 | Cast | Valid? |
 |------|--------|
@@ -90,24 +100,18 @@ TypeChecker::new().check_program(&program) -> Result<(), Vec<TypeCheckError>>
 | Float → Integer | Yes (explicit) |
 | Integer → Integer | Yes |
 
-## Constraint Context
+## Error Diagnostics
 
-`ConstraintContext` provides context-specific error messages:
+Errors include position information. The `format_error()` method prepends the source file path:
 
-| Context | Display |
-|---------|---------|
-| `Assignment` | "assignment" |
-| `Initialization` | "initialization" |
-| `Return` | "return statement" |
-| `Argument { func_name, arg_index }` | "argument N of function 'name'" |
-| `Comparison` | "comparison" |
-| `Arithmetic` | "arithmetic operation" |
+```
+src/main.tjlb:12:5: Type mismatch: expected 'u8' but found 'i32' at 12:5
+```
 
-Note: context is stored but currently discarded during verification (available for future improvements).
+The `TypeCheckError::position()` method returns the `Option<Position>` for each variant
+(returns `None` for `MissingReturn`, which has no source location).
 
 ## Scope Management
-
-The typechecker's scope system:
 
 | Method | Behavior |
 |--------|----------|
@@ -116,7 +120,8 @@ The typechecker's scope system:
 | `define_var(name, type)` | Insert into innermost scope |
 | `lookup_var(name)` | Search scopes innermost→outermost, then globals |
 
-Scopes are created for: function bodies, if/else blocks, while bodies, for loops (single scope wrapping init+condition+increment+body), standalone blocks.
+Scopes are created for: function bodies, if/else blocks, while bodies, for loops
+(single scope wrapping init+condition+increment+body), standalone blocks.
 
 ## Error Handling
 
@@ -132,7 +137,12 @@ Returns `Result<(), Vec<TypeCheckError>>` — collects **all** errors before rep
 | `ArgumentCountMismatch` | Wrong number of function arguments |
 | `ArgumentTypeMismatch` | Argument type incompatible with parameter |
 | `InvalidDereference` | Dereferencing non-pointer |
+| `InvalidReference` | Taking address of non-lvalue |
 | `ReturnTypeMismatch` | Return type incompatible with function signature |
+| `MissingReturn` | Non-void function has no return path |
 | `InvalidConditionType` | Condition is void non-pointer |
 | `InvalidCast` | Invalid cast operation |
 | `AssignmentToConst` | Assigning to const variable |
+| `AssignmentTypeMismatch` | RHS type not coercible to LHS |
+| `ListInitLengthMismatch` | Too many elements in list initializer |
+

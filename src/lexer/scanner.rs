@@ -405,8 +405,11 @@ impl Scanner {
         
         // Check for built-in types
         if let Some(mut lang_type) = LangType::langtype_from_str(&text) {
-            // Check for array syntax: type[size]
+            // Check for array syntax: type[size] -- only when followed by decimal int + ']'
             self.skip_inline_whitespace();
+            let saved_cur = self.current;
+            let saved_line = self.line;
+            let saved_col = self.column;
             if self.match_char('[') {
                 // Parse array size
                 self.skip_inline_whitespace();
@@ -415,11 +418,19 @@ impl Scanner {
                     self.advance();
                 }
                 let size_str = &self.input[size_start..self.current];
+                let mut parsed = false;
                 if let Ok(size) = size_str.parse::<u32>() {
                     self.skip_inline_whitespace();
                     if self.match_char(']') {
                         lang_type.array_size = Some(size);
+                        parsed = true;
                     }
+                }
+                if !parsed {
+                    // Not a valid array-size token; backtrack past the '['
+                    self.current = saved_cur;
+                    self.line = saved_line;
+                    self.column = saved_col;
                 }
             }
             
@@ -457,8 +468,11 @@ impl Scanner {
         if let Some(mut lang_type) = LangType::langtype_from_str(&type_text) {
             lang_type.is_const = true;
 
-            // Check for array syntax: type[size]
+            // Check for array syntax: type[size] -- only when followed by decimal int + ']'
             self.skip_inline_whitespace();
+            let saved_cur = self.current;
+            let saved_line = self.line;
+            let saved_col = self.column;
             if self.match_char('[') {
                 // Parse array size
                 self.skip_inline_whitespace();
@@ -467,11 +481,18 @@ impl Scanner {
                     self.advance();
                 }
                 let size_str = &self.input[size_start..self.current];
+                let mut parsed = false;
                 if let Ok(size) = size_str.parse::<u32>() {
                     self.skip_inline_whitespace();
                     if self.match_char(']') {
                         lang_type.array_size = Some(size);
+                        parsed = true;
                     }
+                }
+                if !parsed {
+                    self.current = saved_cur;
+                    self.line = saved_line;
+                    self.column = saved_col;
                 }
             }
 

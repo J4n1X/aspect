@@ -18,8 +18,8 @@ pub fn parse_rule(_attr: TokenStream, item: TokenStream) -> TokenStream {
         .expect("#[parse_rule] can only be applied to functions");
 
     // Derive a human-readable label from the function name.
-    // "parse_return_statement" → "return statement"
-    // "do_parse_program"       → "program"
+    // "parse_return_statement" -> "return statement"
+    // "do_parse_program"       -> "program"
     let raw_name = func.sig.ident.to_string();
     let label: String = raw_name
         .strip_prefix("do_parse_")

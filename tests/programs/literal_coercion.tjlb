@@ -1,0 +1,55 @@
+#- literal_coercion.tjlb
+   Tests that in-range integer literals coerce correctly to narrow types,
+   including negative literals. Returns 0 on success.
+-#
+
+fn main() -> i32 {
+    # u8: boundaries and mid-range
+    u8 a = 0
+    u8 b = 127
+    u8 c = 200
+    u8 d = 255
+
+    # i8: full signed byte range including negatives
+    i8 e = -128
+    i8 f = 0
+    i8 g = 127
+
+    # u16 boundaries
+    u16 h = 0
+    u16 j = 1000
+    u16 k = 65535
+
+    # i16: full signed short range
+    i16 lo16 = -32768
+    i16 hi16 = 32767
+
+    # Widening: u8 -> u16 (implicit coercion at assignment)
+    u16 wide = d   # 255 as u16
+
+    # Widening: u8 -> i32
+    i32 widened = c  # 200 as i32
+
+    i32 result = 0
+
+    if a != 0 as u8   { result = result + 1 }
+    if b != 127 as u8 { result = result + 1 }
+    if c != 200 as u8 { result = result + 1 }
+    if d != 255 as u8 { result = result + 1 }
+
+    if e != -128 as i8 { result = result + 1 }
+    if f != 0 as i8    { result = result + 1 }
+    if g != 127 as i8  { result = result + 1 }
+
+    if h != 0 as u16     { result = result + 1 }
+    if j != 1000 as u16  { result = result + 1 }
+    if k != 65535 as u16 { result = result + 1 }
+
+    if lo16 != -32768 as i16 { result = result + 1 }
+    if hi16 != 32767 as i16  { result = result + 1 }
+
+    if wide != 255 as u16    { result = result + 1 }
+    if widened != 200 as i32 { result = result + 1 }
+
+    return result
+}

@@ -317,14 +317,40 @@ impl Parser {
             TokenKind::Minus => {
                 self.advance();
                 let expr = self.parse_unary()?;
-                let zero_pos = pos;
-                let result_type = expr.expr_type;
 
-                // Unary minus as 0 - expr
+                // Fold negation into numeric literals so that e.g. `-128` becomes
+                // `Literal(Integer(-128))` with the correct type, enabling coercion to
+                // narrow signed types like i8 without an explicit cast.
+                match &expr.kind {
+                    ExprKind::Literal(LiteralValue::Integer(val)) => {
+                        let neg = -(*val);
+                        let expr_type = if neg >= i32::MIN as i64 && neg <= i32::MAX as i64 {
+                            LangType::new(TypeBase::SInt, 32, 0, false)
+                        } else {
+                            LangType::new(TypeBase::SInt, 64, 0, false)
+                        };
+                        return Ok(Expression::new(
+                            ExprKind::Literal(LiteralValue::Integer(neg)),
+                            expr_type,
+                            pos,
+                        ));
+                    }
+                    ExprKind::Literal(LiteralValue::Float(val)) => {
+                        return Ok(Expression::new(
+                            ExprKind::Literal(LiteralValue::Float(-(*val))),
+                            expr.expr_type,
+                            pos,
+                        ));
+                    }
+                    _ => {}
+                }
+
+                // General case: unary minus as 0 - expr
+                let result_type = expr.expr_type;
                 let zero = Expression::new(
                     ExprKind::Literal(LiteralValue::Integer(0)),
                     result_type,
-                    zero_pos,
+                    pos,
                 );
 
                 Ok(Expression::new(

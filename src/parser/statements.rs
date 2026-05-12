@@ -72,7 +72,36 @@ impl Parser {
             skip_nl!();
             Some(block_body!(parse_block_statement))
         } else if kw_if!(Elif) {
-            Some(vec![self.parse_if_statement()?])
+            // 'elif' already consumed — parse the rest as a nested if.
+            Some(vec![self.parse_elif_body()?])
+        } else {
+            None
+        };
+        Ok(Statement::new(StatementKind::If { condition, then_block, else_block }, pos))
+    }
+
+    /// Parse the condition + blocks of an elif chain (the 'elif' keyword has
+    /// already been consumed by the caller).  Handles arbitrary elif depth.
+    fn parse_elif_body(&mut self) -> Result<Statement, ParserError> {
+        let pos = self.peek().pos;
+        let condition = self.parse_expression()?;
+        self.skip_newlines();
+        let then_block = match self.parse_block_statement()? {
+            Statement { kind: StatementKind::Block(stmts), .. } => stmts,
+            _ => unreachable!(),
+        };
+        self.skip_newlines();
+        let else_block = if self.check_keyword(&Keyword::Else) {
+            self.advance();
+            self.skip_newlines();
+            let blk = match self.parse_block_statement()? {
+                Statement { kind: StatementKind::Block(stmts), .. } => stmts,
+                _ => unreachable!(),
+            };
+            Some(blk)
+        } else if self.check_keyword(&Keyword::Elif) {
+            self.advance(); // consume 'elif'
+            Some(vec![self.parse_elif_body()?])
         } else {
             None
         };

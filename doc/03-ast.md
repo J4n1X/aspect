@@ -167,7 +167,7 @@ The parser resolves expression types as it parses:
 | String literal | `u8*` (pointer_depth=1, base=UInt, size_bits=8) |
 | Variable | Looked up from symbol table |
 | Function call | Function's return type from symbol table |
-| Comparison | `i32` (boolean as integer) |
+| Comparison | `i32` (typechecker), `i1` at codegen (widened on use) |
 | Logical NOT (`!`) | `i32` (boolean as integer) |
 | Binary op | Left operand's type |
 | Cast | Target type |

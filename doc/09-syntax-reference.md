@@ -356,7 +356,7 @@ precedence, making left-to-right order natural).
 |---|---|---|
 | 1 | `\|\|` | logical OR |
 | 2 | `&&` | logical AND |
-| 3 | `==` `!=` `<` `>` `<=` `>=` | comparison, result type `i32` |
+| 3 | `==` `!=` `<` `>` `<=` `>=` | comparison, result type `i1` (bool) |
 | 4 | `\|` | bitwise OR |
 | 5 | `^` | bitwise XOR |
 | 6 | `&` | bitwise AND |
@@ -367,7 +367,8 @@ precedence, making left-to-right order natural).
 | — | `as` type | parsed inside `parse_cast` (above unary) |
 | — | `()` `[]` | parsed by `parse_postfix` (tightest) |
 
-Comparison operators produce `i32` (1 = true, 0 = false).
+Comparison operators produce `i1` (1 = true, 0 = false). When assigned to an integer
+variable the `i1` is zero-extended to the target width. Logical NOT (`!`) produces `i32`.
 All other binary operators preserve the type of the left operand.
 
 ---

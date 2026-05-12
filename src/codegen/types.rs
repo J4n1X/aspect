@@ -1,8 +1,131 @@
 use inkwell::AddressSpace;
 use inkwell::context::Context;
 use inkwell::types::{BasicType, BasicTypeEnum, IntType, FloatType, ArrayType};
+use inkwell::values::{FloatValue, IntValue};
+use inkwell::builder::{Builder, BuilderError};
+use inkwell::IntPredicate;
+use inkwell::FloatPredicate;
 use crate::lexer::{LangType, TypeBase};
 use crate::codegen::CodegenError;
+use crate::parser::ComparisonOp;
+
+// ─── Sign-dispatch macro ──────────────────────────────────────────────────────
+
+/// Dispatch to the signed or unsigned variant of a builder method.
+///
+/// Usage: `signed_op!(builder, is_signed, signed_method, unsigned_method, arg1, arg2, ...)`
+///
+/// Example:
+/// ```ignore
+/// let val = signed_op!(self.builder, is_signed,
+///     build_int_signed_div, build_int_unsigned_div,
+///     left, right, "div")?;
+/// ```
+#[macro_export]
+macro_rules! signed_op {
+    ($builder:expr, $is_signed:expr, $signed:ident, $unsigned:ident, $($arg:expr),+) => {
+        if $is_signed {
+            $builder.$signed($($arg),+)
+        } else {
+            $builder.$unsigned($($arg),+)
+        }
+    };
+}
+
+// ─── Width-matching helpers ───────────────────────────────────────────────────
+
+/// Widen the narrower of two integer values so both have the same bit-width.
+///
+/// Uses `sext` for signed values and `zext` for unsigned.
+/// If widths already match, returns the values unchanged.
+///
+/// # Errors
+/// Propagates any `BuilderError` from the underlying LLVM builder.
+pub fn widen_ints_to_match<'ctx>(
+    builder: &Builder<'ctx>,
+    a: IntValue<'ctx>,
+    a_signed: bool,
+    b: IntValue<'ctx>,
+    b_signed: bool,
+) -> Result<(IntValue<'ctx>, IntValue<'ctx>), BuilderError> {
+    let a_bits = a.get_type().get_bit_width();
+    let b_bits = b.get_type().get_bit_width();
+
+    if a_bits > b_bits {
+        let b_wide = if b_signed {
+            builder.build_int_s_extend(b, a.get_type(), "widen")?
+        } else {
+            builder.build_int_z_extend(b, a.get_type(), "widen")?
+        };
+        Ok((a, b_wide))
+    } else if b_bits > a_bits {
+        let a_wide = if a_signed {
+            builder.build_int_s_extend(a, b.get_type(), "widen")?
+        } else {
+            builder.build_int_z_extend(a, b.get_type(), "widen")?
+        };
+        Ok((a_wide, b))
+    } else {
+        Ok((a, b))
+    }
+}
+
+/// Widen the narrower of two float values so both share the same type.
+///
+/// # Errors
+/// Propagates any `BuilderError` from the underlying LLVM builder.
+pub fn widen_floats_to_match<'ctx>(
+    context: &'ctx Context,
+    builder: &Builder<'ctx>,
+    a: FloatValue<'ctx>,
+    b: FloatValue<'ctx>,
+) -> Result<(FloatValue<'ctx>, FloatValue<'ctx>), BuilderError> {
+    if a.get_type() == b.get_type() {
+        return Ok((a, b));
+    }
+    // Determine which is wider by bit-width of the LLVM type
+    // f64 > f32; compare via display name length as a heuristic-free approach
+    let a_is_f64 = a.get_type() == context.f64_type();
+    if a_is_f64 {
+        let b_wide = builder.build_float_ext(b, a.get_type(), "fpwiden")?;
+        Ok((a, b_wide))
+    } else {
+        let a_wide = builder.build_float_ext(a, b.get_type(), "fpwiden")?;
+        Ok((a_wide, b))
+    }
+}
+
+// ─── Comparison predicate helpers ────────────────────────────────────────────
+
+/// Return the correct `IntPredicate` for a comparison operation.
+///
+/// Signed operations use `S`-prefixed predicates; unsigned use `U`-prefixed.
+/// `EQ` and `NE` are the same regardless of signedness.
+#[must_use]
+pub fn int_cmp_pred(op: &ComparisonOp, is_signed: bool) -> IntPredicate {
+    match op {
+        ComparisonOp::Equal        => IntPredicate::EQ,
+        ComparisonOp::NotEqual     => IntPredicate::NE,
+        ComparisonOp::Less         => if is_signed { IntPredicate::SLT } else { IntPredicate::ULT },
+        ComparisonOp::Greater      => if is_signed { IntPredicate::SGT } else { IntPredicate::UGT },
+        ComparisonOp::LessEqual    => if is_signed { IntPredicate::SLE } else { IntPredicate::ULE },
+        ComparisonOp::GreaterEqual => if is_signed { IntPredicate::SGE } else { IntPredicate::UGE },
+    }
+}
+
+/// Return the ordered `FloatPredicate` for a comparison operation.
+#[must_use]
+pub fn float_cmp_pred(op: &ComparisonOp) -> FloatPredicate {
+    match op {
+        ComparisonOp::Equal        => FloatPredicate::OEQ,
+        ComparisonOp::NotEqual     => FloatPredicate::ONE,
+        ComparisonOp::Less         => FloatPredicate::OLT,
+        ComparisonOp::Greater      => FloatPredicate::OGT,
+        ComparisonOp::LessEqual    => FloatPredicate::OLE,
+        ComparisonOp::GreaterEqual => FloatPredicate::OGE,
+    }
+}
+
 
 /// Convert a `LangType` to an LLVM type
 /// 

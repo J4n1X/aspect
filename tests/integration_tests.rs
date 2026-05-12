@@ -5,6 +5,7 @@ use tempfile::NamedTempFile;
 
 use tjlb_rust::lexer::tokenize;
 use tjlb_rust::parser::Parser;
+use tjlb_rust::typechecker::TypeChecker;
 use tjlb_rust::codegen::CodeGenerator;
 use inkwell::context::Context;
 
@@ -32,6 +33,13 @@ fn compile_and_run_with_args(source_path: &str, args: &[String]) -> Result<i32, 
     let program = parse_result.map_err(|errors| {
         errors.iter().map(|e| parser.format_error(e)).collect::<Vec<_>>().join("\n")
     })?;
+
+    // Typecheck
+    let mut typechecker = TypeChecker::new().with_source_file(source_path.to_string());
+    typechecker.check_program(&program)
+        .map_err(|errors| {
+            errors.iter().map(|e| typechecker.format_error(e)).collect::<Vec<_>>().join("\n")
+        })?;
 
     // Generate LLVM IR
     let context = Context::create();
@@ -178,4 +186,40 @@ fn test_variable_shadowing() {
     let result = compile_and_run("tests/programs/variable_shadowing.tjlb")
         .expect("Failed to compile and run variable_shadowing.tjlb");
     assert_eq!(result, 10, "Expected exit code 10, got {result}");
+}
+
+#[test]
+fn test_list_init() {
+    let result = compile_and_run("tests/programs/list_init.tjlb")
+        .expect("Failed to compile and run list_init.tjlb");
+    assert_eq!(result, 42, "Expected exit code 42, got {result}");
+}
+
+#[test]
+fn test_stress_test() {
+    let result = compile_and_run("demos/stress_test.tjlb")
+        .expect("Failed to compile and run stress_test.tjlb");
+    // Returns g_pass (68 when all tests pass)
+    assert!(result > 0, "Expected all stress tests to pass, got exit code {result}");
+}
+
+#[test]
+fn test_literal_coercion() {
+    let result = compile_and_run("tests/programs/literal_coercion.tjlb")
+        .expect("Failed to compile and run literal_coercion.tjlb");
+    assert_eq!(result, 0, "Expected exit code 0 (all coercions correct), got {result}");
+}
+
+#[test]
+fn test_literal_overflow_rejected() {
+    let result = compile_and_run("tests/programs/literal_overflow.tjlb");
+    assert!(
+        result.is_err(),
+        "Expected compilation to fail for out-of-range literal (300 in u8), but it succeeded"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.to_lowercase().contains("type") || err.to_lowercase().contains("mismatch"),
+        "Expected a type error, got: {err}"
+    );
 }

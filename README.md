@@ -145,4 +145,8 @@ This project uses or used AI for the following purposes:
 2. The creation of the vscode-tjlb syntax highlighting extension.
 3. Assistance in planning of features (implementations are done by hand)
 4. Research into required topics for compiler development.
-5. Some inline comments
+5. Some inline comments to improve readability 
+6. The DSL Procedural Macro System for the Parser
+7. Commit messages
+
+The reasoning for using it in these cases is rather simple: I am lazy, and I hate documenting stuff. 

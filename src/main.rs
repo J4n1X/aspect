@@ -177,14 +177,14 @@ fn compile_file(path: &PathBuf, output: Option<&std::path::Path>, print: bool, o
         anyhow::anyhow!("{}", msgs.join("\n"))
     })?;
 
-    let mut typechecker = TypeChecker::new();
+    let mut typechecker = TypeChecker::new().with_source_file(path.display().to_string());
     typechecker.check_program(&program)
         .map_err(|errors| {
-            let mut err_msg = format!("Type checking failed for '{}':\n", path.display());
-            for error in errors {
-                let _ = writeln!(err_msg, "  - {error}");
+            let mut err_msg = String::new();
+            for error in &errors {
+                let _ = writeln!(err_msg, "{}", typechecker.format_error(error));
             }
-            anyhow::anyhow!(err_msg)
+            anyhow::anyhow!("Type checking failed for '{}':\n{}", path.display(), err_msg.trim_end())
         })?;
 
     // Generate LLVM IR

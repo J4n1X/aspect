@@ -43,7 +43,7 @@ fn main() -> i32 {
     i32 partial_sum = sum_i32(&partial as i32*, 5)
 
     # u8 null-terminated string via full init
-    u8[6] hello = {72 as u8, 101 as u8, 108 as u8, 108 as u8, 111 as u8, 0 as u8}
+    u8[6] hello = {72, 101, 108, 108, 111, 0}
     puts(&hello as u8*)
 
     # Expression elements

@@ -4,4 +4,4 @@ pub mod types;
 
 pub use checker::*;
 pub use errors::*;
-pub use types::*;
+pub use types::{cast_valid, literal_float_compatible, literal_int_fits, types_coercible};

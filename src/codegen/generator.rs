@@ -6,7 +6,7 @@ use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target, Targe
 use inkwell::module::Module;
 use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::values::{
-    BasicValueEnum, FunctionValue, IntValue, PointerValue,
+    BasicValueEnum, FloatValue, FunctionValue, IntValue, PointerValue,
 };
 use inkwell::basic_block::BasicBlock;
 use inkwell::{AddressSpace, OptimizationLevel};
@@ -14,6 +14,7 @@ use inkwell::IntPredicate;
 use std::collections::HashMap;
 
 use crate::codegen::{is_void_type, lang_type_to_llvm, lang_type_to_llvm_array, CodegenError};
+use crate::codegen::types::{float_cmp_pred, int_cmp_pred, widen_floats_to_match, widen_ints_to_match};
 use crate::lexer::TypeBase;
 use crate::parser::{
     BinaryOp, ComparisonOp, ExprKind, Expression, Function, GlobalVar, LiteralValue, Program,
@@ -43,7 +44,10 @@ pub struct CodeGenerator<'ctx> {
 
     functions: HashMap<String, FunctionValue<'ctx>>,
 
-    // Unified local variable scope stack (RT-11: merged variables + variable_types + array tracking)
+    /// Parameter LangTypes per function name — needed for arg coercion at call sites.
+    function_lang_params: HashMap<String, Vec<LangType>>,
+
+    // Unified local variable scope stack
     variables: Vec<HashMap<String, LocalVar<'ctx>>>,
 
     // Global variables (unified tracking)
@@ -51,7 +55,10 @@ pub struct CodeGenerator<'ctx> {
 
     current_function: Option<FunctionValue<'ctx>>,
 
-    // Loop stack for break/continue support (RT-4)
+    /// Return type of the function currently being generated — used in `generate_return`.
+    current_function_return_type: Option<LangType>,
+
+    // Loop stack for break/continue support
     // Each entry is (break_bb, continue_bb)
     loop_stack: Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>,
 }
@@ -71,8 +78,24 @@ impl<'ctx> CodeGenerator<'ctx> {
         Target::initialize_native(&InitializationConfig::default()).expect("Failed to initialize native target");
 
         // TODO: Make target configurable
-        let target = Target::from_triple(&TargetMachine::get_default_triple())
+        let triple = TargetMachine::get_default_triple();
+        let target = Target::from_triple(&triple)
             .expect("Failed to get target from triple");
+
+        // Set module triple and data layout so LLVM uses the correct ABI alignments
+        // (e.g. i64 → align 8 on x86-64 instead of defaulting to align 4).
+        let target_machine = target
+            .create_target_machine(
+                &triple,
+                "generic",
+                "",
+                OptimizationLevel::None,
+                RelocMode::Default,
+                CodeModel::Default,
+            )
+            .expect("Failed to create target machine for data layout");
+        module.set_triple(&triple);
+        module.set_data_layout(&target_machine.get_target_data().get_data_layout());
 
         Self {
             context,
@@ -80,9 +103,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             builder,
             target,
             functions: HashMap::new(),
+            function_lang_params: HashMap::new(),
             variables: vec![HashMap::new()],
             global_variables: HashMap::new(),
             current_function: None,
+            current_function_return_type: None,
             loop_stack: Vec::new(),
         }
     }
@@ -122,7 +147,10 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Declare a function (without body)
     fn declare_function(&mut self, func: &Function) -> Result<FunctionValue<'ctx>, CodegenError> {
-        // Convert parameter types
+        // Collect parameter LangTypes for call-site coercion
+        let param_lang_types: Vec<LangType> = func.proto.params.iter().map(|(ty, _)| *ty).collect();
+
+        // Convert parameter types to LLVM
         let param_types: Result<Vec<_>, _> = func
             .proto
             .params
@@ -159,6 +187,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         self.functions.insert(func.proto.name.clone(), function);
+        self.function_lang_params.insert(func.proto.name.clone(), param_lang_types);
         Ok(function)
     }
 
@@ -169,6 +198,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         })?;
 
         self.current_function = Some(function);
+        self.current_function_return_type = Some(func.proto.return_type);
 
         // Create entry block
         let entry_block = self.context.append_basic_block(function, "entry");
@@ -205,6 +235,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         self.exit_scope();
         self.current_function = None;
+        self.current_function_return_type = None;
 
         Ok(())
     }
@@ -222,8 +253,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .add_global(global_type, Some(AddressSpace::default()), &global.name);
 
         if let Some(init_expr) = &global.initializer {
-            let init_value = self.generate_constant_expression(init_expr)?;
-            global_var.set_initializer(&init_value);
+            if let ExprKind::ListInitializer(elements) = &init_expr.kind {
+                // Array literal initializer -> ConstantArray
+                let const_array = self.generate_constant_array_value(&global.var_type, elements)?;
+                global_var.set_initializer(&const_array);
+            } else {
+                let init_value = self.generate_constant_expression(init_expr)?;
+                global_var.set_initializer(&init_value);
+            }
         } else {
             global_var.set_initializer(&global_type.const_zero());
         }
@@ -335,7 +372,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             lang_type_to_llvm(self.context, var_type)?
         };
 
-        // Allocate in the entry block for mem2reg compatibility (RT-1 fix)
+        // Allocate in the entry block for mem2reg compatibility
         let function = self.current_function
             .ok_or_else(|| CodegenError::UnexpectedStatement(pos))?;
         let entry_block = function.get_first_basic_block()
@@ -351,39 +388,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         let alloca = self.builder.build_alloca(llvm_type, name)?;
         self.builder.position_at_end(current_block);
 
-        // Store in scope with LangType for array tracking (RT-2 fix)
+        // Store in scope with LangType for array tracking and call-site coercion
         self.add_variable(name.to_string(), alloca, llvm_type, *var_type);
 
         if var_type.is_array() {
             if let Some(Expression { kind: ExprKind::ListInitializer(elements), .. }) = initializer {
-                return self.generate_list_init(alloca, var_type, elements);
+                return self.generate_list_initializer(alloca, var_type, elements);
             }
             return Ok(());
         }
 
         if let Some(init_expr) = initializer {
-            // For integer/float literals assigned to numeric types, generate with
-            // the target type directly so the literal type matches its context.
-            // Skip for pointer/array targets — those need the default path.
-            let init_value = match &init_expr.kind {
-                ExprKind::Literal(lit @ LiteralValue::Integer(_))
-                    if var_type.pointer_depth == 0 && !var_type.is_array() =>
-                {
-                    self.generate_literal_typed(lit, var_type, init_expr.pos)?
-                }
-                ExprKind::Literal(lit @ LiteralValue::Float(_))
-                    if var_type.pointer_depth == 0 && !var_type.is_array() =>
-                {
-                    self.generate_literal_typed(lit, var_type, init_expr.pos)?
-                }
-                _ => {
-                    let mut val = self.generate_expression(init_expr)?;
-                    if val.get_type() != llvm_type {
-                        val = self.cast_value(val, llvm_type, &init_expr.expr_type, var_type)?;
-                    }
-                    val
-                }
-            };
+            let init_value = self.generate_coerced_value(init_expr, Some(var_type))?;
             self.builder.build_store(alloca, init_value)?;
         } else {
             self.builder.build_store(alloca, llvm_type.const_zero())?;
@@ -403,29 +419,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or_else(|| CodegenError::UndefinedVariable(name.to_string(), pos))?;
 
         let var_ptr = var_info.ptr;
-        let var_type = var_info.llvm_type;
         let var_lang_type = var_info.lang_type;
 
-        let value_llvm = match &value.kind {
-            ExprKind::Literal(lit @ LiteralValue::Integer(_))
-                if var_lang_type.pointer_depth == 0 && !var_lang_type.is_array() =>
-            {
-                self.generate_literal_typed(lit, &var_lang_type, value.pos)?
-            }
-            ExprKind::Literal(lit @ LiteralValue::Float(_))
-                if var_lang_type.pointer_depth == 0 && !var_lang_type.is_array() =>
-            {
-                self.generate_literal_typed(lit, &var_lang_type, value.pos)?
-            }
-            _ => {
-                let mut val = self.generate_expression(value)?;
-                if val.get_type() != var_type {
-                    val = self.cast_value(val, var_type, &value.expr_type, &var_lang_type)?;
-                }
-                val
-            }
-        };
-
+        let value_llvm = self.generate_coerced_value(value, Some(&var_lang_type))?;
         self.builder.build_store(var_ptr, value_llvm)?;
         Ok(())
     }
@@ -451,7 +447,8 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     fn generate_return(&mut self, expr: Option<&Expression>) -> Result<(), CodegenError> {
         if let Some(expr) = expr {
-            let value = self.generate_expression(expr)?;
+            let ret_type = self.current_function_return_type;
+            let value = self.generate_coerced_value(expr, ret_type.as_ref())?;
             self.builder.build_return(Some(&value))?;
         } else {
             self.builder.build_return(None)?;
@@ -536,7 +533,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let body_bb = self.context.append_basic_block(function, "while.body");
         let end_bb = self.context.append_basic_block(function, "while.end");
 
-        // Push loop context for break/continue (RT-4)
+        // Push loop context for break/continue
         self.loop_stack.push((end_bb, cond_bb));
 
         // Jump to condition
@@ -589,7 +586,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let inc_bb = self.context.append_basic_block(function, "for.inc");
         let end_bb = self.context.append_basic_block(function, "for.end");
 
-        // Push loop context for break/continue (RT-4)
+        // Push loop context for break/continue
         // break jumps to end_bb, continue jumps to inc_bb
         self.loop_stack.push((end_bb, inc_bb));
 
@@ -645,7 +642,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .lookup_var_info(name)
                     .ok_or_else(|| CodegenError::UndefinedVariable(name.clone(), expr.pos))?;
 
-                // Array-to-pointer decay (RT-2: use lang_type instead of HashSet)
+                // Array-to-pointer decay
                 if var_info.lang_type.is_array() {
                     return Ok(var_info.ptr.into());
                 }
@@ -733,8 +730,42 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// Generate a literal value, using the given type for the literal.
-    /// Includes overflow detection for integer literals.
+    /// Generate an expression coerced to an optional target type.
+    ///
+    /// * If `expr` is a numeric literal and `target` is a scalar type, the literal
+    ///   is generated directly with the target type (no implicit widening step needed).
+    /// * Otherwise, the expression is generated normally, then auto-widened to the
+    ///   target type via `cast_value` if the types differ.
+    fn generate_coerced_value(
+        &mut self,
+        expr: &Expression,
+        target: Option<&LangType>,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        // Fast path: literal assigned to a scalar target
+        if let Some(target_ty) = target {
+            if target_ty.pointer_depth == 0 && !target_ty.is_array() {
+                if let ExprKind::Literal(lit @ (LiteralValue::Integer(_) | LiteralValue::Float(_))) = &expr.kind {
+                    return self.generate_literal_typed(lit, target_ty, expr.pos);
+                }
+            }
+        }
+
+        let val = self.generate_expression(expr)?;
+
+        // Auto-widen to target if types differ
+        if let Some(target_ty) = target {
+            if target_ty.pointer_depth == 0 && !target_ty.is_array() {
+                let target_llvm = lang_type_to_llvm(self.context, target_ty)?;
+                if val.get_type() != target_llvm {
+                    return self.cast_value(val, target_llvm, &expr.expr_type, target_ty);
+                }
+            }
+        }
+
+        Ok(val)
+    }
+
+    /// Generate a literal value with an explicit target type for overflow checking.
     #[allow(clippy::cast_sign_loss)]
     fn generate_literal_typed(
         &self,
@@ -846,146 +877,49 @@ impl<'ctx> CodeGenerator<'ctx> {
         right: &Expression,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         let is_signed = matches!(left.expr_type.base, TypeBase::SInt);
-        let mut left_int = self.generate_expression(left)?.into_int_value();
-        let mut right_int = self.generate_expression(right)?.into_int_value();
+        let right_is_signed = matches!(right.expr_type.base, TypeBase::SInt);
+        let left_int = self.generate_expression(left)?.into_int_value();
+        let right_int = self.generate_expression(right)?.into_int_value();
 
-        // Ensure both integers have the same bit width
-        if left_int.get_type().get_bit_width() != right_int.get_type().get_bit_width() {
-            let left_bits = left_int.get_type().get_bit_width();
-            let right_bits = right_int.get_type().get_bit_width();
-            let right_is_signed = matches!(right.expr_type.base, TypeBase::SInt);
-            if left_bits > right_bits {
-                eprintln!("warning: implicit cast: {} ({}-bit) widened to {}-bit to match left operand in binary expression at {}:{}",
-                    right.expr_type, right_bits, left_bits, right.pos.line, right.pos.column);
-                right_int = if right_is_signed {
-                    self.builder.build_int_s_extend(right_int, left_int.get_type(), "sext")?
-                } else {
-                    self.builder.build_int_z_extend(right_int, left_int.get_type(), "zext")?
-                };
-            } else {
-                eprintln!("warning: implicit cast: {} ({}-bit) widened to {}-bit to match right operand in binary expression at {}:{}",
-                    left.expr_type, left_bits, right_bits, left.pos.line, left.pos.column);
-                left_int = if is_signed {
-                    self.builder.build_int_s_extend(left_int, right_int.get_type(), "sext")?
-                } else {
-                    self.builder.build_int_z_extend(left_int, right_int.get_type(), "zext")?
-                };
-            }
-        }
+        let (left_int, right_int) =
+            widen_ints_to_match(&self.builder, left_int, is_signed, right_int, right_is_signed)?;
 
         let res = match op {
-            BinaryOp::Add => self
-                .builder
-                .build_int_add(left_int, right_int, "add")
-                .map(Into::into)?,
-            BinaryOp::Sub => self
-                .builder
-                .build_int_sub(left_int, right_int, "sub")
-                .map(Into::into)?,
-            BinaryOp::Mul => self
-                .builder
-                .build_int_mul(left_int, right_int, "mul")
-                .map(Into::into)?,
+            BinaryOp::Add => self.builder.build_int_add(left_int, right_int, "add").map(Into::into)?,
+            BinaryOp::Sub => self.builder.build_int_sub(left_int, right_int, "sub").map(Into::into)?,
+            BinaryOp::Mul => self.builder.build_int_mul(left_int, right_int, "mul").map(Into::into)?,
             BinaryOp::Div => {
-                if is_signed {
-                    self.builder
-                        .build_int_signed_div(left_int, right_int, "sdiv")
-                        .map(Into::into)?
-                } else {
-                    self.builder
-                        .build_int_unsigned_div(left_int, right_int, "udiv")
-                        .map(Into::into)?
-                }
+                crate::signed_op!(self.builder, is_signed,
+                    build_int_signed_div, build_int_unsigned_div,
+                    left_int, right_int, "div").map(Into::into)?
             }
             BinaryOp::Mod => {
-                if is_signed {
-                    self.builder
-                        .build_int_signed_rem(left_int, right_int, "srem")
-                        .map(Into::into)?
-                } else {
-                    self.builder
-                        .build_int_unsigned_rem(left_int, right_int, "urem")
-                        .map(Into::into)?
-                }
+                crate::signed_op!(self.builder, is_signed,
+                    build_int_signed_rem, build_int_unsigned_rem,
+                    left_int, right_int, "rem").map(Into::into)?
             }
-            BinaryOp::And => self
-                .builder
-                .build_and(left_int, right_int, "and")
-                .map(Into::into)?,
-            BinaryOp::Or => self
-                .builder
-                .build_or(left_int, right_int, "or")
-                .map(Into::into)?,
-            BinaryOp::Xor => self
-                .builder
-                .build_xor(left_int, right_int, "xor")
-                .map(Into::into)?,
-            BinaryOp::LeftShift => self
-                .builder
-                .build_left_shift(left_int, right_int, "shl")
-                .map(Into::into)?,
-            BinaryOp::RightShift => {
-                if is_signed {
-                    self.builder
-                        .build_right_shift(left_int, right_int, true, "ashr")
-                        .map(Into::into)?
-                } else {
-                    self.builder
-                        .build_right_shift(left_int, right_int, false, "lshr")
-                        .map(Into::into)?
-                }
-            }
+            BinaryOp::And  => self.builder.build_and(left_int, right_int, "and").map(Into::into)?,
+            BinaryOp::Or   => self.builder.build_or(left_int, right_int, "or").map(Into::into)?,
+            BinaryOp::Xor  => self.builder.build_xor(left_int, right_int, "xor").map(Into::into)?,
+            BinaryOp::LeftShift  => self.builder.build_left_shift(left_int, right_int, "shl").map(Into::into)?,
+            BinaryOp::RightShift => self.builder.build_right_shift(left_int, right_int, is_signed, "shr").map(Into::into)?,
             BinaryOp::LogicalAnd => {
                 let is_zero = self.builder.build_int_compare(
-                    inkwell::IntPredicate::EQ,
-                    left_int,
-                    left_int.get_type().const_zero(),
-                    "land_l",
-                )?;
+                    inkwell::IntPredicate::EQ, left_int, left_int.get_type().const_zero(), "land_l")?;
                 let right_is_nonzero = self.builder.build_int_compare(
-                    inkwell::IntPredicate::NE,
-                    right_int,
-                    right_int.get_type().const_zero(),
-                    "land_r",
-                )?;
+                    inkwell::IntPredicate::NE, right_int, right_int.get_type().const_zero(), "land_r")?;
                 let i1_false = self.context.bool_type().const_int(0, false);
-                let result = self.builder.build_select(
-                    is_zero,
-                    i1_false,
-                    right_is_nonzero,
-                    "landtmp",
-                )?;
-                self.builder.build_int_z_extend(
-                    result.into_int_value(),
-                    self.context.i32_type(),
-                    "landtmp_ext",
-                )?.into()
+                let result = self.builder.build_select(is_zero, i1_false, right_is_nonzero, "landtmp")?;
+                self.builder.build_int_z_extend(result.into_int_value(), self.context.i32_type(), "landtmp_ext")?.into()
             }
             BinaryOp::LogicalOr => {
                 let is_nonzero = self.builder.build_int_compare(
-                    inkwell::IntPredicate::NE,
-                    left_int,
-                    left_int.get_type().const_zero(),
-                    "lor_l",
-                )?;
+                    inkwell::IntPredicate::NE, left_int, left_int.get_type().const_zero(), "lor_l")?;
                 let right_is_nonzero = self.builder.build_int_compare(
-                    inkwell::IntPredicate::NE,
-                    right_int,
-                    right_int.get_type().const_zero(),
-                    "lor_r",
-                )?;
+                    inkwell::IntPredicate::NE, right_int, right_int.get_type().const_zero(), "lor_r")?;
                 let i1_true = self.context.bool_type().const_int(1, false);
-                let result = self.builder.build_select(
-                    is_nonzero,
-                    i1_true,
-                    right_is_nonzero,
-                    "lortmp",
-                )?;
-                self.builder.build_int_z_extend(
-                    result.into_int_value(),
-                    self.context.i32_type(),
-                    "lortmp_ext",
-                )?.into()
+                let result = self.builder.build_select(is_nonzero, i1_true, right_is_nonzero, "lortmp")?;
+                self.builder.build_int_z_extend(result.into_int_value(), self.context.i32_type(), "lortmp_ext")?.into()
             }
         };
         Ok(res)
@@ -998,7 +932,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         right: &Expression,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         let left_float = self.generate_expression(left)?.into_float_value();
-        let right_float =self.generate_expression(right)?.into_float_value();
+        let right_float = self.generate_expression(right)?.into_float_value();
+        let (left_float, right_float) = widen_floats_to_match(&self.context, &self.builder, left_float, right_float)?;
         match op {
             BinaryOp::Add => Ok(self
                 .builder
@@ -1096,113 +1031,22 @@ impl<'ctx> CodeGenerator<'ctx> {
         let is_float = matches!(left.expr_type.base, TypeBase::SFloat);
 
         if is_float {
-            let mut left_float = left_val.into_float_value();
-            let mut right_float = right_val.into_float_value();
-
-            // Ensure both floats have the same type (f32 vs f64)
-            if left_float.get_type() != right_float.get_type() {
-                let left_bits = if left_float.get_type() == self.context.f32_type() { 32 } else { 64 };
-                let right_bits = if right_float.get_type() == self.context.f32_type() { 32 } else { 64 };
-                if left_bits > right_bits {
-                    eprintln!("warning: implicit cast: {} ({}-bit) widened to {}-bit to match left operand in comparison at {}:{}",
-                        right.expr_type, right_bits, left_bits, right.pos.line, right.pos.column);
-                    right_float = self.builder.build_float_ext(right_float, left_float.get_type(), "fpext")?;
-                } else {
-                    eprintln!("warning: implicit cast: {} ({}-bit) widened to {}-bit to match right operand in comparison at {}:{}",
-                        left.expr_type, left_bits, right_bits, left.pos.line, left.pos.column);
-                    left_float = self.builder.build_float_ext(left_float, right_float.get_type(), "fpext")?;
-                }
-            }
-
-            let predicate = match op {
-                ComparisonOp::Equal => inkwell::FloatPredicate::OEQ,
-                ComparisonOp::NotEqual => inkwell::FloatPredicate::ONE,
-                ComparisonOp::Less => inkwell::FloatPredicate::OLT,
-                ComparisonOp::Greater => inkwell::FloatPredicate::OGT,
-                ComparisonOp::LessEqual => inkwell::FloatPredicate::OLE,
-                ComparisonOp::GreaterEqual => inkwell::FloatPredicate::OGE,
-            };
-
-            let cmp = self
-                .builder
-                .build_float_compare(predicate, left_float, right_float, "fcmp")
-                ?;
-
-            // Extend to i32
-            Ok(self.builder
-                .build_int_z_extend(cmp, self.context.i32_type(), "cmp_ext")
-                .map(Into::into)?)
+            let left_float = left_val.into_float_value();
+            let right_float = right_val.into_float_value();
+            let (left_float, right_float) = widen_floats_to_match(&self.context, &self.builder, left_float, right_float)?;
+            let predicate = float_cmp_pred(op);
+            let cmp = self.builder.build_float_compare(predicate, left_float, right_float, "fcmp")?;
+            Ok(cmp.into())
         } else {
-            let mut left_int = left_val.into_int_value();
-            let mut right_int = right_val.into_int_value();
+            let left_int = left_val.into_int_value();
+            let right_int = right_val.into_int_value();
             let is_signed = matches!(left.expr_type.base, TypeBase::SInt);
-
-            // Ensure both integers have the same bit width
-            if left_int.get_type().get_bit_width() != right_int.get_type().get_bit_width() {
-                let left_bits = left_int.get_type().get_bit_width();
-                let right_bits = right_int.get_type().get_bit_width();
-                let right_is_signed = matches!(right.expr_type.base, TypeBase::SInt);
-                if left_bits > right_bits {
-                    eprintln!("warning: implicit cast: {} ({}-bit) widened to {}-bit to match left operand in comparison at {}:{}",
-                        right.expr_type, right_bits, left_bits, right.pos.line, right.pos.column);
-                    right_int = if right_is_signed {
-                        self.builder.build_int_s_extend(right_int, left_int.get_type(), "sext")?
-                    } else {
-                        self.builder.build_int_z_extend(right_int, left_int.get_type(), "zext")?
-                    };
-                } else {
-                    eprintln!("warning: implicit cast: {} ({}-bit) widened to {}-bit to match right operand in comparison at {}:{}",
-                        left.expr_type, left_bits, right_bits, left.pos.line, left.pos.column);
-                    left_int = if is_signed {
-                        self.builder.build_int_s_extend(left_int, right_int.get_type(), "sext")?
-                    } else {
-                        self.builder.build_int_z_extend(left_int, right_int.get_type(), "zext")?
-                    };
-                }
-            }
-
-            let predicate = match op {
-                ComparisonOp::Equal => IntPredicate::EQ,
-                ComparisonOp::NotEqual => IntPredicate::NE,
-                ComparisonOp::Less => {
-                    if is_signed {
-                        IntPredicate::SLT
-                    } else {
-                        IntPredicate::ULT
-                    }
-                }
-                ComparisonOp::Greater => {
-                    if is_signed {
-                        IntPredicate::SGT
-                    } else {
-                        IntPredicate::UGT
-                    }
-                }
-                ComparisonOp::LessEqual => {
-                    if is_signed {
-                        IntPredicate::SLE
-                    } else {
-                        IntPredicate::ULE
-                    }
-                }
-                ComparisonOp::GreaterEqual => {
-                    if is_signed {
-                        IntPredicate::SGE
-                    } else {
-                        IntPredicate::UGE
-                    }
-                }
-            };
-
-            let cmp = self
-                .builder
-                .build_int_compare(predicate, left_int, right_int, "icmp")
-                ?;
-
-            // Extend to i32
-            Ok(self.builder
-                .build_int_z_extend(cmp, self.context.i32_type(), "cmp_ext")
-                .map(Into::into)?)
+            let right_is_signed = matches!(right.expr_type.base, TypeBase::SInt);
+            let (left_int, right_int) =
+                widen_ints_to_match(&self.builder, left_int, is_signed, right_int, right_is_signed)?;
+            let predicate = int_cmp_pred(op, is_signed);
+            let cmp = self.builder.build_int_compare(predicate, left_int, right_int, "icmp")?;
+            Ok(cmp.into())
         }
     }
 
@@ -1218,9 +1062,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             .get(name)
             .ok_or_else(|| CodegenError::UndefinedFunction(name.to_string(), pos))?;
 
+        let param_types = self.function_lang_params.get(name).cloned().unwrap_or_default();
         let mut arg_values = Vec::new();
-        for arg in args {
-            let val = self.generate_expression(arg)?;
+        for (i, arg) in args.iter().enumerate() {
+            let target_ty = param_types.get(i);
+            let val = self.generate_coerced_value(arg, target_ty)?;
             arg_values.push(val.into());
         }
 
@@ -1248,9 +1094,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             .get(name)
             .ok_or_else(|| CodegenError::UndefinedFunction(name.to_string(), pos))?;
 
+        let param_types = self.function_lang_params.get(name).cloned().unwrap_or_default();
         let mut arg_values = Vec::new();
-        for arg in args {
-            let val = self.generate_expression(arg)?;
+        for (i, arg) in args.iter().enumerate() {
+            let target_ty = param_types.get(i);
+            let val = self.generate_coerced_value(arg, target_ty)?;
             arg_values.push(val.into());
         }
 
@@ -1335,7 +1183,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             });
         }
 
-        // Handle float to int (RT-3: use target type's signedness)
+        // Handle float to int
         if target_is_int && value.is_float_value() {
             let float_val = value.into_float_value();
             let target_int_type = target_llvm_type.into_int_type();
@@ -1370,14 +1218,19 @@ impl<'ctx> CodeGenerator<'ctx> {
 
             return match target_bits.cmp(&source_bits) {
                 std::cmp::Ordering::Greater => {
-                    // Extend
-                    Ok(if is_signed {
+                    // i1 is a boolean result (from icmp/fcmp); always zero-extend regardless of
+                    // what the typechecker recorded for the expression type. Using sext would
+                    // turn the value 1 into -1 when widening to e.g. i32.
+                    // Otherwise, we can just use the signedness of the source type to determine 
+                    // whether to use sext or zext.
+                    let use_zext = source_bits == 1 || !is_signed;
+                    Ok(if use_zext {
                         self.builder
-                            .build_int_s_extend(int_val, target_int_type, "sext")
+                            .build_int_z_extend(int_val, target_int_type, "zext")
                             .map(Into::into)?
                     } else {
                         self.builder
-                            .build_int_z_extend(int_val, target_int_type, "zext")
+                            .build_int_s_extend(int_val, target_int_type, "sext")
                             .map(Into::into)?
                     })
                 }
@@ -1461,7 +1314,10 @@ impl<'ctx> CodeGenerator<'ctx> {
     fn value_to_bool(&self, value: BasicValueEnum<'ctx>) -> Result<IntValue<'ctx>, CodegenError> {
         if value.is_int_value() {
             let int_val = value.into_int_value();
-            // Compare with zero
+            // Already i1 (e.g. direct result of icmp/fcmp) — no extra compare needed
+            if int_val.get_type().get_bit_width() == 1 {
+                return Ok(int_val);
+            }
             let zero = int_val.get_type().const_zero();
             Ok(self.builder
                 .build_int_compare(IntPredicate::NE, int_val, zero, "tobool")?)
@@ -1495,7 +1351,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(llvm_type.const_zero())
     }
 
-    // Scope management (RT-11: unified variable tracking)
+    // Scope management
     fn enter_scope(&mut self) {
         self.variables.push(HashMap::new());
     }
@@ -1605,9 +1461,56 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
     
-// Frankly, I don't think this is the way to go about implementing this.
-// But, my knowledge of LLVM is horribly limited, so here we are.
-fn generate_list_init(
+fn generate_constant_array_value(
+    &self,
+    var_type: &LangType,
+    elements: &[Expression],
+) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+    let elem_lang_type = var_type.element_type();
+    let elem_llvm_type = lang_type_to_llvm(self.context, &elem_lang_type)?;
+    let array_size = var_type.array_size.unwrap_or(0) as usize;
+
+    // Generate constant values for provided elements (must all be literals)
+    let mut const_vals: Vec<BasicValueEnum<'ctx>> = Vec::with_capacity(array_size);
+    for elem in elements {
+        match &elem.kind {
+            ExprKind::Literal(lit) => {
+                const_vals.push(self.generate_constant_literal(lit, &elem_lang_type)?);
+            }
+            _ => return Err(CodegenError::InvalidOperation(
+                "constant array initializer elements must be literals".to_string(),
+                elem.pos,
+            )),
+        }
+    }
+
+    // Zero-pad to array_size
+    while const_vals.len() < array_size {
+        const_vals.push(elem_llvm_type.const_zero());
+    }
+
+    // Build ConstantArray for the element type
+    match elem_llvm_type {
+        BasicTypeEnum::IntType(int_ty) => {
+            let vals: Vec<IntValue> = const_vals.iter().map(|v| v.into_int_value()).collect();
+            Ok(int_ty.const_array(&vals).into())
+        }
+        BasicTypeEnum::FloatType(float_ty) => {
+            let vals: Vec<FloatValue> = const_vals.iter().map(|v| v.into_float_value()).collect();
+            Ok(float_ty.const_array(&vals).into())
+        }
+        BasicTypeEnum::PointerType(ptr_ty) => {
+            let vals: Vec<PointerValue> = const_vals.iter().map(|v| v.into_pointer_value()).collect();
+            Ok(ptr_ty.const_array(&vals).into())
+        }
+        _ => Err(CodegenError::InvalidOperation(
+            format!("unsupported element type for constant array: {elem_llvm_type}"),
+            crate::lexer::Position::new(0, 0),
+        )),
+    }
+}
+
+fn generate_list_initializer(
     &mut self,
     array_ptr: PointerValue<'ctx>,
     var_type: &LangType,
@@ -1615,44 +1518,51 @@ fn generate_list_init(
 ) -> Result<(), CodegenError> {
     let elem_lang_type = var_type.element_type();
     let elem_llvm_type = lang_type_to_llvm(self.context, &elem_lang_type)?;
+    let array_size = var_type.array_size.unwrap_or(0);
+    let array_llvm_type = elem_llvm_type.array_type(array_size);
 
+    // Empty initializer: zero the whole array
+    if elements.is_empty() {
+        self.builder.build_store(array_ptr, array_llvm_type.const_zero())?;
+        return Ok(());
+    }
+
+    // Fast path: all elements are integer/float literals -> emit a single ConstantArray store
+    let all_const = elements.iter().all(|e| matches!(e.kind,
+        ExprKind::Literal(LiteralValue::Integer(_) | LiteralValue::Float(_))));
+
+    if all_const {
+        let const_val = self.generate_constant_array_value(var_type, elements)?;
+        self.builder.build_store(array_ptr, const_val)?;
+        return Ok(());
+    }
+
+    // Runtime path: store each element via two-index GEP [0, i]
+    // This correctly addresses into a [N x elem] array pointer.
+    // i.e gep(array_ptr, [0, i]) = &(*array_ptr)[i]
     for (i, elem_expr) in elements.iter().enumerate() {
+        let zero  = self.context.i64_type().const_int(0, false);
         let index = self.context.i64_type().const_int(i as u64, false);
         let elem_ptr = unsafe {
-            self.builder.build_gep(elem_llvm_type, array_ptr, &[index], &format!("list_init.{i}"))?
+            self.builder.build_gep(
+                array_llvm_type, array_ptr, &[zero, index], &format!("list_init.{i}"),
+            )?
         };
-        let value = match &elem_expr.kind {
-            ExprKind::Literal(lit @ LiteralValue::Integer(_))
-                if elem_lang_type.pointer_depth == 0 =>
-            {
-                self.generate_literal_typed(lit, &elem_lang_type, elem_expr.pos)?
-            }
-            ExprKind::Literal(lit @ LiteralValue::Float(_))
-                if elem_lang_type.pointer_depth == 0 =>
-            {
-                self.generate_literal_typed(lit, &elem_lang_type, elem_expr.pos)?
-            }
-            _ => {
-                let mut val = self.generate_expression(elem_expr)?;
-                let target_type: BasicTypeEnum = elem_llvm_type.into();
-                if val.get_type() != target_type {
-                    val = self.cast_value(val, target_type, &elem_expr.expr_type, &elem_lang_type)?;
-                }
-                val
-            }
-        };
+        let value = self.generate_coerced_value(elem_expr, Some(&elem_lang_type))?;
         self.builder.build_store(elem_ptr, value)?;
     }
 
-    // Zero-fill any slots not covered by the initializer list
-    let array_size = var_type.array_size.unwrap_or(0) as usize;
-    let zero = elem_llvm_type.const_zero();
-    for i in elements.len()..array_size {
+    // Zero-fill any remaining slots
+    let zero_val = elem_llvm_type.const_zero();
+    for i in elements.len()..array_size as usize {
+        let zero  = self.context.i64_type().const_int(0, false);
         let index = self.context.i64_type().const_int(i as u64, false);
         let elem_ptr = unsafe {
-            self.builder.build_gep(elem_llvm_type, array_ptr, &[index], &format!("list_init_zero.{i}"))?
+            self.builder.build_gep(
+                array_llvm_type, array_ptr, &[zero, index], &format!("list_init_zero.{i}"),
+            )?
         };
-        self.builder.build_store(elem_ptr, zero)?;
+        self.builder.build_store(elem_ptr, zero_val)?;
     }
     Ok(())
 }

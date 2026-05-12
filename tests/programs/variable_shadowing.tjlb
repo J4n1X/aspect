@@ -1,4 +1,4 @@
-# Test variable shadowing (RT-1 fix)
+# Test variable shadowing
 fn main() -> i32 {
     i32 x = 10
 

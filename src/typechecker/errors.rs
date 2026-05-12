@@ -95,3 +95,28 @@ pub enum TypeCheckError {
         position: Position,
     },
 }
+
+impl TypeCheckError {
+    /// Return the source position associated with this error, if any.
+    #[must_use]
+    pub fn position(&self) -> Option<Position> {
+        match self {
+            Self::TypeMismatch { position, .. }
+            | Self::InvalidBinaryOperation { position, .. }
+            | Self::InvalidUnaryOperation { position, .. }
+            | Self::ArgumentCountMismatch { position, .. }
+            | Self::ArgumentTypeMismatch { position, .. }
+            | Self::ReturnTypeMismatch { position, .. }
+            | Self::AssignmentTypeMismatch { position, .. }
+            | Self::InvalidCast { position, .. }
+            | Self::AssignmentToConst { position, .. }
+            | Self::ListInitLengthMismatch { position, .. } => Some(*position),
+            Self::UndefinedVariable(_, pos)
+            | Self::UndefinedFunction(_, pos)
+            | Self::InvalidDereference(_, pos)
+            | Self::InvalidReference(pos)
+            | Self::InvalidConditionType(_, pos) => Some(*pos),
+            Self::MissingReturn(_) => None,
+        }
+    }
+}

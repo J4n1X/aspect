@@ -1,6 +1,6 @@
 #Test basic pointer arithmetic
 fn main() -> i32 {
-  i32 *ptr = 123
+  i32 *ptr = 123 as i32*
   i32 offset = 20
   ptr = ptr + offset
   return (ptr - offset) as i32 #Expected result: 123
