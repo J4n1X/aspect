@@ -33,7 +33,6 @@ tjlb-rust/
 │   ├── integration_tests.rs # Integration test suite
 │   └── programs/            # .tjlb test programs
 ├── doc/                     # This documentation
-├── LANGUAGE.md              # Full language reference
 ├── Cargo.toml               # Dependencies and features
 └── compile-file.sh          # Native compilation script
 ```
@@ -126,8 +125,8 @@ Runs LLVM's new pass manager with pipeline strings `default<O0>` through `defaul
 
 | Crate | Purpose |
 |-------|---------|
-| `inkwell` 0.7.1 (feature `llvm19-1`) | Safe Rust bindings to LLVM 19.1 |
-| `clap` 4.0 (feature `derive`) | CLI argument parsing |
+| `inkwell` 0.9.0 (feature `llvm19-1`) | Safe Rust bindings to LLVM 19.1 |
+| `clap` 4.6.1 (feature `derive`) | CLI argument parsing |
 | `anyhow` 1.0 | Contextual error handling |
 | `thiserror` 2.0.17 | Derive for custom error enums |
 

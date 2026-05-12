@@ -113,17 +113,35 @@ array-size  ::= '[' decimal-int ']'   # preallocated array, e.g. u8[256]
 pointer-depth ::= '*'*          # zero or more pointer levels
 ```
 
-Valid sizes:
+Valid types:
 
-| Category | Sizes |
-|---|---|
-| Signed integer | 8, 16, 32, 64 |
-| Unsigned integer | 8, 16, 32, 64 (plus 0 = void) |
-| Float | 32, 64 |
+| Type | Description | Size |
+|------|-------------|------|
+| `i8` | Signed 8-bit integer | 1 byte |
+| `i16` | Signed 16-bit integer | 2 bytes |
+| `i32` | Signed 32-bit integer | 4 bytes |
+| `i64` | Signed 64-bit integer | 8 bytes |
+| `u8` | Unsigned 8-bit integer | 1 byte |
+| `u16` | Unsigned 16-bit integer | 2 bytes |
+| `u32` | Unsigned 32-bit integer | 4 bytes |
+| `u64` | Unsigned 64-bit integer | 8 bytes |
+| `f32` | 32-bit floating point | 4 bytes |
+| `f64` | 64-bit floating point | 8 bytes |
+| `u0` | Void (no value) | — |
 
-`const` immediately precedes the base type: `const u8 *`, `const i32`.
-Any inline whitespace between `const` and the type is consumed by the
-lexer, so `const u8*` and `const u8 *` are both valid.
+`const` marks a value as constant and must immediately precede the base
+type. Any inline whitespace between `const` and the type is consumed by
+the lexer, so `const u8*` and `const u8 *` are both valid.
+
+Type modifier examples:
+
+```tjlb
+i32 value              # signed 32-bit integer
+const i32 CONSTANT     # constant signed 32-bit integer
+i32 *ptr               # pointer to i32
+const u8 *str          # pointer to constant u8 (string)
+i8 **argv              # pointer to pointer to i8
+```
 
 ### Literals
 
@@ -471,6 +489,94 @@ u8 *buf = u8[1024]    # heap-allocate 1024 bytes, return u8*
 
 This is separate from the preallocated-array declaration `u8[1024] buf`
 (which allocates on the stack at compile time).
+
+---
+
+## Examples
+
+### Hello World
+
+```tjlb
+extern fn puts(u8 *str) -> u0
+
+fn main() -> i32 {
+    const u8 *message = "Hello, World!"
+    puts(message)
+    return 0
+}
+```
+
+### Fibonacci
+
+```tjlb
+fn fib(i32 n) -> i32 {
+    if n <= 1 {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fn main() -> i32 {
+    return fib(10)  # Returns 55
+}
+```
+
+### String Length
+
+```tjlb
+fn strlen(u8 *str) -> i32 {
+    i32 counter = 0
+    while str[counter] != 0 as u8 {
+        counter = counter + 1
+    }
+    return counter
+}
+```
+
+### Memory Operations
+
+```tjlb
+fn memset(u8 *dst, u64 len, u8 c) -> u0 {
+    for (u64 i = 0; i < len; i += 1 as u64) {
+        dst[i] = c
+    }
+}
+
+fn main() -> i32 {
+    u8[256] buffer
+    memset(&buffer as u8*, 256 as u64, 0 as u8)
+    return 0
+}
+```
+
+### Command-Line Arguments
+
+```tjlb
+extern fn puts(u8 *str) -> u0
+
+fn main(i32 argc, i8 **argv) -> i32 {
+    if argc > 1 {
+        i8 *first_arg = argv[1]
+        puts(first_arg as u8*)
+    }
+    return 0
+}
+```
+
+### Bitwise Operations
+
+```tjlb
+fn main() -> i32 {
+    i32 a = 12    # Binary: 1100
+    i32 b = 10    # Binary: 1010
+
+    i32 and_result = a & b    # 1000 = 8
+    i32 or_result = a | b     # 1110 = 14
+    i32 xor_result = a ^ b    # 0110 = 6
+
+    return and_result + or_result + xor_result  # 28
+}
+```
 
 ---
 

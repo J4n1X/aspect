@@ -131,8 +131,18 @@ cargo test
 
 ## Documentation
 
-For language syntax and features, see [LANGUAGE.md](LANGUAGE.md).
+For language syntax and features as well as the function and makeup of the compiler, see the doc directory.
 
 ## License
 
 See LICENSE file for details.
+
+## Artificial Intelligence Disclosure
+
+This project uses or used AI for the following purposes:
+
+1. Documentation of the codebase, including the maintaining of the documentation directory
+2. The creation of the vscode-tjlb syntax highlighting extension.
+3. Assistance in planning of features (implementations are done by hand)
+4. Research into required topics for compiler development.
+5. Some inline comments
