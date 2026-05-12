@@ -355,6 +355,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.add_variable(name.to_string(), alloca, llvm_type, *var_type);
 
         if var_type.is_array() {
+            if let Some(Expression { kind: ExprKind::ListInitializer(elements), .. }) = initializer {
+                return self.generate_list_init(alloca, var_type, elements);
+            }
             return Ok(());
         }
 
@@ -722,6 +725,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let val = self.generate_expression(inner)?.into_int_value();
                 Ok(self.builder.build_not(val, "nottmp")?.into())
             }
+
+            ExprKind::ListInitializer(_) => Err(CodegenError::InvalidOperation(
+                "list initializer is only valid in a variable declaration".to_string(),
+                expr.pos,
+            )),
         }
     }
 
@@ -1597,6 +1605,58 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
     
+// Frankly, I don't think this is the way to go about implementing this.
+// But, my knowledge of LLVM is horribly limited, so here we are.
+fn generate_list_init(
+    &mut self,
+    array_ptr: PointerValue<'ctx>,
+    var_type: &LangType,
+    elements: &[Expression],
+) -> Result<(), CodegenError> {
+    let elem_lang_type = var_type.element_type();
+    let elem_llvm_type = lang_type_to_llvm(self.context, &elem_lang_type)?;
+
+    for (i, elem_expr) in elements.iter().enumerate() {
+        let index = self.context.i64_type().const_int(i as u64, false);
+        let elem_ptr = unsafe {
+            self.builder.build_gep(elem_llvm_type, array_ptr, &[index], &format!("list_init.{i}"))?
+        };
+        let value = match &elem_expr.kind {
+            ExprKind::Literal(lit @ LiteralValue::Integer(_))
+                if elem_lang_type.pointer_depth == 0 =>
+            {
+                self.generate_literal_typed(lit, &elem_lang_type, elem_expr.pos)?
+            }
+            ExprKind::Literal(lit @ LiteralValue::Float(_))
+                if elem_lang_type.pointer_depth == 0 =>
+            {
+                self.generate_literal_typed(lit, &elem_lang_type, elem_expr.pos)?
+            }
+            _ => {
+                let mut val = self.generate_expression(elem_expr)?;
+                let target_type: BasicTypeEnum = elem_llvm_type.into();
+                if val.get_type() != target_type {
+                    val = self.cast_value(val, target_type, &elem_expr.expr_type, &elem_lang_type)?;
+                }
+                val
+            }
+        };
+        self.builder.build_store(elem_ptr, value)?;
+    }
+
+    // Zero-fill any slots not covered by the initializer list
+    let array_size = var_type.array_size.unwrap_or(0) as usize;
+    let zero = elem_llvm_type.const_zero();
+    for i in elements.len()..array_size {
+        let index = self.context.i64_type().const_int(i as u64, false);
+        let elem_ptr = unsafe {
+            self.builder.build_gep(elem_llvm_type, array_ptr, &[index], &format!("list_init_zero.{i}"))?
+        };
+        self.builder.build_store(elem_ptr, zero)?;
+    }
+    Ok(())
+}
+
 fn generate_alloc(&mut self, alloc_type: &LangType, count: &Expression) -> Result<BasicValueEnum<'ctx>, CodegenError> {
     if self.current_function.is_none() {
         // --- GLOBAL ALLOCATION ---

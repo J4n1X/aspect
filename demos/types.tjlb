@@ -77,7 +77,7 @@ fn wide_mul(i32 a, i32 b) -> i64 {
 -#
 fn clamp_i8(i32 v) -> i8 {
     if v > 127 {
-        return 127
+        return 127 as i8
     }
     i32 min_val = 0 - 128
     if v < min_val {

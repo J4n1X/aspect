@@ -6,6 +6,8 @@
 | Function Pointers             | Come up with a syntax and implement function pointers                                       | MEDIUM   |
 | Structures                    | Implement structs                                                                           | MEDIUM   |
 | Multi-Pass for constants      | Run a multi-pass over the code to replace constant values with their literals.              | LOW      |
+| Source file for typecheck err | Print information on what source file the type checker warning or error came from           | LOW      |
+| Better literal casting        | Literals should take any shape, at any time                                                 | MEDIUM   |
 
 ## Done
 

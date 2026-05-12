@@ -118,13 +118,33 @@ impl TypeChecker {
             } => {
                 self.define_var(name.clone(), *var_type);
                 if let Some(init_expr) = initializer {
-                    let init_type = self.resolve_expression_type(init_expr);
-                    self.constraints.push(TypeConstraint::Compatible {
-                        expected: *var_type,
-                        found: init_type,
-                        pos: init_expr.pos,
-                        context: ConstraintContext::Initialization,
-                    });
+                    if let ExprKind::ListInitializer(elements) = &init_expr.kind {
+                        if let Some(expected_count) = var_type.array_size {
+                            self.constraints.push(TypeConstraint::ListInitLength {
+                                expected: expected_count as usize,
+                                found: elements.len(),
+                                pos: init_expr.pos,
+                            });
+                        }
+                        let elem_type = var_type.element_type();
+                        for elem in elements {
+                            let elem_found = self.resolve_expression_type(elem);
+                            self.constraints.push(TypeConstraint::Compatible {
+                                expected: elem_type,
+                                found: elem_found,
+                                pos: elem.pos,
+                                context: ConstraintContext::Initialization,
+                            });
+                        }
+                    } else {
+                        let init_type = self.resolve_expression_type(init_expr);
+                        self.constraints.push(TypeConstraint::Compatible {
+                            expected: *var_type,
+                            found: init_type,
+                            pos: init_expr.pos,
+                            context: ConstraintContext::Initialization,
+                        });
+                    }
                 }
             }
 
@@ -390,6 +410,13 @@ impl TypeChecker {
                 });
                 expr.expr_type
             }
+
+            ExprKind::ListInitializer(elements) => {
+                for elem in elements {
+                    self.resolve_expression_type(elem);
+                }
+                expr.expr_type
+            }
         }
     }
 
@@ -560,6 +587,17 @@ impl TypeChecker {
                     name: name.clone(),
                     position: *pos,
                 })
+            }
+
+            TypeConstraint::ListInitLength { expected, found, pos } => {
+                if found > expected {
+                    return Err(TypeCheckError::ListInitLengthMismatch {
+                        expected: *expected,
+                        found: *found,
+                        position: *pos,
+                    });
+                }
+                Ok(())
             }
         }
     }

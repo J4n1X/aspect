@@ -562,6 +562,11 @@ impl Parser {
                 Ok(expr)
             }
 
+            // List initializer (for array literals and in the future, for struct initializers)
+            TokenKind::OpenBrace => {
+                self.parse_init_list()
+            }
+
             _ => Err(ParserError::ExpectedExpression(pos)),
         }
     }
@@ -762,5 +767,29 @@ impl Parser {
         term!();
 
         Ok(GlobalVar { var_type, name, initializer, pos })
+    }
+
+    fn parse_init_list(&mut self) -> Result<Expression, ParserError> {
+        let pos = self.peek().pos;
+        self.expect(&TokenKind::OpenBrace, "{")?;
+
+        let mut elements = Vec::new();
+        self.skip_newlines();
+        if !self.check(&TokenKind::CloseBrace) {
+            loop {
+                self.skip_newlines();
+                elements.push(self.parse_expression()?);
+                self.skip_newlines();
+                if !self.match_token(&[TokenKind::Comma]) { break; }
+            }
+        }
+        self.skip_newlines();
+        self.expect(&TokenKind::CloseBrace, "}")?;
+
+        Ok(Expression::new(
+            ExprKind::ListInitializer(elements),
+            LangType::new(TypeBase::Void, 0, 0, false),
+            pos,
+        ))
     }
 }

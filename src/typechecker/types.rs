@@ -123,6 +123,12 @@ pub enum TypeConstraint {
         name: String,
         pos: Position,
     },
+    /// List initializer element count must match array size
+    ListInitLength {
+        expected: usize,
+        found: usize,
+        pos: Position,
+    },
 }
 
 /// Context for where a constraint originated (for better error messages)

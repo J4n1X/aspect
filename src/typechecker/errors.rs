@@ -87,4 +87,11 @@ pub enum TypeCheckError {
         name: String,
         position: Position,
     },
+
+    #[error("List initializer has {found} element(s) but array only has room for {expected} at {position}")]
+    ListInitLengthMismatch {
+        expected: usize,
+        found: usize,
+        position: Position,
+    },
 }

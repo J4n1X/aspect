@@ -87,7 +87,8 @@ pub enum ExprKind {
     Alloc {
         alloc_type: LangType,
         count: Box<Expression>
-    }
+    },
+    ListInitializer(Vec<Expression>),
 }
 
 /// Expression with type information
