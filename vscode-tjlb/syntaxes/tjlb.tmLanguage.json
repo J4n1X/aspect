@@ -1,0 +1,133 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "TJLB",
+  "scopeName": "source.tjlb",
+  "fileTypes": ["tjlb"],
+  "patterns": [
+    { "include": "#block-comment" },
+    { "include": "#line-comment" },
+    { "include": "#string" },
+    { "include": "#number" },
+    { "include": "#fn-declaration" },
+    { "include": "#type-token" },
+    { "include": "#keyword-control" },
+    { "include": "#keyword-declaration" },
+    { "include": "#keyword-cast" },
+    { "include": "#operator" },
+    { "include": "#function-call" },
+    { "include": "#punctuation" },
+    { "include": "#identifier" }
+  ],
+  "repository": {
+    "block-comment": {
+      "name": "comment.block.tjlb",
+      "begin": "#-",
+      "end": "-#",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.comment.begin.tjlb" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.comment.end.tjlb" }
+      }
+    },
+    "line-comment": {
+      "name": "comment.line.number-sign.tjlb",
+      "match": "(#(?!-)).*$",
+      "captures": {
+        "1": { "name": "punctuation.definition.comment.tjlb" }
+      }
+    },
+    "string": {
+      "name": "string.quoted.double.tjlb",
+      "begin": "\"",
+      "end": "\"",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.tjlb" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.tjlb" }
+      },
+      "patterns": [
+        {
+          "name": "constant.character.escape.tjlb",
+          "match": "\\\\[nrt\\\\\"']"
+        }
+      ]
+    },
+    "number": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.tjlb",
+          "match": "\\b\\d+\\.\\d+\\b"
+        },
+        {
+          "name": "constant.numeric.hex.tjlb",
+          "match": "\\b0[xX][0-9A-Fa-f]+\\b"
+        },
+        {
+          "name": "constant.numeric.binary.tjlb",
+          "match": "\\b0[bB][01]+\\b"
+        },
+        {
+          "name": "constant.numeric.integer.tjlb",
+          "match": "\\b\\d+\\b"
+        }
+      ]
+    },
+    "fn-declaration": {
+      "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.declaration.function.tjlb" },
+        "2": { "name": "entity.name.function.tjlb" }
+      }
+    },
+    "type-token": {
+      "match": "\\b(const\\s+)?(i(?:8|16|32|64)|u(?:0|8|16|32|64)|f(?:32|64))(\\[\\d+\\])?(?![A-Za-z0-9_])",
+      "captures": {
+        "1": { "name": "storage.modifier.tjlb" },
+        "2": { "name": "storage.type.tjlb" },
+        "3": { "name": "storage.type.tjlb" }
+      }
+    },
+    "keyword-control": {
+      "name": "keyword.control.tjlb",
+      "match": "\\b(if|else|elif|while|for|switch|break|continue|return)\\b"
+    },
+    "keyword-declaration": {
+      "name": "keyword.other.tjlb",
+      "match": "\\b(fn|extern|type|struct)\\b"
+    },
+    "keyword-cast": {
+      "name": "keyword.operator.cast.tjlb",
+      "match": "\\bas\\b"
+    },
+    "operator": {
+      "name": "keyword.operator.tjlb",
+      "match": "<<=|>>=|->|==|!=|<=|>=|&&|\\|\\||<<|>>|[+\\-*/%&|^]=|=(?!=)|[+\\-*/%]|[<>]|[&|^~!]"
+    },
+    "function-call": {
+      "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+      "captures": {
+        "1": { "name": "entity.name.function.tjlb" }
+      }
+    },
+    "punctuation": {
+      "patterns": [
+        { "name": "punctuation.section.block.begin.tjlb", "match": "\\{" },
+        { "name": "punctuation.section.block.end.tjlb",  "match": "\\}" },
+        { "name": "punctuation.section.group.begin.tjlb", "match": "\\(" },
+        { "name": "punctuation.section.group.end.tjlb",  "match": "\\)" },
+        { "name": "punctuation.section.brackets.begin.tjlb", "match": "\\[" },
+        { "name": "punctuation.section.brackets.end.tjlb",   "match": "\\]" },
+        { "name": "punctuation.separator.comma.tjlb",    "match": "," },
+        { "name": "punctuation.terminator.statement.tjlb", "match": ";" },
+        { "name": "punctuation.accessor.tjlb",           "match": "\\." },
+        { "name": "punctuation.separator.colon.tjlb",    "match": ":" }
+      ]
+    },
+    "identifier": {
+      "name": "variable.other.tjlb",
+      "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+    }
+  }
+}
