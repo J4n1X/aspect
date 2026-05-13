@@ -9,7 +9,7 @@ use crate::lexer::{LangType, TypeBase};
 use crate::codegen::CodegenError;
 use crate::parser::ComparisonOp;
 
-// ─── Sign-dispatch macro ──────────────────────────────────────────────────────
+// ─── Sign-dispatch macros ─────────────────────────────────────────────────────
 
 /// Dispatch to the signed or unsigned variant of a builder method.
 ///
@@ -29,6 +29,16 @@ macro_rules! signed_op {
         } else {
             $builder.$unsigned($($arg),+)
         }
+    };
+}
+
+/// Dispatch to the signed or unsigned const method on an `IntValue` (no builder needed).
+///
+/// Usage: `const_signed_op!(int_value, is_signed, const_signed_div, const_unsigned_div, rhs)`
+#[macro_export]
+macro_rules! const_signed_op {
+    ($val:expr, $is_signed:expr, $signed:ident, $unsigned:ident, $arg:expr) => {
+        if $is_signed { $val.$signed($arg) } else { $val.$unsigned($arg) }
     };
 }
 
@@ -92,6 +102,43 @@ pub fn widen_floats_to_match<'ctx>(
     } else {
         let a_wide = builder.build_float_ext(a, b.get_type(), "fpwiden")?;
         Ok((a_wide, b))
+    }
+}
+
+/// Widen the narrower of two integer constant values so both have the same bit-width.
+///
+/// LLVM 19 removed most `LLVMConst*` functions, so this is done by extracting the Rust
+/// value with `get_zero_extended_constant` / `get_sign_extended_constant` and reconstructing
+/// the constant at the wider type.
+/// If widths already match, returns the values unchanged.
+pub fn const_widen_ints_to_match<'ctx>(
+    a: IntValue<'ctx>,
+    a_signed: bool,
+    b: IntValue<'ctx>,
+    b_signed: bool,
+) -> (IntValue<'ctx>, IntValue<'ctx>) {
+    let a_bits = a.get_type().get_bit_width();
+    let b_bits = b.get_type().get_bit_width();
+    if a_bits > b_bits {
+        // Widen b to a's type
+        let raw = if b_signed {
+            b.get_sign_extended_constant().unwrap_or(0) as u64
+        } else {
+            b.get_zero_extended_constant().unwrap_or(0)
+        };
+        let b_wide = a.get_type().const_int(raw, b_signed);
+        (a, b_wide)
+    } else if b_bits > a_bits {
+        // Widen a to b's type
+        let raw = if a_signed {
+            a.get_sign_extended_constant().unwrap_or(0) as u64
+        } else {
+            a.get_zero_extended_constant().unwrap_or(0)
+        };
+        let a_wide = b.get_type().const_int(raw, a_signed);
+        (a_wide, b)
+    } else {
+        (a, b)
     }
 }
 

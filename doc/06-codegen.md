@@ -32,8 +32,8 @@ pub struct CodeGenerator<'ctx> {
 
 ### Helper Structs
 
-- `LocalVar<'ctx>` — `ptr: PointerValue`, `llvm_type: BasicTypeEnum`, `lang_type: LangType`
-- `GlobalVarInfo<'ctx>` — same triple for globals and string literals
+- `LocalVar<'ctx>` — `ptr: PointerValue`, `llvm_type: BasicTypeEnum`, `lang_type: LangType`, `const_value: Option<BasicValueEnum>` (folded constant for `const` locals)
+- `GlobalVarInfo<'ctx>` — `ptr: PointerValue`, `llvm_type: BasicTypeEnum`, `lang_type: LangType`
 
 ## Type Translation (`types.rs`)
 
@@ -114,6 +114,7 @@ Behaviour:
 
 ### Variables
 - Looks up in scoped `variables` stack (innermost first), falls back to `global_variables`
+- **Const locals**: if `const_value` is `Some`, returns the folded value directly (no `load` emitted)
 - Arrays return pointer directly (no load — array-to-pointer decay)
 - Scalars emit `build_load` with explicit pointee type
 
@@ -168,7 +169,7 @@ Dispatches to specialized methods based on left operand type:
 | Statement | Handler |
 |-----------|---------|
 | `Expression(expr)` | `generate_expression_statement` (special-cases void function calls) |
-| `VarDecl` | `generate_var_decl` — alloca in entry block, `generate_coerced_value` for initializer |
+| `VarDecl` | `generate_var_decl` — alloca in entry block; for `const` vars tries `try_fold_constant_expression` first; falls back to `generate_coerced_value` |
 | `VarAssign` | `generate_var_assign` — lookup + `generate_coerced_value` |
 | `DerefAssign` | `generate_deref_assign` — evaluate pointer + store |
 | `Return` | `generate_return` — `generate_coerced_value` with `current_function_return_type` |
@@ -226,14 +227,59 @@ All `alloca` instructions are placed in the **function entry block**, not at the
 3. Register in `global_variables` with `lang_type = u8*`
 4. In expressions: pointer cast to `i8*`
 
-## Global Variables
+## Global Variables and Constant Expressions
 
 1. Compute LLVM type (arrays → `lang_type_to_llvm_array`)
 2. `module.add_global()`
 3. For **array** initializers: `generate_constant_array_value` → LLVM `ConstantArray` (all elements must be literals)
-4. For **scalar** initializers: `generate_constant_expression` (literals and alloc)
+4. For **scalar** initializers: `generate_constant_expression` (see below)
 5. For no initializer: `const_zero()`
 6. Register in `global_variables`
+
+### `generate_constant_expression`
+
+Evaluates a scalar global initializer to an LLVM constant *without emitting any IR builder calls*.
+Supports:
+
+| `ExprKind` | Behaviour |
+|------------|----------|
+| `Literal` | Delegates to `generate_constant_literal` |
+| `Alloc` | Delegates to `generate_alloc` (count must be a constant) |
+| `Variable(name)` | Looks up the LLVM global by name and returns its initializer |
+| `Reference(Variable)` | Returns the global's pointer value |
+| `Binary` | Delegates to `const_int_binary_op` or `const_float_binary_op` |
+| `BitwiseNot` | `IntValue::const_not()` |
+| `UnaryNot` | Extracts as `u64`, computes `== 0`, reconstructs as `i32` |
+| `Cast` | Delegates to `const_cast_value` |
+
+### Constant Arithmetic Helpers (LLVM 19)
+
+LLVM 19 removed almost all `LLVMConst*` arithmetic functions. All constant integer and float
+arithmetic is therefore performed in Rust and the results are reconstructed as LLVM constants.
+
+| Helper | Purpose |
+|--------|---------|
+| `const_int_binary_op` | Extracts both operands as `u64`, performs the op in Rust (`wrapping_add`, etc.), returns `IntType::const_int(result, signed)` |
+| `const_float_binary_op` | Extracts both operands via `FloatValue::get_constant()`, performs op in Rust, returns `FloatType::const_float(result)` |
+| `const_cast_value` | Cast between any two constant types; widening uses Rust extraction + `IntType::const_int`; truncation uses `IntValue::const_truncate`; int↔float via `get_sign_extended_constant` / `get_constant` + `FloatType::const_float` |
+
+In `types.rs`, `const_widen_ints_to_match` widens two `IntValue` constants to the same bit-width
+using Rust extraction (not `const_s_extend`/`const_z_ext`, which were removed in LLVM 18).
+
+### `try_fold_constant_expression`
+
+A side-effect-free variant used for **`const` local variable initializers**.
+Returns `Option<BasicValueEnum>` — `None` means the expression is dynamic (function call, non-const local, etc.).
+
+Folding is attempted for:
+- `Literal` — always folds
+- `Variable(name)` — folds if the referenced variable is a previously-folded `const` local or a global with a known initializer
+- `Binary`, `BitwiseNot`, `UnaryNot`, `Cast` — folds if all sub-expressions fold
+- `Reference(Variable)` — folds to the alloca pointer of a local or the global ptr
+
+If `try_fold_constant_expression` succeeds, `generate_var_decl` stores the constant to the alloca
+and records it in `LocalVar::const_value`. Subsequent reads of that variable (via `generate_expression`)
+return the constant directly, bypassing the `load` instruction.
 
 ## List Initializers
 
@@ -298,3 +344,5 @@ Options: `verify_each(true)`, `loop_interleaving(true)`, `loop_vectorization(tru
 9. **Array-to-pointer decay**: Arrays never load — return pointer directly.
 10. **Pointer arithmetic via GEP**: `build_gep` with correct element type for stride calculation.
 11. **Implicit return**: Functions without explicit return get `ret void` or `ret <zero>`.
+12. **LLVM 19 const API is sparse**: Only `const_not`, `const_add/sub/mul`, `const_xor`, `const_truncate`, `const_to_pointer`, `PointerValue::const_to_int` survive. All others (`const_and/or`, `const_shl/ashr`, `const_signed_div`, `const_s_extend/z_ext`, `const_int_compare`, float arithmetic) were removed in LLVM 15–18. Use Rust-level arithmetic + `IntType::const_int` / `FloatType::const_float` for constant folding.
+13. **`const` locals are compile-time folded**: If a `const` variable's initializer is a statically-computable expression, it is folded at codegen time and reads bypass the alloca/load.

@@ -302,7 +302,7 @@ fn main() -> i32 {
     puts("--- Control flow ---")
 
     # if / elif / else
-    i32 v = 15
+    const i32 v = 15
     i32 branch = 0
     if v < 10 {
         branch = 1
@@ -314,13 +314,17 @@ fn main() -> i32 {
     check_i64("if/elif/else", 2, branch)
 
     # for loop: sum 1..100 = 5050; k is i32, for_sum is i64 -- implicit widening on +=
+    # Gauss formula as a const so the expected value is self-documenting
+    const i64 SUM_1_100 = 101 * 100 / 2   # = 5050
     i64 for_sum = 0
     for (i32 k = 1; k <= 100; k += 1) {
         for_sum += k
     }
-    check_i64("for sum 1..100", 5050, for_sum)
+    check_i64("for sum 1..100", SUM_1_100, for_sum)
 
     # while with continue/break: sum even numbers in [1,20] = 110
+    # 2+4+6+8+10+12+14+16+18+20 = 110 as a const -- folded at compile time
+    const i32 EVEN_SUM_20 = 2+4+6+8+10+12+14+16+18+20
     i32 evens = 0
     i32 w = 0
     while w < 20 {
@@ -328,7 +332,7 @@ fn main() -> i32 {
         if w % 2 != 0 { continue }
         evens += w
     }
-    check_i64("while+continue even sum", 110, evens)
+    check_i64("while+continue even sum", EVEN_SUM_20, evens)
 
     # break early: stop once running sum exceeds 30
     i32 brk_sum = 0
@@ -393,7 +397,7 @@ fn main() -> i32 {
     check_u64("ctz32(1)=0",   0, ctz32(1))
 
     # bitwise operators: ~, &, |, ^, <<, >>
-    u64 flags = 0b11001010
+    const u64 flags = 0b11001010
     check_i64("flags & 0xF0 = 0xC0", 0xC0, flags & 0xF0)
     check_i64("flags | 0x0F = 0xCF", 0xCF, flags | 0x0F)
     check_i64("flags ^ 0xFF = 0x35", 0x35, flags ^ 0xFF)
@@ -409,7 +413,7 @@ fn main() -> i32 {
     check_i64("const list init sum=12", 12, sum_i32(&fibs as i32*, 6))
 
     # Runtime list initializer (two-index GEP path -- contains variable)
-    i32 base = 7
+    const i32 base = 7
     i32[4] rt = {base, base * 2, base * 3, base * 4}
     check_i64("runtime list init sum=70", 70, sum_i32(&rt as i32*, 4))
 
@@ -430,8 +434,7 @@ fn main() -> i32 {
     check_i64("HEX_CHARS[10]='A'=65", 65, HEX_CHARS[10])
 
     # Dynamic allocation (stack alloca via type[count]).
-    # With the lexer fix, literal counts also work: i32[6] is properly parsed as alloc.
-    i32 dyn_n = 6
+    const i32 dyn_n = 6
     i32 *dyn = i32[dyn_n]
     for (i32 di = 0; di < dyn_n; di += 1) {
         dyn[di] = di + 1
@@ -480,20 +483,20 @@ fn main() -> i32 {
     puts("--- Implicit widening ---")
 
     # Literal 200 fits in u8 range (value-based check -- no cast needed)
-    u8 n8 = 200
-    # u8 -> u32: same-family widening (8 <= 32)
-    u32 n32 = n8
+    const u8  n8  = 200
+    # u8 -> u32: same-family widening (8 <= 32); const propagates through the chain
+    const u32 n32 = n8
     # u32 -> i64: cross-family widening (32 <= 64)
-    i64 n64 = n32
+    const i64 n64 = n32
     check_i64("u8(200)->u32->i64", 200, n64)
 
     # Negative i32 widens to i64 preserving sign
-    i32 neg32 = 0 - 75
-    i64 neg64 = neg32
+    const i32 neg32 = 0 - 75
+    const i64 neg64 = neg32
     check_i64("i32(-75)->i64", 0 - 75, neg64)
 
     # i32 literal passed to u64 param -- same width, cross-family allowed
-    i32 small = 12
+    const i32 small = 12
     check_u64("i32 arg->u64 param gcd", 3, gcd(small, 9))
 
     # i32 result of is_prime widens to i64 for check_i64
@@ -503,23 +506,24 @@ fn main() -> i32 {
     puts("")
     puts("--- Float ---")
 
-    f64 pi   = 3.14159265358979
-    f64 r    = 6.0
-    f64 area = pi * r * r
+    const f64 pi   = 3.14159265358979
+    const f64 r    = 6.0
+    # area is computed entirely from constants -- folded at compile time
+    const f64 area = pi * r * r
 
     # Compare float result to known bounds (comparison result is i32, widens to i64)
     check_i64("pi*6^2 > 113.0", 1, area > 113.0)
     check_i64("pi*6^2 < 114.0", 1, area < 114.0)
 
     # Explicit float -> int truncation
-    f64 xf = 9.75
-    i64 xi = xf as i64
+    const f64 xf = 9.75
+    const i64 xi = xf as i64
     check_i64("f64 9.75 trunc->9", 9, xi)
 
     # Explicit int -> float, back to int
-    i32 iv = 42
-    f64 fv = iv as f64
-    i64 bk = (fv * 2.0) as i64
+    const i32 iv = 42
+    const f64 fv = iv as f64
+    const i64 bk = (fv * 2.0) as i64
     check_i64("i32->f64->*2->i64=84", 84, bk)
 
     # f64 loop accumulation (0.1 ten times -> ~1.0)

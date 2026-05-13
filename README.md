@@ -142,7 +142,7 @@ See LICENSE file for details.
 This project uses or used AI for the following purposes:
 
 1. Documentation of the codebase, including the maintaining of the documentation directory
-2. The creation of the vscode-tjlb syntax highlighting extension.
+2. The creation of the vscode-tjlb syntax highlighting extension and some demos.
 3. Assistance in planning of features (implementations are done by hand)
 4. Research into required topics for compiler development.
 5. Some inline comments to improve readability 

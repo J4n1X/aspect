@@ -6,7 +6,7 @@ use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target, Targe
 use inkwell::module::Module;
 use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::values::{
-    BasicValueEnum, FloatValue, FunctionValue, IntValue, PointerValue,
+    BasicValue, BasicValueEnum, FloatValue, FunctionValue, IntValue, PointerValue,
 };
 use inkwell::basic_block::BasicBlock;
 use inkwell::{AddressSpace, OptimizationLevel};
@@ -27,6 +27,9 @@ struct LocalVar<'ctx> {
     ptr: PointerValue<'ctx>,
     llvm_type: BasicTypeEnum<'ctx>,
     lang_type: LangType,
+    /// If the variable was declared `const` and its initializer folded to a compile-time
+    /// constant, the folded value is stored here so reads bypass the alloca/load entirely.
+    const_value: Option<BasicValueEnum<'ctx>>,
 }
 
 /// Info for a global variable
@@ -215,7 +218,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             let alloca = self.builder.build_alloca(param_llvm_type, param_name)?;
             self.builder.build_store(alloca, param_value)?;
 
-            self.add_variable(param_name.clone(), alloca, param_llvm_type, *param_type);
+            self.add_variable(param_name.clone(), alloca, param_llvm_type, *param_type, None);
         }
 
         // Generate function body (variables are allocated at their declaration site)
@@ -388,15 +391,35 @@ impl<'ctx> CodeGenerator<'ctx> {
         let alloca = self.builder.build_alloca(llvm_type, name)?;
         self.builder.position_at_end(current_block);
 
-        // Store in scope with LangType for array tracking and call-site coercion
-        self.add_variable(name.to_string(), alloca, llvm_type, *var_type);
-
         if var_type.is_array() {
+            self.add_variable(name.to_string(), alloca, llvm_type, *var_type, None);
             if let Some(Expression { kind: ExprKind::ListInitializer(elements), .. }) = initializer {
                 return self.generate_list_initializer(alloca, var_type, elements);
             }
             return Ok(());
         }
+
+        // Attempt to fold the initializer to a compile-time constant for all variables.
+        // For `const` vars: cache the folded value in the scope entry so reads bypass
+        //                   the alloca/load entirely.
+        // For non-const vars: use the constant as the stored value but don't cache it,
+        //                     since the variable may be reassigned later.
+        if let Some(init_expr) = initializer {
+            if let Some(folded) = self.try_fold_constant_expression(init_expr) {
+                let target_llvm = lang_type_to_llvm(self.context, var_type)?;
+                let coerced = if folded.get_type() == target_llvm {
+                    folded
+                } else {
+                    self.const_cast_value(folded, target_llvm, &init_expr.expr_type, var_type, init_expr.pos)?
+                };
+                self.builder.build_store(alloca, coerced)?;
+                let cv = if var_type.is_const { Some(coerced) } else { None };
+                self.add_variable(name.to_string(), alloca, llvm_type, *var_type, cv);
+                return Ok(());
+            }
+        }
+
+        self.add_variable(name.to_string(), alloca, llvm_type, *var_type, None);
 
         if let Some(init_expr) = initializer {
             let init_value = self.generate_coerced_value(init_expr, Some(var_type))?;
@@ -434,7 +457,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         match &target.kind {
             ExprKind::Dereference(ptr_expr) => {
                 let ptr = self.generate_expression(ptr_expr)?;
-                let value_llvm = self.generate_expression(value)?;
+                // Coerce to the pointee type so that e.g. storing a literal i32
+                // into a `u8 *` slot emits an i8 store, not a 4-byte i32 store.
+                let value_llvm = self.generate_coerced_value(value, Some(&target.expr_type))?;
                 self.builder.build_store(ptr.into_pointer_value(), value_llvm)?;
                 Ok(())
             }
@@ -642,12 +667,35 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .lookup_var_info(name)
                     .ok_or_else(|| CodegenError::UndefinedVariable(name.clone(), expr.pos))?;
 
+                // Return compile-time constant directly (avoids alloca/load for const locals)
+                if let Some(const_val) = var_info.const_value {
+                    return Ok(const_val);
+                }
+
                 // Array-to-pointer decay
                 if var_info.lang_type.is_array() {
                     return Ok(var_info.ptr.into());
                 }
 
-                Ok(self.builder.build_load(var_info.llvm_type, var_info.ptr, name)?)
+                let loaded = self.builder.build_load(var_info.llvm_type, var_info.ptr, name)?;
+
+                // For const-typed locals, attach !invariant.load metadata so the optimizer
+                // knows this memory is never written after its single initializer store.
+                if var_info.lang_type.is_const {
+                    let kind_id = self.context.get_kind_id("invariant.load");
+                    let md = self.context.metadata_node(&[]);
+                    let instr = match loaded {
+                        BasicValueEnum::IntValue(v)     => v.as_instruction_value(),
+                        BasicValueEnum::FloatValue(v)   => v.as_instruction_value(),
+                        BasicValueEnum::PointerValue(v) => v.as_instruction_value(),
+                        _ => None,
+                    };
+                    if let Some(instr) = instr {
+                        let _ = instr.set_metadata(md, kind_id);
+                    }
+                }
+
+                Ok(loaded)
             }
 
             ExprKind::Binary { left, op, right } => self.generate_binary_op(left, op, right),
@@ -1251,6 +1299,225 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(value)
     }
 
+    /// Generate a constant integer binary operation (for global initializers).
+    /// Fold a constant integer binary operation in Rust and produce an LLVM constant.
+    ///
+    /// Using Rust-level arithmetic avoids relying on Inkwell's sparse `const_*` API
+    /// (which lacks `const_and`, `const_or`, `const_shl`, comparisons, etc. in 0.9.x).
+    fn const_int_binary_op(
+        &self,
+        left: IntValue<'ctx>,
+        op: &BinaryOp,
+        right: IntValue<'ctx>,
+        left_lang_type: &LangType,
+        pos: crate::lexer::Position,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let is_signed = matches!(left_lang_type.base, TypeBase::SInt);
+        // Use the wider of the two types for the result.
+        let result_type = if left.get_type().get_bit_width() >= right.get_type().get_bit_width() {
+            left.get_type()
+        } else {
+            right.get_type()
+        };
+
+        // Extract raw bit-patterns and perform arithmetic in Rust.
+        let lv = left.get_zero_extended_constant()
+            .ok_or_else(|| CodegenError::InvalidOperation(
+                "constant integer is not representable as u64".to_string(), pos))?;
+        let rv = right.get_zero_extended_constant()
+            .ok_or_else(|| CodegenError::InvalidOperation(
+                "constant integer is not representable as u64".to_string(), pos))?;
+
+        let result: u64 = match op {
+            BinaryOp::Add => lv.wrapping_add(rv),
+            BinaryOp::Sub => lv.wrapping_sub(rv),
+            BinaryOp::Mul => lv.wrapping_mul(rv),
+            BinaryOp::Div => if is_signed {
+                (lv as i64).checked_div(rv as i64)
+                    .ok_or_else(|| CodegenError::InvalidOperation("division by zero in constant expression".to_string(), pos))? as u64
+            } else {
+                lv.checked_div(rv)
+                    .ok_or_else(|| CodegenError::InvalidOperation("division by zero in constant expression".to_string(), pos))?
+            },
+            BinaryOp::Mod => if is_signed {
+                (lv as i64).checked_rem(rv as i64)
+                    .ok_or_else(|| CodegenError::InvalidOperation("division by zero in constant expression".to_string(), pos))? as u64
+            } else {
+                lv.checked_rem(rv)
+                    .ok_or_else(|| CodegenError::InvalidOperation("division by zero in constant expression".to_string(), pos))?
+            },
+            BinaryOp::And => lv & rv,
+            BinaryOp::Or  => lv | rv,
+            BinaryOp::Xor => lv ^ rv,
+            BinaryOp::LeftShift  => lv.wrapping_shl(rv as u32 % 64),
+            BinaryOp::RightShift => if is_signed {
+                ((lv as i64).wrapping_shr(rv as u32 % 64)) as u64
+            } else {
+                lv >> (rv % 64)
+            },
+            BinaryOp::LogicalAnd => u64::from(lv != 0 && rv != 0),
+            BinaryOp::LogicalOr  => u64::from(lv != 0 || rv != 0),
+        };
+
+        // LogicalAnd / LogicalOr always produce i32 (matching the runtime behaviour)
+        if matches!(op, BinaryOp::LogicalAnd | BinaryOp::LogicalOr) {
+            Ok(self.context.i32_type().const_int(result, false).into())
+        } else {
+            Ok(result_type.const_int(result, is_signed).into())
+        }
+    }
+
+    /// Fold a constant float binary operation via Rust arithmetic.
+    fn const_float_binary_op(
+        &self,
+        left: FloatValue<'ctx>,
+        op: &BinaryOp,
+        right: FloatValue<'ctx>,
+        pos: crate::lexer::Position,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        // Extract both values as f64 (handles f32/f64 mixing without needing FloatValue::const_cast)
+        let (lv, _) = left.get_constant()
+            .ok_or_else(|| CodegenError::InvalidOperation(
+                "float constant is not representable".to_string(), pos))?;
+        let (rv, _) = right.get_constant()
+            .ok_or_else(|| CodegenError::InvalidOperation(
+                "float constant is not representable".to_string(), pos))?;
+
+        let result: f64 = match op {
+            BinaryOp::Add => lv + rv,
+            BinaryOp::Sub => lv - rv,
+            BinaryOp::Mul => lv * rv,
+            BinaryOp::Div => lv / rv,
+            _ => return Err(CodegenError::InvalidOperation(
+                format!("operator {op:?} not supported for float constant expressions"),
+                pos,
+            )),
+        };
+
+        // Result type is the wider of the two inputs
+        let result_type = if left.get_type() == self.context.f64_type()
+            || right.get_type() == self.context.f64_type()
+        {
+            self.context.f64_type()
+        } else {
+            self.context.f32_type()
+        };
+        Ok(result_type.const_float(result).into())
+    }
+
+    /// Cast a constant value to a target LLVM type (for constant expressions).
+    fn const_cast_value(
+        &self,
+        value: BasicValueEnum<'ctx>,
+        target_llvm_type: BasicTypeEnum<'ctx>,
+        source_lang_type: &LangType,
+        target_lang_type: &LangType,
+        pos: crate::lexer::Position,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        if value.get_type() == target_llvm_type {
+            return Ok(value);
+        }
+
+        let target_is_int     = matches!(target_llvm_type, BasicTypeEnum::IntType(_));
+        let target_is_float   = matches!(target_llvm_type, BasicTypeEnum::FloatType(_));
+        let target_is_pointer = matches!(target_llvm_type, BasicTypeEnum::PointerType(_));
+
+        // int → int resize.
+        // LLVM 19 removed const_s_extend / const_z_ext / const_cast, so widening
+        // is done by extracting the Rust value and reconstructing at the target width.
+        if target_is_int && value.is_int_value() {
+            let int_val = value.into_int_value();
+            let target_int_type = target_llvm_type.into_int_type();
+            let src_bits = int_val.get_type().get_bit_width();
+            let dst_bits = target_int_type.get_bit_width();
+            // i1 (bool result) always zero-extends regardless of signedness
+            let sign_extend = matches!(source_lang_type.base, TypeBase::SInt) && src_bits > 1;
+            return Ok(match dst_bits.cmp(&src_bits) {
+                std::cmp::Ordering::Greater => {
+                    // Widen via Rust extraction
+                    let raw = if sign_extend {
+                        int_val.get_sign_extended_constant()
+                            .ok_or_else(|| CodegenError::InvalidOperation(
+                                "integer constant not representable as i64 for widening cast".to_string(), pos))? as u64
+                    } else {
+                        int_val.get_zero_extended_constant()
+                            .ok_or_else(|| CodegenError::InvalidOperation(
+                                "integer constant not representable as u64 for widening cast".to_string(), pos))?
+                    };
+                    target_int_type.const_int(raw, sign_extend)
+                }
+                std::cmp::Ordering::Less  => int_val.const_truncate(target_int_type),
+                std::cmp::Ordering::Equal => int_val,
+            }.into());
+        }
+
+        // int → float: extract Rust value and reconstruct
+        if target_is_float && value.is_int_value() {
+            let int_val = value.into_int_value();
+            let float_type = target_llvm_type.into_float_type();
+            let is_signed = matches!(source_lang_type.base, TypeBase::SInt);
+            let fval = if is_signed {
+                int_val.get_sign_extended_constant()
+                    .ok_or_else(|| CodegenError::InvalidOperation(
+                        "integer constant not representable as i64 for cast".to_string(), pos))? as f64
+            } else {
+                int_val.get_zero_extended_constant()
+                    .ok_or_else(|| CodegenError::InvalidOperation(
+                        "integer constant not representable as u64 for cast".to_string(), pos))? as f64
+            };
+            return Ok(float_type.const_float(fval).into());
+        }
+
+        // float → int: extract Rust value and reconstruct
+        if target_is_int && value.is_float_value() {
+            let float_val = value.into_float_value();
+            let int_type = target_llvm_type.into_int_type();
+            let target_signed = matches!(target_lang_type.base, TypeBase::SInt);
+            let (fval, _) = float_val.get_constant()
+                .ok_or_else(|| CodegenError::InvalidOperation(
+                    "float constant not representable for cast".to_string(), pos))?;
+            let bits = if target_signed { fval as i64 as u64 } else { fval as u64 };
+            return Ok(int_type.const_int(bits, target_signed).into());
+        }
+
+        // float → float: extract and reconstruct at target precision
+        if target_is_float && value.is_float_value() {
+            let float_val = value.into_float_value();
+            let float_type = target_llvm_type.into_float_type();
+            let (fval, _) = float_val.get_constant()
+                .ok_or_else(|| CodegenError::InvalidOperation(
+                    "float constant not representable for cast".to_string(), pos))?;
+            return Ok(float_type.const_float(fval).into());
+        }
+
+        // pointer → pointer (opaque ptrs are all the same LLVM type; no-op)
+        if target_is_pointer && value.is_pointer_value() {
+            return Ok(value);
+        }
+
+        // int → pointer
+        if target_is_pointer && value.is_int_value() {
+            return Ok(value.into_int_value()
+                .const_to_pointer(target_llvm_type.into_pointer_type())
+                .into());
+        }
+
+        // pointer → int
+        if target_is_int && value.is_pointer_value() {
+            return Ok(value.into_pointer_value()
+                .const_to_int(target_llvm_type.into_int_type())
+                .into());
+        }
+
+        Err(CodegenError::InvalidOperation(
+            format!(
+                "cast from {} to {} is not supported in constant expressions",
+                value.get_type(), target_llvm_type
+            ),
+            pos,
+        ))
+    }
+
     /// Generate a constant expression (for global initializers)
     fn generate_constant_expression(
         &mut self,
@@ -1258,9 +1525,69 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         match &expr.kind {
             ExprKind::Literal(lit) => self.generate_constant_literal(lit, &expr.expr_type),
+
             ExprKind::Alloc { alloc_type: lang_type, count } => self.generate_alloc(lang_type, count),
+
+            // Substitute the referenced global's already-emitted constant initializer.
+            // The referenced global must be declared (and thus emitted) before this one.
+            ExprKind::Variable(name) => {
+                let global_val = self.module.get_global(name)
+                    .ok_or_else(|| CodegenError::UndefinedVariable(name.clone(), expr.pos))?;
+                global_val.get_initializer()
+                    .ok_or_else(|| CodegenError::InvalidOperation(
+                        format!("global '{name}' has no constant initializer; declare it before referencing it in another global initializer"),
+                        expr.pos,
+                    ))
+            }
+
+            // &global_name → pointer to global (valid LLVM constant)
+            ExprKind::Reference(inner) => match &inner.kind {
+                ExprKind::Variable(name) => {
+                    let info = self.global_variables.get(name.as_str())
+                        .ok_or_else(|| CodegenError::UndefinedVariable(name.clone(), inner.pos))?;
+                    Ok(info.ptr.into())
+                }
+                _ => Err(CodegenError::InvalidOperation(
+                    "address-of in global initializer only supports global variables".to_string(),
+                    expr.pos,
+                )),
+            },
+
+            ExprKind::Binary { left, op, right } => {
+                let left_val  = self.generate_constant_expression(left)?;
+                let right_val = self.generate_constant_expression(right)?;
+                if matches!(left.expr_type.base, TypeBase::SFloat) {
+                    let lf = left_val.into_float_value();
+                    let rf = right_val.into_float_value();
+                    self.const_float_binary_op(lf, op, rf, expr.pos)
+                } else {
+                    let li = left_val.into_int_value();
+                    let ri = right_val.into_int_value();
+                    self.const_int_binary_op(li, op, ri, &left.expr_type, expr.pos)
+                }
+            }
+
+            ExprKind::BitwiseNot(inner) => {
+                let val = self.generate_constant_expression(inner)?.into_int_value();
+                Ok(val.const_not().into())
+            }
+
+            ExprKind::UnaryNot(inner) => {
+                let val = self.generate_constant_expression(inner)?.into_int_value();
+                let n = val.get_zero_extended_constant()
+                    .ok_or_else(|| CodegenError::InvalidOperation(
+                        "constant integer is not representable as u64".to_string(), inner.pos))?;
+                Ok(self.context.i32_type().const_int(u64::from(n == 0), false).into())
+            }
+
+            ExprKind::Cast { expr: inner, target_type } => {
+                let val = self.generate_constant_expression(inner)?;
+                let target_llvm = lang_type_to_llvm(self.context, target_type)?;
+                self.const_cast_value(val, target_llvm, &inner.expr_type, target_type, inner.pos)
+            }
+
             _ => Err(CodegenError::InvalidOperation(
-                "Non-constant expression in global initializer".to_string(),
+                "non-constant expression in global initializer".to_string(),
                 expr.pos,
             )),
         }
@@ -1360,19 +1687,82 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.variables.pop();
     }
 
-    fn add_variable(&mut self, name: String, ptr: PointerValue<'ctx>, llvm_type: BasicTypeEnum<'ctx>, lang_type: LangType) {
+    fn add_variable(&mut self, name: String, ptr: PointerValue<'ctx>, llvm_type: BasicTypeEnum<'ctx>, lang_type: LangType, const_value: Option<BasicValueEnum<'ctx>>) {
         if let Some(scope) = self.variables.last_mut() {
-            scope.insert(name, LocalVar { ptr, llvm_type, lang_type });
+            scope.insert(name, LocalVar { ptr, llvm_type, lang_type, const_value });
         }
     }
 
     fn lookup_var_info(&self, name: &str) -> Option<LocalVar<'ctx>> {
         for scope in self.variables.iter().rev() {
             if let Some(var) = scope.get(name) {
-                return Some(LocalVar { ptr: var.ptr, llvm_type: var.llvm_type, lang_type: var.lang_type });
+                return Some(LocalVar { ptr: var.ptr, llvm_type: var.llvm_type, lang_type: var.lang_type, const_value: var.const_value });
             }
         }
-        self.global_variables.get(name).map(|g| LocalVar { ptr: g.ptr, llvm_type: g.llvm_type, lang_type: g.lang_type })
+        self.global_variables.get(name).map(|g| LocalVar { ptr: g.ptr, llvm_type: g.llvm_type, lang_type: g.lang_type, const_value: None })
+    }
+
+    /// Try to fold `expr` to a compile-time constant without emitting any IR.
+    ///
+    /// Returns `Some(value)` only when every sub-expression is provably constant
+    /// (literal, previously-folded `const` local, or a global with a known initializer).
+    /// Returns `None` for any dynamic sub-expression (function call, non-const local, etc.).
+    fn try_fold_constant_expression(&self, expr: &Expression) -> Option<BasicValueEnum<'ctx>> {
+        match &expr.kind {
+            ExprKind::Literal(lit) => self.generate_constant_literal(lit, &expr.expr_type).ok(),
+
+            ExprKind::Variable(name) => {
+                // Prefer folded const locals, then fall back to global initializers.
+                for scope in self.variables.iter().rev() {
+                    if let Some(var) = scope.get(name.as_str()) {
+                        return var.const_value;
+                    }
+                }
+                self.module.get_global(name).and_then(|g| g.get_initializer())
+            }
+
+            ExprKind::Binary { left, op, right } => {
+                let lv = self.try_fold_constant_expression(left)?;
+                let rv = self.try_fold_constant_expression(right)?;
+                if matches!(left.expr_type.base, TypeBase::SFloat) {
+                    self.const_float_binary_op(lv.into_float_value(), op, rv.into_float_value(), expr.pos).ok()
+                } else {
+                    self.const_int_binary_op(lv.into_int_value(), op, rv.into_int_value(), &left.expr_type, expr.pos).ok()
+                }
+            }
+
+            ExprKind::BitwiseNot(inner) => {
+                let val = self.try_fold_constant_expression(inner)?.into_int_value();
+                Some(val.const_not().into())
+            }
+
+            ExprKind::UnaryNot(inner) => {
+                let val = self.try_fold_constant_expression(inner)?.into_int_value();
+                let n = val.get_zero_extended_constant()?;
+                Some(self.context.i32_type().const_int(u64::from(n == 0), false).into())
+            }
+
+            ExprKind::Cast { expr: inner, target_type } => {
+                let val = self.try_fold_constant_expression(inner)?;
+                let target_llvm = lang_type_to_llvm(self.context, target_type).ok()?;
+                self.const_cast_value(val, target_llvm, &inner.expr_type, target_type, inner.pos).ok()
+            }
+
+            ExprKind::Reference(inner) => match &inner.kind {
+                ExprKind::Variable(name) => {
+                    // Pointer to a local alloca or a global
+                    for scope in self.variables.iter().rev() {
+                        if let Some(var) = scope.get(name.as_str()) {
+                            return Some(var.ptr.into());
+                        }
+                    }
+                    self.global_variables.get(name.as_str()).map(|g| g.ptr.into())
+                }
+                _ => None,
+            },
+
+            _ => None,
+        }
     }
 
     /// Get the LLVM module

@@ -1,0 +1,12 @@
+# expected: 0
+# Test compile-time constant arithmetic in global initializers and const local variables.
+
+i32 A = 2 + 3 * 4        # 2 + 12 = 14
+i32 B = A                  # global-to-global copy: 14
+i32 C = A + B              # 14 + 14 = 28
+
+fn main() -> i32 {
+    i32 x = A + 5    # const local: 14 + 5 = 19
+    const i32 y = x * 2    # const local chained: 19 * 2 = 38
+    return C + y - 66      # 28 + 38 - 66 = 0
+}

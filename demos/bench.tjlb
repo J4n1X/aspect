@@ -1,0 +1,237 @@
+#-
+  bench.tjlb  --  CPU-intensive benchmark: Sieve, MatMul 64x64, Pi^2/6 series
+
+  Two tasks chosen to stress different execution patterns:
+    1. Sieve of Eratosthenes up to 50 000 000  (integer + memory bandwidth)
+    2. Matrix multiply 256x256 i32             (integer ALU, nested loops)
+    3. Sum 1/k^2  for k=1..100 000 000          (floating-point division)
+
+  Compile:  cargo run --release -- compile demos/bench.tjlb -o /tmp/bench.ll [-O3]
+  Run:      lli-19 /tmp/bench.ll
+
+  Compare against the C version:
+    gcc -O3 -o demos/bench_c demos/bench.c && ./demos/bench_c
+
+  The numeric results (primes, C[0][0], 1e10*sum) must be identical between
+  both versions.  Only the timing will differ.
+-#
+
+extern fn write(i32 fd, u8 *buf, u64 len) -> i64
+extern fn puts(u8 *s) -> u0
+extern fn clock() -> i64
+extern fn malloc(u64 size) -> u8 *
+extern fn free(u8 *ptr) -> u0
+
+# CLOCKS_PER_SEC is always 1 000 000 on Linux x86-64
+const i32 TICKS_PER_SEC = 1000000
+
+const i32 SIEVE_MAX  = 50000000
+const i32 MAT_N      = 256
+const i32 PI2_TERMS  = 100000000
+
+# -- print helpers ---------------------------------------------------------
+
+fn strlen(u8 *s) -> u64 {
+    u64 n = 0
+    while s[n] != 0 {
+        n += 1
+    }
+    return n
+}
+
+fn print_str(u8 *s) -> u0 {
+    write(1, s, strlen(s))
+}
+
+fn u64_to_str(u64 v, u8 *buf) -> u8 * {
+    if v == 0 {
+        buf[0] = 48
+        buf[1] = 0
+        return buf
+    }
+    u64 i = 0
+    while v != 0 {
+        buf[i] = (48 + v % 10) as u8
+        v /= 10
+        i += 1
+    }
+    buf[i] = 0
+    u64 lo = 0
+    u64 hi = i - 1
+    while lo < hi {
+        u8 t    = buf[lo]
+        buf[lo] = buf[hi]
+        buf[hi] = t
+        lo += 1
+        hi -= 1
+    }
+    return buf
+}
+
+fn i64_to_str(i64 v, u8 *buf) -> u8 * {
+    if v < 0 {
+        buf[0] = 45
+        u8[22] tmp
+        u64_to_str((0 - v) as u64, &tmp as u8*)
+        u64 j = 0
+        while tmp[j] != 0 {
+            buf[j + 1] = tmp[j]
+            j += 1
+        }
+        buf[j + 1] = 0
+        return buf
+    }
+    return u64_to_str(v as u64, buf)
+}
+
+fn print_i64(i64 v) -> u0 {
+    u8[24] buf
+    i64_to_str(v, &buf as u8*)
+    write(1, &buf as u8*, strlen(&buf as u8*))
+}
+
+# Print elapsed time in milliseconds: "  [XXms]"
+fn print_ms(i64 t0, i64 t1) -> u0 {
+    const i64 ms = (t1 - t0) * 1000 / TICKS_PER_SEC
+    print_str("  [")
+    print_i64(ms)
+    print_str("ms]")
+}
+
+# -- Task 1: Sieve of Eratosthenes ----------------------------------------
+#
+# Returns count of primes in [2, SIEVE_MAX].
+# Expected: 3001134
+
+fn sieve_count() -> i32 {
+    # 50M+1 bytes on the stack would overflow; use the heap instead.
+    const i64 sieve_sz = 50000001
+    u8 *composite = malloc(sieve_sz as u64)
+    i32 i = 0
+    while i <= SIEVE_MAX {
+        composite[i] = 0
+        i += 1
+    }
+
+    i32 p = 2
+    while p * p <= SIEVE_MAX {
+        if composite[p] == 0 {
+            i32 j = p * p
+            while j <= SIEVE_MAX {
+                composite[j] = 1
+                j += p
+            }
+        }
+        p += 1
+    }
+
+    i32 count = 0
+    i32 k = 2
+    while k <= SIEVE_MAX {
+        if composite[k] == 0 {
+            count += 1
+        }
+        k += 1
+    }
+    free(composite)
+    return count
+}
+
+# -- Task 2: Matrix multiply C = A x B (256x256 i32) ------------------------
+#
+# A[i][j] = (i + j) % 256
+# B[i][j] = (i * j + 1) % 256
+# Returns C[0][0].
+#
+# C[0][0] = sum_{k=0}^{255} A[0][k] * B[k][0]
+#          = sum_{k=0}^{255} k * 1
+#          = 255 * 256 / 2 = 32640
+
+fn matmul_c00() -> i32 {
+    const i32 NN = MAT_N * MAT_N   # = 4096, folded at compile time
+    i32 *A = i32[NN]
+    i32 *B = i32[NN]
+    i32 *C = i32[NN]
+
+    i32 i = 0
+    while i < MAT_N {
+        i32 j = 0
+        while j < MAT_N {
+            A[i * MAT_N + j] = (i + j) % 256
+            B[i * MAT_N + j] = (i * j + 1) % 256
+            C[i * MAT_N + j] = 0
+            j += 1
+        }
+        i += 1
+    }
+
+    # ikj loop order: A[i][k] stays in a register across the inner loop
+    i = 0
+    while i < MAT_N {
+        i32 k = 0
+        while k < MAT_N {
+            i32 aik = A[i * MAT_N + k]
+            i32 j = 0
+            while j < MAT_N {
+                C[i * MAT_N + j] = C[i * MAT_N + j] + aik * B[k * MAT_N + j]
+                j += 1
+            }
+            k += 1
+        }
+        i += 1
+    }
+
+    return C[0]
+}
+
+# -- Task 3: sum 1/k^2 (converges to pi^2/6 ~= 1.6449340668) -------------
+#
+# Returns the partial sum scaled by 1e10 as i64 for integer printing,
+# making the result directly comparable to the C version.
+
+fn pi2_over6_scaled() -> i64 {
+    f64 s = 0.0
+    i64 k = 1
+    while k <= PI2_TERMS {
+        const f64 fk = k as f64
+        s += 1.0 / (fk * fk)
+        k += 1
+    }
+    return (s * 10000000000.0) as i64
+}
+
+# -- main ------------------------------------------------------------------
+
+fn main() -> i32 {
+    puts("=== CPU Benchmark (TJLB / LLVM) ===")
+    puts("")
+
+    # Task 1: Sieve
+    i64 t0 = clock()
+    i32 primes = sieve_count()
+    i64 t1 = clock()
+    print_str("Sieve(50000000):       primes=")
+    print_i64(primes)
+    print_ms(t0, t1)
+    puts("")
+
+    # Task 2: Matrix multiply
+    i64 t2 = clock()
+    i32 c00 = matmul_c00()
+    i64 t3 = clock()
+    print_str("MatMul(256x256):       C[0][0]=")
+    print_i64(c00)
+    print_ms(t2, t3)
+    puts("")
+
+    # Task 3: Pi^2/6 series
+    i64 t4 = clock()
+    i64 pi2s = pi2_over6_scaled()
+    i64 t5 = clock()
+    print_str("Pi2/6(100M terms):  1e10*sum=")
+    print_i64(pi2s)
+    print_ms(t4, t5)
+    puts("")
+
+    return 0
+}
