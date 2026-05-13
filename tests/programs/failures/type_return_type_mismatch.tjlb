@@ -1,0 +1,4 @@
+# expected: "type mismatch", "i32", "f64"
+fn main() -> i32 {
+    return 1.5
+}

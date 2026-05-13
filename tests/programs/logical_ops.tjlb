@@ -1,3 +1,4 @@
+# expected: 121
 # Test logical operators (&&, ||, !)
 fn main() -> i32 {
     i32 result = 0

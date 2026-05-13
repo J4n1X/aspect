@@ -1,0 +1,5 @@
+# expected: "list initializer has", "array only has room for 2"
+fn main() -> i32 {
+    i32[2] arr = {1, 2, 3}
+    return 0
+}

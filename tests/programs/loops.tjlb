@@ -1,3 +1,4 @@
+# expected: 60
 # Test loops
 fn main() -> i32 {
     i32 sum = 0

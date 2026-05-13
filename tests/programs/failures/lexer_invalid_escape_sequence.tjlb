@@ -1,0 +1,5 @@
+# expected: "tokenization failed", "invalid escape sequence"
+fn main() -> i32 {
+    const u8* msg = "bad\qescape"
+    return 0
+}

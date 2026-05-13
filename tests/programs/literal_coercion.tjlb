@@ -1,3 +1,4 @@
+# expected: 0
 #- literal_coercion.tjlb
    Tests that in-range integer literals coerce correctly to narrow types,
    including negative literals. Returns 0 on success.

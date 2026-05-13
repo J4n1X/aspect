@@ -1,0 +1,6 @@
+# expected: "cannot assign to const variable", "x"
+fn main() -> i32 {
+    const i32 x = 1
+    x = 2
+    return x
+}

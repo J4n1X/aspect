@@ -1,0 +1,5 @@
+# expected: "expected expression"
+fn main() -> i32 {
+    i32 x =
+    return x
+}

@@ -1,3 +1,4 @@
+# expected: 13
 # Test recursive function
 fn fib(i32 n) -> i32 {
     if n <= 1 {

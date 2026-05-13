@@ -2,27 +2,48 @@
 
 ## Test Structure
 
-Integration tests live in `tests/integration_tests.rs`. Each test compiles a `.tjlb` program from `tests/programs/` to LLVM IR, executes it with `lli-19`, and checks the **process exit code** as the expected result. There is no stdout comparison.
+Integration tests live in `tests/integration_tests.rs` and are split into two suites:
+
+1. Runtime tests: compile valid `.tjlb` programs from `tests/programs/`, execute with `lli-19`, and assert the process exit code.
+2. Compile-failure tests: compile invalid `.tjlb` programs from `tests/programs/failures/` and assert that compilation fails with stage-appropriate diagnostics.
+
+There is no stdout comparison.
 
 ## How Tests Work
 
-1. `compile_and_run(path)` reads the `.tjlb` source file
-2. Runs the pipeline: tokenize → parse → codegen (type checking is **skipped** in the test helper)
-3. Writes LLVM IR to a `NamedTempFile` (auto-deleted on drop)
-4. Executes with `lli-19` (LLVM interpreter/JIT) as a child process
-5. Returns the exit code as `i32`
-6. Test asserts `assert_eq!(result, expected_exit_code)`
+Test functions are **generated at compile time** by the `generate_tests!()` proc macro defined in `tjlb-macros/src/generate_tests.rs`. The macro:
 
-The `main() -> i32` function's return value becomes the process exit code.
+1. Scans `tests/programs/` recursively for `*.tjlb` files.
+2. Reads the first 10 lines of each file looking for `# expected:` and `# run_args:` annotations.
+3. Emits one `#[test]` function per annotated file.
+
+At runtime each generated test calls the appropriate helper:
+
+- **Runtime test**: `compile_and_run[_with_args]` → tokenize → parse → typecheck → codegen → `lli-19` → assert exit code.
+- **Failure test**: `assert_compile_error_contains` → runs the compile pipeline, asserts it returns an `Err` whose message contains all expected fragments.
+
+### Annotation format
+
+```tjlb
+# expected: 42                         # compile & run; assert exit code == 42
+# expected: "frag1", "frag2"           # compile only; assert error contains each fragment
+# run_args: "arg1", "arg2"            # optional: argv forwarded to lli-19
+```
+
+Files without a `# expected:` line are silently skipped by the macro.
+
+### Adding a new test
+
+Create a `.tjlb` file anywhere under `tests/programs/`, add a `# expected:` line, and `cargo test` picks it up automatically — no changes to `integration_tests.rs` needed.
 
 ### Argument Passing
 
-`compile_and_run_with_args()` supports passing command-line arguments to `lli-19`, used by `test_array_access` which passes `"array_access_test"` as argv[1].
+`compile_and_run_with_args()` supports passing command-line arguments to `lli-19`. Controlled via the `# run_args:` annotation, used by `array_access.tjlb` which passes `"array_access_test"` as argv[1].
 
 ## Prerequisites
 
-- `lli-19` must be on `PATH` — tests will fail without it.
-- Type checking is **skipped** in the test helper (goes parse → codegen directly). Type errors would only be caught at codegen time.
+- `lli-19` must be on `PATH` for runtime tests.
+- Compile-failure tests do not execute `lli-19`; they only run compiler stages and assert diagnostics.
 
 ## Test Programs
 
@@ -37,7 +58,7 @@ The `main() -> i32` function's return value becomes the process exit code.
 | 7 | `global_vars.tjlb` | 103 | Global variable mutation via helper function |
 | 8 | `pointers.tjlb` | 42 | Pass-by-pointer: `modify(&value)` → `32 + 10` |
 | 9 | `bitwise.tjlb` | 28 | `&`, `\|`, `^` on 12 and 10: `8 + 14 + 6` |
-| 10 | `array_access.tjlb` | 18 | Extern `strlen` on `argv[1]` (18 chars) |
+| 10 | `array_access.tjlb` | 17 | Extern `strlen` on `argv[1]` (`"array_access_test"` = 17 chars) |
 | 11 | `break_continue.tjlb` | 22 | Break/continue in for and while loops |
 | 12 | `logical_ops.tjlb` | 121 | `&&`, `\|\|`, `!` operators |
 | 13 | `bitwise_not.tjlb` | 42 | `~5 = -6`, then `(~5 + 6) + 42` |
@@ -64,6 +85,24 @@ The `main() -> i32` function's return value becomes the process exit code.
 | Type casts | `pointer_arithmetic`, `array_access` |
 | Variable shadowing | `variable_shadowing` |
 | Block scoping | `variable_shadowing` |
+
+## Compile-Failure Suite
+
+Failure fixtures are stored in `tests/programs/failures/`.
+
+Current coverage:
+
+| Stage | File | Expected diagnostic fragment(s) |
+|---|---|---|
+| Lexer | `lexer_unterminated_string.tjlb` | `unterminated string` |
+| Lexer | `lexer_invalid_escape_sequence.tjlb` | `invalid escape sequence` |
+| Parser | `parser_missing_initializer_expression.tjlb` | `expected expression` |
+| Type checker | `type_assignment_to_const.tjlb` | `cannot assign to const variable` |
+| Type checker | `type_argument_count_mismatch.tjlb` | `expects 2 arguments`, `got 1` |
+| Type checker | `type_return_type_mismatch.tjlb` | `type mismatch`, `i32`, `f64` |
+| Type checker | `type_invalid_dereference.tjlb` | `cannot dereference non-pointer type` |
+| Type checker | `type_list_initializer_too_long.tjlb` | `list initializer has`, `array only has room for 2` |
+| Type checker | `literal_overflow.tjlb` | `type mismatch`, `u8`, `i32` |
 
 ## Running Tests
 

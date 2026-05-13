@@ -1,3 +1,5 @@
+# expected: 17
+# run_args: "array_access_test"
 extern fn strlen(const i8 *str) -> u64
 
 fn main(i32 argc, i8 **argv) -> i32 {

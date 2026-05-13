@@ -1,3 +1,4 @@
+# expected: 50
 # Test if/else
 fn max(i32 a, i32 b) -> i32 {
     if a > b {

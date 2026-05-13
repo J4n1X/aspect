@@ -1,3 +1,4 @@
+# expected: "type mismatch", "u8", "i32"
 #- literal_overflow.tjlb
    This program must be REJECTED by the typechecker.
    300 does not fit in u8 (range 0..=255).

@@ -1,3 +1,4 @@
+# expected: 103
 # Test global variables
 i32 counter = 100
 

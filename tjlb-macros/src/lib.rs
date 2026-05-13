@@ -1,4 +1,5 @@
 mod expand;
+mod generate_tests;
 
 use expand::DslRewriter;
 use proc_macro::TokenStream;
@@ -51,4 +52,21 @@ pub fn parse_rule(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let _ = TokenStream2::new();
 
     quote::quote!(#func).into()
+}
+
+/// Function-like macro that scans `tests/programs/` at compile time and emits
+/// one `#[test]` function per `.tjlb` file that carries a `# expected:` annotation.
+///
+/// Annotation format (in the first 10 lines of the `.tjlb` file):
+///
+/// ```text
+/// # expected: 42                          # compile & run; assert exit code == 42
+/// # expected: "fragment1", "fragment2"    # compile only; assert error contains each fragment
+/// # run_args: "arg1", "arg2"             # optional: argv passed to lli-19
+/// ```
+///
+/// Files without a `# expected:` line are silently skipped.
+#[proc_macro]
+pub fn generate_tests(input: TokenStream) -> TokenStream {
+    generate_tests::generate_tests_impl(input)
 }

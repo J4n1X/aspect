@@ -1,0 +1,4 @@
+#- This block comment never closes.
+fn main() -> i32 {
+    return 0
+}
