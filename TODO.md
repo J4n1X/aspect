@@ -4,6 +4,7 @@
 |-------------------------------|---------------------------------------------------------------------------------------------|----------|
 | Function Pointers             | Come up with a syntax and implement function pointers                                       | MEDIUM   |
 | Structures                    | Implement structs                                                                           | MEDIUM   |
+| Type-annotating typechecker   | Propagate target type into literal `expr_type` during type checking, so codegen emits constants at the correct width without post-hoc coercion | LOW      |
 
 
 ## Done

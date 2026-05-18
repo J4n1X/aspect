@@ -10,7 +10,7 @@
 //! - `generate_constant_expression`→ walk with `EmitMode::Constant` (step 11)
 
 use inkwell::types::{BasicType, BasicTypeEnum};
-use inkwell::values::{BasicValue, BasicValueEnum};
+use inkwell::values::{BasicValue, BasicValueEnum, PointerValue};
 use inkwell::{AddressSpace, IntPredicate};
 
 use crate::codegen::generator::CodeGenerator;
@@ -584,62 +584,71 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// Generate a function call as an expression (must return a non-void value).
-    pub(crate) fn generate_function_call(
+    pub(crate) fn generate_list_initializer(
         &mut self,
-        name: &str,
-        args: &[Expression],
-        pos: Position,
-    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-        let function = *self
-            .functions
-            .get(name)
-            .ok_or_else(|| CodegenError::UndefinedFunction(name.to_string(), pos))?;
-
-        let param_types = self
-            .function_lang_params
-            .get(name)
-            .cloned()
-            .unwrap_or_default();
-        let mut arg_values = Vec::new();
-        for (i, arg) in args.iter().enumerate() {
-            let target_ty = param_types.get(i);
-            let val = self.generate_coerced_value(arg, target_ty)?;
-            arg_values.push(val.into());
-        }
-
-        let call_result = self.builder.build_call(function, &arg_values, "call")?;
-        call_result
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| CodegenError::MissingReturn(name.to_string(), pos))
-    }
-
-    /// Generate a function call as a statement (void returns are acceptable).
-    pub(crate) fn generate_function_call_statement(
-        &mut self,
-        name: &str,
-        args: &[Expression],
-        pos: Position,
+        array_ptr: PointerValue<'ctx>,
+        var_type: &LangType,
+        elements: &[Expression],
     ) -> Result<(), CodegenError> {
-        let function = *self
-            .functions
-            .get(name)
-            .ok_or_else(|| CodegenError::UndefinedFunction(name.to_string(), pos))?;
+        let elem_lang_type = var_type.element_type();
+        let elem_llvm_type = elem_lang_type.to_llvm(self.context)?;
+        let array_size = var_type.array_size.unwrap_or(0);
+        let array_llvm_type = elem_llvm_type.array_type(array_size);
 
-        let param_types = self
-            .function_lang_params
-            .get(name)
-            .cloned()
-            .unwrap_or_default();
-        let mut arg_values = Vec::new();
-        for (i, arg) in args.iter().enumerate() {
-            let target_ty = param_types.get(i);
-            let val = self.generate_coerced_value(arg, target_ty)?;
-            arg_values.push(val.into());
+        // Empty initializer: zero the whole array
+        if elements.is_empty() {
+            self.builder
+                .build_store(array_ptr, array_llvm_type.const_zero())?;
+            return Ok(());
         }
 
-        self.builder.build_call(function, &arg_values, "call")?;
+        // Fast path: all elements are integer/float literals -> emit a single ConstantArray store
+        let all_const = elements.iter().all(|e| {
+            matches!(
+                e.kind,
+                ExprKind::Literal(LiteralValue::Integer(_) | LiteralValue::Float(_))
+            )
+        });
+
+        if all_const {
+            let const_val = self.generate_constant_array_value(var_type, elements)?;
+            self.builder.build_store(array_ptr, const_val)?;
+            return Ok(());
+        }
+
+        // Runtime path: store each element via two-index GEP [0, i]
+        // This correctly addresses into a [N x elem] array pointer.
+        // i.e gep(array_ptr, [0, i]) = &(*array_ptr)[i]
+        for (i, elem_expr) in elements.iter().enumerate() {
+            let zero = self.context.i64_type().const_int(0, false);
+            let index = self.context.i64_type().const_int(i as u64, false);
+            let elem_ptr = unsafe {
+                self.builder.build_gep(
+                    array_llvm_type,
+                    array_ptr,
+                    &[zero, index],
+                    &format!("list_init.{i}"),
+                )?
+            };
+            let value = self.generate_coerced_value(elem_expr, Some(&elem_lang_type))?;
+            self.builder.build_store(elem_ptr, value)?;
+        }
+
+        // Zero-fill any remaining slots
+        let zero_val = elem_llvm_type.const_zero();
+        for i in elements.len()..array_size as usize {
+            let zero = self.context.i64_type().const_int(0, false);
+            let index = self.context.i64_type().const_int(i as u64, false);
+            let elem_ptr = unsafe {
+                self.builder.build_gep(
+                    array_llvm_type,
+                    array_ptr,
+                    &[zero, index],
+                    &format!("list_init_zero.{i}"),
+                )?
+            };
+            self.builder.build_store(elem_ptr, zero_val)?;
+        }
         Ok(())
     }
 

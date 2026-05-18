@@ -1,4 +1,4 @@
-use inkwell::types::{BasicType, BasicTypeEnum};
+use inkwell::types::{BasicTypeEnum};
 use inkwell::values::{BasicValueEnum, FloatValue, IntValue, PointerValue};
 use inkwell::AddressSpace;
 
@@ -7,7 +7,7 @@ use crate::codegen::generator::CodeGenerator;
 use crate::codegen::scope::GlobalVarInfo;
 use crate::codegen::{CodegenError, LangTypeExt};
 use crate::lexer::TypeBase;
-use crate::parser::{ExprKind, Expression, GlobalVar, LangType, LiteralValue};
+use crate::parser::{ExprKind, Expression, GlobalVar, LangType};
 
 impl<'ctx> CodeGenerator<'ctx> {
     /// Generate a global variable
@@ -32,7 +32,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 global_var.set_initializer(&const_array);
             } else {
                 let init_value = walk_expression(init_expr, self, EmitMode::Constant)?;
-                global_var.set_initializer(&init_value);
+                // Cast the constant to the declared global type if widths differ
+                // (e.g. integer literal emitted as i32 into a u8/i16/i64 global).
+                let coerced = coerce_constant_to_type(init_value, global_type, self.context);
+                global_var.set_initializer(&coerced);
             }
         } else {
             global_var.set_initializer(&global_type.const_zero());
@@ -102,10 +105,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             const_vals.push(elem_llvm_type.const_zero());
         }
 
-        // Build ConstantArray for the element type
+        // Build ConstantArray for the element type.
+        // Literals are emitted at their natural width (e.g. i32), so cast each
+        // value to the exact element type before building the array.
         match elem_llvm_type {
             BasicTypeEnum::IntType(int_ty) => {
-                let vals: Vec<IntValue> = const_vals.iter().map(|v| v.into_int_value()).collect();
+                let vals: Vec<IntValue> = const_vals
+                    .iter()
+                    .map(|v| coerce_constant_to_type(*v, elem_llvm_type, self.context).into_int_value())
+                    .collect();
                 Ok(int_ty.const_array(&vals).into())
             }
             BasicTypeEnum::FloatType(float_ty) => {
@@ -124,72 +132,22 @@ impl<'ctx> CodeGenerator<'ctx> {
             )),
         }
     }
+}
 
-    pub(crate) fn generate_list_initializer(
-        &mut self,
-        array_ptr: PointerValue<'ctx>,
-        var_type: &LangType,
-        elements: &[Expression],
-    ) -> Result<(), CodegenError> {
-        let elem_lang_type = var_type.element_type();
-        let elem_llvm_type = elem_lang_type.to_llvm(self.context)?;
-        let array_size = var_type.array_size.unwrap_or(0);
-        let array_llvm_type = elem_llvm_type.array_type(array_size);
-
-        // Empty initializer: zero the whole array
-        if elements.is_empty() {
-            self.builder
-                .build_store(array_ptr, array_llvm_type.const_zero())?;
-            return Ok(());
-        }
-
-        // Fast path: all elements are integer/float literals -> emit a single ConstantArray store
-        let all_const = elements.iter().all(|e| {
-            matches!(
-                e.kind,
-                ExprKind::Literal(LiteralValue::Integer(_) | LiteralValue::Float(_))
-            )
-        });
-
-        if all_const {
-            let const_val = self.generate_constant_array_value(var_type, elements)?;
-            self.builder.build_store(array_ptr, const_val)?;
-            return Ok(());
-        }
-
-        // Runtime path: store each element via two-index GEP [0, i]
-        // This correctly addresses into a [N x elem] array pointer.
-        // i.e gep(array_ptr, [0, i]) = &(*array_ptr)[i]
-        for (i, elem_expr) in elements.iter().enumerate() {
-            let zero = self.context.i64_type().const_int(0, false);
-            let index = self.context.i64_type().const_int(i as u64, false);
-            let elem_ptr = unsafe {
-                self.builder.build_gep(
-                    array_llvm_type,
-                    array_ptr,
-                    &[zero, index],
-                    &format!("list_init.{i}"),
-                )?
-            };
-            let value = self.generate_coerced_value(elem_expr, Some(&elem_lang_type))?;
-            self.builder.build_store(elem_ptr, value)?;
-        }
-
-        // Zero-fill any remaining slots
-        let zero_val = elem_llvm_type.const_zero();
-        for i in elements.len()..array_size as usize {
-            let zero = self.context.i64_type().const_int(0, false);
-            let index = self.context.i64_type().const_int(i as u64, false);
-            let elem_ptr = unsafe {
-                self.builder.build_gep(
-                    array_llvm_type,
-                    array_ptr,
-                    &[zero, index],
-                    &format!("list_init_zero.{i}"),
-                )?
-            };
-            self.builder.build_store(elem_ptr, zero_val)?;
-        }
-        Ok(())
+/// Cast a constant `BasicValueEnum` to `target_type` if the widths differ.
+/// Only handles integer types (the only case where natural-width literals can mismatch).
+/// Float and pointer constants are returned unchanged.
+fn coerce_constant_to_type<'ctx>(
+    val: BasicValueEnum<'ctx>,
+    target: BasicTypeEnum<'ctx>,
+    _ctx: &'ctx inkwell::context::Context,
+) -> BasicValueEnum<'ctx> {
+    if val.get_type() == target {
+        return val;
     }
+    if let (BasicValueEnum::IntValue(iv), BasicTypeEnum::IntType(int_ty)) = (val, target) {
+        let raw = iv.get_zero_extended_constant().unwrap_or(0);
+        return int_ty.const_int(raw, false).into();
+    }
+    val
 }

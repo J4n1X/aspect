@@ -15,12 +15,12 @@ name = "tjlb_rust"
 path = "src/lib.rs"
 
 [dependencies]
-thiserror = "2.0.17"
+thiserror = "2.0.18"
 clap = { version = "4.6.1", features = ["derive"] }
 inkwell = { version = "0.9.0", features = ["llvm19-1"] }
-anyhow = "1.0"
+anyhow = "1.0.102"
 tjlb-macros = { path = "tjlb-macros" }
 
 [dev-dependencies]
-pretty_assertions = "1.0"
+pretty_assertions = "1.4.1"
 tempfile = "3.27.0"

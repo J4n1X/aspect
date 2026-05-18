@@ -1,9 +1,10 @@
 use inkwell::types::BasicType;
-use inkwell::values::FunctionValue;
+use inkwell::values::{BasicValueEnum, FunctionValue};
 
 use crate::codegen::generator::CodeGenerator;
 use crate::codegen::{CodegenError, LangTypeExt};
-use crate::parser::{Function, LangType};
+use crate::lexer::Position;
+use crate::parser::{Expression, Function, LangType};
 
 /// RAII guard that sets `current_function` / `current_function_return_type`
 /// on creation and clears them on drop.
@@ -134,6 +135,65 @@ impl<'ctx> CodeGenerator<'ctx> {
         gen.exit_scope();
         // FunctionScope::drop() clears current_function + current_function_return_type
 
+        Ok(())
+    }
+
+    /// Generate a function call as an expression (must return a non-void value).
+    pub(crate) fn generate_function_call(
+        &mut self,
+        name: &str,
+        args: &[Expression],
+        pos: Position,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let function = *self
+            .functions
+            .get(name)
+            .ok_or_else(|| CodegenError::UndefinedFunction(name.to_string(), pos))?;
+
+        let param_types = self
+            .function_lang_params
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        let mut arg_values = Vec::new();
+        for (i, arg) in args.iter().enumerate() {
+            let target_ty = param_types.get(i);
+            let val = self.generate_coerced_value(arg, target_ty)?;
+            arg_values.push(val.into());
+        }
+
+        let call_result = self.builder.build_call(function, &arg_values, "call")?;
+        call_result
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::MissingReturn(name.to_string(), pos))
+    }
+
+    /// Generate a function call as a statement (void returns are acceptable).
+    pub(crate) fn generate_function_call_statement(
+        &mut self,
+        name: &str,
+        args: &[Expression],
+        pos: Position,
+    ) -> Result<(), CodegenError> {
+        let function = *self
+            .functions
+            .get(name)
+            .ok_or_else(|| CodegenError::UndefinedFunction(name.to_string(), pos))?;
+
+        let param_types = self
+            .function_lang_params
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        let mut arg_values = Vec::new();
+        for (i, arg) in args.iter().enumerate() {
+            let target_ty = param_types.get(i);
+            let val = self.generate_coerced_value(arg, target_ty)?;
+            arg_values.push(val.into());
+        }
+
+        self.builder.build_call(function, &arg_values, "call")?;
         Ok(())
     }
 }

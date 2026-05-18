@@ -173,17 +173,20 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
 
         let pass_options = PassBuilderOptions::create();
+        // Verifying after each pass adds overhead, but since this compiler is in
+        // active development, this helps us debug codegen issues.
+        // TODO: Enable only via a flag once the codegen is more stable.
         pass_options.set_verify_each(true);
         pass_options.set_loop_interleaving(true);
-        pass_options.set_loop_vectorization(true);
-        pass_options.set_loop_unrolling(true);
         pass_options.set_merge_functions(true);
+        pass_options.set_loop_slp_vectorization(true);
+        pass_options.set_call_graph_profile(true);
 
         self.module
             .run_passes(passes, &target_machine, pass_options)
             .map_err(|e| {
                 CodegenError::InvalidOperation(
-                    format!("Failed to run optimization passes: {}", e.to_string()),
+                    format!("Failed to run optimization passes: {e}"),
                     crate::lexer::Position { line: 0, column: 0 },
                 )
             })
