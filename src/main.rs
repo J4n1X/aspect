@@ -1,13 +1,13 @@
 use anyhow::{Context, Result};
 use clap::{Parser as ClapParser, Subcommand};
 use inkwell::context::Context as LLVMContext;
-use tjlb_rust::typechecker::TypeChecker;
 use std::fmt::Write;
 use std::fs;
 use std::path::PathBuf;
 use tjlb_rust::codegen::CodeGenerator;
 use tjlb_rust::lexer::tokenize;
 use tjlb_rust::parser::Parser;
+use tjlb_rust::typechecker::TypeChecker;
 
 #[derive(ClapParser)]
 #[command(name = "tjlb-parser")]
@@ -46,7 +46,12 @@ enum Commands {
         print: bool,
 
         /// Optimization level (0-3)
-        #[arg(short = 'O', long = "optimize", value_name = "LEVEL", default_value = "0")]
+        #[arg(
+            short = 'O',
+            long = "optimize",
+            value_name = "LEVEL",
+            default_value = "0"
+        )]
         opt_level: u8,
     },
 }
@@ -72,8 +77,8 @@ fn lex_file(path: &PathBuf) -> Result<()> {
     let input = fs::read_to_string(path)
         .with_context(|| format!("failed to read file '{}'", path.display()))?;
 
-    let tokens = tokenize(input)
-        .with_context(|| format!("failed to tokenize '{}'", path.display()))?;
+    let tokens =
+        tokenize(input).with_context(|| format!("failed to tokenize '{}'", path.display()))?;
 
     println!("Tokens:");
     println!("-------");
@@ -98,8 +103,8 @@ fn parse_file(path: &PathBuf) -> Result<()> {
         .with_context(|| format!("failed to read file '{}'", path.display()))?;
 
     // Tokenize
-    let tokens = tokenize(input)
-        .with_context(|| format!("failed to tokenize '{}'", path.display()))?;
+    let tokens =
+        tokenize(input).with_context(|| format!("failed to tokenize '{}'", path.display()))?;
 
     // Parse
     let mut parser = Parser::new(tokens).with_source_file(path.display().to_string());
@@ -161,13 +166,18 @@ fn parse_file(path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn compile_file(path: &PathBuf, output: Option<&std::path::Path>, print: bool, opt_level: u8) -> Result<()> {
+fn compile_file(
+    path: &PathBuf,
+    output: Option<&std::path::Path>,
+    print: bool,
+    opt_level: u8,
+) -> Result<()> {
     let input = fs::read_to_string(path)
         .with_context(|| format!("failed to read file '{}'", path.display()))?;
 
     // Tokenize
-    let tokens = tokenize(input)
-        .with_context(|| format!("failed to tokenize '{}'", path.display()))?;
+    let tokens =
+        tokenize(input).with_context(|| format!("failed to tokenize '{}'", path.display()))?;
 
     // Parse
     let mut parser = Parser::new(tokens).with_source_file(path.display().to_string());
@@ -178,14 +188,17 @@ fn compile_file(path: &PathBuf, output: Option<&std::path::Path>, print: bool, o
     })?;
 
     let mut typechecker = TypeChecker::new().with_source_file(path.display().to_string());
-    typechecker.check_program(&program)
-        .map_err(|errors| {
-            let mut err_msg = String::new();
-            for error in &errors {
-                let _ = writeln!(err_msg, "{}", typechecker.format_error(error));
-            }
-            anyhow::anyhow!("Type checking failed for '{}':\n{}", path.display(), err_msg.trim_end())
-        })?;
+    typechecker.check_program(&program).map_err(|errors| {
+        let mut err_msg = String::new();
+        for error in &errors {
+            let _ = writeln!(err_msg, "{}", typechecker.format_error(error));
+        }
+        anyhow::anyhow!(
+            "Type checking failed for '{}':\n{}",
+            path.display(),
+            err_msg.trim_end()
+        )
+    })?;
 
     // Generate LLVM IR
     let context = LLVMContext::create();
@@ -195,12 +208,14 @@ fn compile_file(path: &PathBuf, output: Option<&std::path::Path>, print: bool, o
         .unwrap_or("module");
 
     let mut codegen = CodeGenerator::new(&context, module_name);
-    codegen.generate(&program)
+    codegen
+        .generate(&program)
         .with_context(|| format!("failed to generate code for '{}'", path.display()))?;
 
     // Run optimization passes
     if opt_level > 0 {
-        codegen.optimize(opt_level)
+        codegen
+            .optimize(opt_level)
             .with_context(|| format!("failed to optimize code for '{}'", path.display()))?;
     }
 
@@ -208,7 +223,8 @@ fn compile_file(path: &PathBuf, output: Option<&std::path::Path>, print: bool, o
     let ir = codegen.print_ir_to_string();
 
     if let Some(output_path) = output {
-        codegen.write_ir_to_file(output_path)
+        codegen
+            .write_ir_to_file(output_path)
             .with_context(|| format!("failed to write IR to '{}'", output_path.display()))?;
         if print {
             println!("{ir}");

@@ -17,7 +17,7 @@ pub enum BinaryOp {
     Mul,
     Div,
     Mod,
-    
+
     // Bitwise
     And,
     Or,
@@ -72,10 +72,10 @@ pub enum ExprKind {
         op: ComparisonOp,
         right: Box<Expression>,
     },
-    Reference(Box<Expression>),     // &expr
-    Dereference(Box<Expression>),   // *expr
-    UnaryNot(Box<Expression>),      // !expr (logical not)
-    BitwiseNot(Box<Expression>),    // ~expr (bitwise not)
+    Reference(Box<Expression>),   // &expr
+    Dereference(Box<Expression>), // *expr
+    UnaryNot(Box<Expression>),    // !expr (logical not)
+    BitwiseNot(Box<Expression>),  // ~expr (bitwise not)
     FunctionCall {
         name: String,
         args: Vec<Expression>,
@@ -86,7 +86,7 @@ pub enum ExprKind {
     },
     Alloc {
         alloc_type: LangType,
-        count: Box<Expression>
+        count: Box<Expression>,
     },
     ListInitializer(Vec<Expression>),
 }
@@ -141,7 +141,7 @@ pub enum StatementKind {
         value: Expression,
     },
     DerefAssign {
-        target: Expression,  // Must be a dereference expression
+        target: Expression, // Must be a dereference expression
         value: Expression,
     },
     Break,

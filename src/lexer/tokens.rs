@@ -72,59 +72,59 @@ impl Keyword {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     // Punctuation
-    OpenParen,          // (
-    CloseParen,         // )
-    OpenBrace,          // {
-    CloseBrace,         // }
-    OpenBracket,        // [
-    CloseBracket,       // ]
-    Semicolon,          // ;
-    Colon,              // :
-    Comma,              // ,
-    Dot,                // .
-    Arrow,              // ->
-    Question,           // ?
+    OpenParen,    // (
+    CloseParen,   // )
+    OpenBrace,    // {
+    CloseBrace,   // }
+    OpenBracket,  // [
+    CloseBracket, // ]
+    Semicolon,    // ;
+    Colon,        // :
+    Comma,        // ,
+    Dot,          // .
+    Arrow,        // ->
+    Question,     // ?
 
     // Arithmetic operators
-    Plus,               // +
-    Minus,              // -
-    Asterisk,           // *
-    Slash,              // /
-    Percent,            // %
+    Plus,     // +
+    Minus,    // -
+    Asterisk, // *
+    Slash,    // /
+    Percent,  // %
 
     // Relational operators
-    Equal,              // ==
-    NotEqual,           // !=
-    Less,               // <
-    Greater,            // >
-    LessEqual,          // <=
-    GreaterEqual,       // >=
+    Equal,        // ==
+    NotEqual,     // !=
+    Less,         // <
+    Greater,      // >
+    LessEqual,    // <=
+    GreaterEqual, // >=
 
     // Logical operators
-    LogicalAnd,         // &&
-    LogicalOr,          // ||
-    LogicalNot,         // !
+    LogicalAnd, // &&
+    LogicalOr,  // ||
+    LogicalNot, // !
 
     // Bitwise operators
-    Ampersand,          // &
-    Pipe,               // |
-    Caret,              // ^
-    Tilde,              // ~
-    LeftShift,          // <<
-    RightShift,         // >>
+    Ampersand,  // &
+    Pipe,       // |
+    Caret,      // ^
+    Tilde,      // ~
+    LeftShift,  // <<
+    RightShift, // >>
 
     // Assignment operators
-    Assign,             // =
-    PlusAssign,         // +=
-    MinusAssign,        // -=
-    MultAssign,         // *=
-    DivAssign,          // /=
-    ModAssign,          // %=
-    AndAssign,          // &=
-    OrAssign,           // |=
-    XorAssign,          // ^=
-    LeftShiftAssign,    // <<=
-    RightShiftAssign,   // >>=
+    Assign,           // =
+    PlusAssign,       // +=
+    MinusAssign,      // -=
+    MultAssign,       // *=
+    DivAssign,        // /=
+    ModAssign,        // %=
+    AndAssign,        // &=
+    OrAssign,         // |=
+    XorAssign,        // ^=
+    LeftShiftAssign,  // <<=
+    RightShiftAssign, // >>=
 
     // Literals and identifiers
     Integer(i64),
@@ -135,15 +135,15 @@ pub enum TokenKind {
     LangType(LangType),
 
     // Special tokens
-    Newline,            // \n (statement terminator)
-    Eof,                // End of file
+    Newline, // \n (statement terminator)
+    Eof,     // End of file
 }
 
 /// Language type representation
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
 pub enum TypeBase {
     SInt,   // Signed integer
-    UInt,   // Unsigned integer  
+    UInt,   // Unsigned integer
     SFloat, // Floating point
     Void,   // Void type (u0)
 }
@@ -170,23 +170,23 @@ impl LangType {
             array_size: None,
         }
     }
-    
+
     #[must_use]
     pub fn langtype_from_str(s: &str) -> Option<Self> {
         if s.len() < 2 {
             return None;
         }
-        
+
         let base = match s.chars().next()? {
             'i' => TypeBase::SInt,
             'u' => TypeBase::UInt,
             'f' => TypeBase::SFloat,
             _ => return None,
         };
-        
+
         let size_str = &s[1..];
         let size: u32 = size_str.parse().ok()?;
-        
+
         // Special case for void (u0)
         if matches!(base, TypeBase::UInt) && size == 0 {
             Some(LangType::new(TypeBase::Void, 0, 0, false))
@@ -201,7 +201,7 @@ impl LangType {
         self.is_const = is_const;
         self
     }
-    
+
     #[must_use]
     pub fn with_pointer_depth(mut self, depth: u32) -> Self {
         self.pointer_depth = depth;
@@ -255,12 +255,20 @@ impl fmt::Display for LangType {
             TypeBase::SFloat => "f",
         };
         let asterisks = "*".repeat(self.pointer_depth as usize);
-        
+
         // Handle array types
         if let Some(size) = self.array_size {
-            write!(f, "{}{}{}[{}]{}", const_str, base_str, self.size_bits, size, asterisks)
+            write!(
+                f,
+                "{}{}{}[{}]{}",
+                const_str, base_str, self.size_bits, size, asterisks
+            )
         } else if self.pointer_depth > 0 {
-            write!(f, "{}{}{}{}", const_str, base_str, self.size_bits, asterisks)
+            write!(
+                f,
+                "{}{}{}{}",
+                const_str, base_str, self.size_bits, asterisks
+            )
         } else {
             write!(f, "{}{}{}", const_str, base_str, self.size_bits)
         }

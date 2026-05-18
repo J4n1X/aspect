@@ -1,13 +1,167 @@
-use inkwell::AddressSpace;
-use inkwell::context::Context;
-use inkwell::types::{BasicType, BasicTypeEnum, IntType, FloatType, ArrayType};
-use inkwell::values::{FloatValue, IntValue};
-use inkwell::builder::{Builder, BuilderError};
-use inkwell::IntPredicate;
-use inkwell::FloatPredicate;
-use crate::lexer::{LangType, TypeBase};
 use crate::codegen::CodegenError;
+use crate::lexer::{LangType, TypeBase};
 use crate::parser::ComparisonOp;
+use inkwell::builder::{Builder, BuilderError};
+use inkwell::context::Context;
+use inkwell::types::{ArrayType, BasicType, BasicTypeEnum};
+use inkwell::values::{FloatValue, IntValue};
+use inkwell::AddressSpace;
+use inkwell::FloatPredicate;
+use inkwell::IntPredicate;
+
+// ─── LangTypeExt trait ───────────────────────────────────────────────────────
+
+/// Extension methods on `LangType` for codegen use.
+///
+/// `LangType` lives in `src/lexer/`; this trait adds codegen-specific helpers
+/// without modifying that crate.
+pub trait LangTypeExt {
+    fn is_signed_int(&self) -> bool;
+    fn is_unsigned_int(&self) -> bool;
+    /// `true` for both signed and unsigned integer types (not including floats or pointers).
+    fn is_int(&self) -> bool;
+    fn is_float(&self) -> bool;
+    /// `true` when `pointer_depth > 0`.
+    fn is_pointer(&self) -> bool;
+    fn is_void(&self) -> bool;
+
+    /// Convert to the corresponding LLVM value type.
+    ///
+    /// Array types decay to `ptr` (same as pointers). For the backing array
+    /// allocation type use [`LangTypeExt::to_llvm_array`].
+    fn to_llvm<'ctx>(&self, ctx: &'ctx Context) -> Result<BasicTypeEnum<'ctx>, CodegenError>;
+
+    /// Convert to the LLVM `[N x T]` array type. Errors if the type is not an array.
+    fn to_llvm_array<'ctx>(&self, ctx: &'ctx Context) -> Result<ArrayType<'ctx>, CodegenError>;
+
+    /// Return the element LLVM type — stripping away array size and pointer depth.
+    fn element_to_llvm<'ctx>(
+        &self,
+        ctx: &'ctx Context,
+    ) -> Result<BasicTypeEnum<'ctx>, CodegenError>;
+
+    /// Return a `LangType` one pointer-depth less (the pointee type).
+    fn pointee(&self) -> LangType;
+}
+
+impl LangTypeExt for LangType {
+    fn is_signed_int(&self) -> bool {
+        matches!(self.base, TypeBase::SInt) && self.pointer_depth == 0
+    }
+
+    fn is_unsigned_int(&self) -> bool {
+        matches!(self.base, TypeBase::UInt) && self.pointer_depth == 0
+    }
+
+    fn is_int(&self) -> bool {
+        matches!(self.base, TypeBase::SInt | TypeBase::UInt) && self.pointer_depth == 0
+    }
+
+    fn is_float(&self) -> bool {
+        matches!(self.base, TypeBase::SFloat) && self.pointer_depth == 0
+    }
+
+    fn is_pointer(&self) -> bool {
+        self.pointer_depth > 0
+    }
+
+    fn is_void(&self) -> bool {
+        matches!(self.base, TypeBase::Void) && self.pointer_depth == 0
+    }
+
+    fn to_llvm<'ctx>(&self, ctx: &'ctx Context) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+        if self.pointer_depth > 0 || self.array_size.is_some() {
+            return Ok(ctx.ptr_type(AddressSpace::default()).into());
+        }
+        Ok(match self.base {
+            TypeBase::SInt | TypeBase::UInt => match self.size_bits {
+                8 => ctx.i8_type().into(),
+                16 => ctx.i16_type().into(),
+                32 => ctx.i32_type().into(),
+                64 => ctx.i64_type().into(),
+                _ => {
+                    return Err(CodegenError::TypeError(
+                        format!("Invalid integer size: {}", self.size_bits),
+                        crate::lexer::Position::new(0, 0),
+                    ))
+                }
+            },
+            TypeBase::SFloat => match self.size_bits {
+                32 => ctx.f32_type().into(),
+                64 => ctx.f64_type().into(),
+                _ => {
+                    return Err(CodegenError::TypeError(
+                        format!("Invalid float size: {}", self.size_bits),
+                        crate::lexer::Position::new(0, 0),
+                    ))
+                }
+            },
+            TypeBase::Void => {
+                return Err(CodegenError::TypeError(
+                    "Void type cannot be used as a value type".to_string(),
+                    crate::lexer::Position::new(0, 0),
+                ))
+            }
+        })
+    }
+
+    fn to_llvm_array<'ctx>(&self, ctx: &'ctx Context) -> Result<ArrayType<'ctx>, CodegenError> {
+        let array_size = self.array_size.ok_or_else(|| {
+            CodegenError::TypeError(
+                "Expected array type".to_string(),
+                crate::lexer::Position::new(0, 0),
+            )
+        })?;
+        let element_type = self.element_to_llvm(ctx)?;
+        Ok(element_type.array_type(array_size))
+    }
+
+    fn element_to_llvm<'ctx>(
+        &self,
+        ctx: &'ctx Context,
+    ) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+        Ok(match self.base {
+            TypeBase::SInt | TypeBase::UInt => match self.size_bits {
+                8 => ctx.i8_type().into(),
+                16 => ctx.i16_type().into(),
+                32 => ctx.i32_type().into(),
+                64 => ctx.i64_type().into(),
+                _ => {
+                    return Err(CodegenError::TypeError(
+                        format!("Invalid integer size: {}", self.size_bits),
+                        crate::lexer::Position::new(0, 0),
+                    ))
+                }
+            },
+            TypeBase::SFloat => match self.size_bits {
+                32 => ctx.f32_type().into(),
+                64 => ctx.f64_type().into(),
+                _ => {
+                    return Err(CodegenError::TypeError(
+                        format!("Invalid float size: {}", self.size_bits),
+                        crate::lexer::Position::new(0, 0),
+                    ))
+                }
+            },
+            TypeBase::Void => {
+                return Err(CodegenError::TypeError(
+                    "Void type cannot be used as a value type".to_string(),
+                    crate::lexer::Position::new(0, 0),
+                ))
+            }
+        })
+    }
+
+    fn pointee(&self) -> LangType {
+        LangType {
+            base: self.base,
+            size_bits: self.size_bits,
+            pointer_depth: self.pointer_depth.saturating_sub(1),
+            is_const: self.is_const,
+            array_size: None,
+        }
+    }
+}
 
 // ─── Sign-dispatch macros ─────────────────────────────────────────────────────
 
@@ -38,7 +192,11 @@ macro_rules! signed_op {
 #[macro_export]
 macro_rules! const_signed_op {
     ($val:expr, $is_signed:expr, $signed:ident, $unsigned:ident, $arg:expr) => {
-        if $is_signed { $val.$signed($arg) } else { $val.$unsigned($arg) }
+        if $is_signed {
+            $val.$signed($arg)
+        } else {
+            $val.$unsigned($arg)
+        }
     };
 }
 
@@ -151,12 +309,36 @@ pub fn const_widen_ints_to_match<'ctx>(
 #[must_use]
 pub fn int_cmp_pred(op: &ComparisonOp, is_signed: bool) -> IntPredicate {
     match op {
-        ComparisonOp::Equal        => IntPredicate::EQ,
-        ComparisonOp::NotEqual     => IntPredicate::NE,
-        ComparisonOp::Less         => if is_signed { IntPredicate::SLT } else { IntPredicate::ULT },
-        ComparisonOp::Greater      => if is_signed { IntPredicate::SGT } else { IntPredicate::UGT },
-        ComparisonOp::LessEqual    => if is_signed { IntPredicate::SLE } else { IntPredicate::ULE },
-        ComparisonOp::GreaterEqual => if is_signed { IntPredicate::SGE } else { IntPredicate::UGE },
+        ComparisonOp::Equal => IntPredicate::EQ,
+        ComparisonOp::NotEqual => IntPredicate::NE,
+        ComparisonOp::Less => {
+            if is_signed {
+                IntPredicate::SLT
+            } else {
+                IntPredicate::ULT
+            }
+        }
+        ComparisonOp::Greater => {
+            if is_signed {
+                IntPredicate::SGT
+            } else {
+                IntPredicate::UGT
+            }
+        }
+        ComparisonOp::LessEqual => {
+            if is_signed {
+                IntPredicate::SLE
+            } else {
+                IntPredicate::ULE
+            }
+        }
+        ComparisonOp::GreaterEqual => {
+            if is_signed {
+                IntPredicate::SGE
+            } else {
+                IntPredicate::UGE
+            }
+        }
     }
 }
 
@@ -164,182 +346,11 @@ pub fn int_cmp_pred(op: &ComparisonOp, is_signed: bool) -> IntPredicate {
 #[must_use]
 pub fn float_cmp_pred(op: &ComparisonOp) -> FloatPredicate {
     match op {
-        ComparisonOp::Equal        => FloatPredicate::OEQ,
-        ComparisonOp::NotEqual     => FloatPredicate::ONE,
-        ComparisonOp::Less         => FloatPredicate::OLT,
-        ComparisonOp::Greater      => FloatPredicate::OGT,
-        ComparisonOp::LessEqual    => FloatPredicate::OLE,
+        ComparisonOp::Equal => FloatPredicate::OEQ,
+        ComparisonOp::NotEqual => FloatPredicate::ONE,
+        ComparisonOp::Less => FloatPredicate::OLT,
+        ComparisonOp::Greater => FloatPredicate::OGT,
+        ComparisonOp::LessEqual => FloatPredicate::OLE,
         ComparisonOp::GreaterEqual => FloatPredicate::OGE,
     }
-}
-
-
-/// Convert a `LangType` to an LLVM type
-/// 
-/// For array types (e.g., `u32[4]`), this returns a pointer type since
-/// array variables decay to pointers. Use `lang_type_to_llvm_array` to get
-/// the actual array type for allocation.
-/// 
-/// # Errors
-/// Returns `CodegenError::TypeError` if the type is invalid
-pub fn lang_type_to_llvm<'ctx>(
-    context: &'ctx Context,
-    lang_type: &LangType,
-) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
-
-    // If it's a pointer, then we just have to make that, LLVM does not differentiate (anymore)
-    if lang_type.pointer_depth > 0 {
-        return Ok(context.ptr_type(AddressSpace::default()).into());
-    }
-
-    // Array types are represented as pointers (they decay to pointers)
-    if lang_type.array_size.is_some() {
-        return Ok(context.ptr_type(AddressSpace::default()).into());
-    }
-
-    // Get the base type
-    Ok(match lang_type.base {
-        TypeBase::SInt => match lang_type.size_bits {
-            8 => context.i8_type().into(),
-            16 => context.i16_type().into(),
-            32 => context.i32_type().into(),
-            64 => context.i64_type().into(),
-            _ => {
-                return Err(CodegenError::TypeError(
-                    format!("Invalid signed integer size: {}", lang_type.size_bits),
-                    crate::lexer::Position::new(0, 0),
-                ))
-            }
-        },
-        TypeBase::UInt => match lang_type.size_bits {
-            8 => context.i8_type().into(),
-            16 => context.i16_type().into(),
-            32 => context.i32_type().into(),
-            64 => context.i64_type().into(),
-            _ => {
-                return Err(CodegenError::TypeError(
-                    format!("Invalid unsigned integer size: {}", lang_type.size_bits),
-                    crate::lexer::Position::new(0, 0),
-                ))
-            }
-        },
-        TypeBase::SFloat => match lang_type.size_bits {
-            32 => context.f32_type().into(),
-            64 => context.f64_type().into(),
-            _ => {
-                return Err(CodegenError::TypeError(
-                    format!("Invalid float size: {}", lang_type.size_bits),
-                    crate::lexer::Position::new(0, 0),
-                ))
-            }
-        },
-        TypeBase::Void => {
-            // Void can't be a basic type directly, but we handle it specially
-            // For now, return i8 and the caller should check for void
-            return Err(CodegenError::TypeError(
-                "Void type cannot be used as a value type".to_string(),
-                crate::lexer::Position::new(0, 0),
-            ));
-        }
-    })
-}
-
-/// Check if a type is void
-#[must_use]
-pub fn is_void_type(lang_type: &LangType) -> bool {
-    matches!(lang_type.base, TypeBase::Void) && lang_type.pointer_depth == 0
-}
-
-/// Get LLVM integer type for a given bit width
-/// # Errors
-/// Returns `CodegenError::TypeError` if the bit width is invalid
-pub fn get_int_type(context: &'_ Context, bits: u32) -> Result<IntType<'_>, CodegenError> {
-    match bits {
-        8 => Ok(context.i8_type()),
-        16 => Ok(context.i16_type()),
-        32 => Ok(context.i32_type()),
-        64 => Ok(context.i64_type()),
-        _ => Err(CodegenError::TypeError(
-            format!("Invalid integer size: {bits}"),
-            crate::lexer::Position::new(0, 0),
-        )),
-    }
-}
-
-/// Get LLVM float type for a given bit width
-/// # Errors
-/// Returns `CodegenError::TypeError` if the bit width is invalid
-pub fn get_float_type(context: &'_ Context, bits: u32) -> Result<FloatType<'_>, CodegenError> {
-    match bits {
-        32 => Ok(context.f32_type()),
-        64 => Ok(context.f64_type()),
-        _ => Err(CodegenError::TypeError(
-            format!("Invalid float size: {bits}"),
-            crate::lexer::Position::new(0, 0),
-        )),
-    }
-}
-
-/// Get the element type for a `LangType`
-/// 
-/// This returns the base type without array or pointer modifiers.
-/// For `u32[4]`, this returns `i32`. For `u32*`, this returns `i32`.
-/// For `u32`, this returns `i32`.
-/// 
-/// # Errors
-/// Returns `CodegenError::TypeError` if the type is invalid
-pub fn lang_type_element_to_llvm<'ctx>(
-    context: &'ctx Context,
-    lang_type: &LangType,
-) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
-    // Get the base type without pointer/array modifiers
-    Ok(match lang_type.base {
-        TypeBase::SInt | TypeBase::UInt => match lang_type.size_bits {
-            8 => context.i8_type().into(),
-            16 => context.i16_type().into(),
-            32 => context.i32_type().into(),
-            64 => context.i64_type().into(),
-            _ => {
-                return Err(CodegenError::TypeError(
-                    format!("Invalid integer size: {}", lang_type.size_bits),
-                    crate::lexer::Position::new(0, 0),
-                ))
-            }
-        },
-        TypeBase::SFloat => match lang_type.size_bits {
-            32 => context.f32_type().into(),
-            64 => context.f64_type().into(),
-            _ => {
-                return Err(CodegenError::TypeError(
-                    format!("Invalid float size: {}", lang_type.size_bits),
-                    crate::lexer::Position::new(0, 0),
-                ))
-            }
-        },
-        TypeBase::Void => {
-            return Err(CodegenError::TypeError(
-                "Void type cannot be used as a value type".to_string(),
-                crate::lexer::Position::new(0, 0),
-            ));
-        }
-    })
-}
-
-/// Get the LLVM array type for a preallocated array
-/// 
-/// # Errors
-/// Returns `CodegenError::TypeError` if the type is not an array or is invalid
-pub fn lang_type_to_llvm_array<'ctx>(
-    context: &'ctx Context,
-    lang_type: &LangType,
-) -> Result<ArrayType<'ctx>, CodegenError> {
-    let array_size = lang_type.array_size.ok_or_else(|| {
-        CodegenError::TypeError(
-            "Expected array type".to_string(),
-            crate::lexer::Position::new(0, 0),
-        )
-    })?;
-
-    let element_type = lang_type_element_to_llvm(context, lang_type)?;
-    Ok(element_type.array_type(array_size))
 }

@@ -28,7 +28,9 @@ fn parse_string_list(s: &str) -> Vec<String> {
             break;
         }
         remaining = &remaining[1..]; // skip opening "
-        let Some(end) = remaining.find('"') else { break };
+        let Some(end) = remaining.find('"') else {
+            break;
+        };
         result.push(remaining[..end].to_string());
         remaining = &remaining[end + 1..];
     }
@@ -59,7 +61,10 @@ fn parse_annotation(path: &Path) -> Option<Annotation> {
         }
     }
 
-    expected.map(|e| Annotation { expected: e, run_args })
+    expected.map(|e| Annotation {
+        expected: e,
+        run_args,
+    })
 }
 
 // ── File collection ───────────────────────────────────────────────────────────
@@ -109,8 +114,7 @@ fn make_test_ident(relative: &Path) -> proc_macro2::Ident {
 // ── Code generation ───────────────────────────────────────────────────────────
 
 pub fn generate_tests_impl(_input: TokenStream) -> TokenStream {
-    let manifest_dir =
-        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let base_dir = PathBuf::from(&manifest_dir).join("tests").join("programs");
 
     let mut output = TokenStream2::new();

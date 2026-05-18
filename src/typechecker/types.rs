@@ -18,8 +18,16 @@ pub fn types_coercible(from: &LangType, to: &LangType) -> bool {
     }
 
     // Array-to-pointer decay
-    let decayed_from = if from.is_array() { from.decay_to_pointer() } else { *from };
-    let decayed_to   = if to.is_array()   { to.decay_to_pointer()   } else { *to   };
+    let decayed_from = if from.is_array() {
+        from.decay_to_pointer()
+    } else {
+        *from
+    };
+    let decayed_to = if to.is_array() {
+        to.decay_to_pointer()
+    } else {
+        *to
+    };
     if decayed_from == *to || decayed_to == *from || decayed_from == decayed_to {
         return true;
     }
@@ -44,9 +52,7 @@ pub fn types_coercible(from: &LangType, to: &LangType) -> bool {
         (TypeBase::SInt | TypeBase::UInt, TypeBase::SInt | TypeBase::UInt) => {
             decayed_from.size_bits <= decayed_to.size_bits
         }
-        (TypeBase::SFloat, TypeBase::SFloat) => {
-            decayed_from.size_bits <= decayed_to.size_bits
-        }
+        (TypeBase::SFloat, TypeBase::SFloat) => decayed_from.size_bits <= decayed_to.size_bits,
         _ => false,
     }
 }

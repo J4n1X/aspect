@@ -1,6 +1,6 @@
-use thiserror::Error;
 use crate::lexer::Position;
 use crate::parser::LangType;
+use thiserror::Error;
 
 /// Type checker error types
 #[derive(Error, Debug, Clone)]
@@ -83,10 +83,7 @@ pub enum TypeCheckError {
     },
 
     #[error("Cannot assign to const variable '{name}' at {position}")]
-    AssignmentToConst {
-        name: String,
-        position: Position,
-    },
+    AssignmentToConst { name: String, position: Position },
 
     #[error("List initializer has {found} element(s) but array only has room for {expected} at {position}")]
     ListInitLengthMismatch {

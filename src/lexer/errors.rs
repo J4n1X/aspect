@@ -12,7 +12,7 @@ impl Position {
     pub fn new(line: usize, column: usize) -> Self {
         Self { line, column }
     }
-    
+
     #[must_use]
     pub fn start() -> Self {
         Self { line: 1, column: 1 }
@@ -30,19 +30,19 @@ impl std::fmt::Display for Position {
 pub enum LexerError {
     #[error("Unexpected character '{0}' at {1}")]
     UnexpectedChar(char, Position),
-    
+
     #[error("Unterminated string literal at {0}")]
     UnterminatedString(Position),
-    
+
     #[error("Unterminated block comment at {0}")]
     UnterminatedBlockComment(Position),
-    
+
     #[error("Invalid number format '{0}' at {1}")]
     InvalidNumber(String, Position),
-    
+
     #[error("Invalid escape sequence '\\{0}' at {1}")]
     InvalidEscape(char, Position),
-    
+
     #[error("Unexpected end of input")]
     UnexpectedEof,
 }

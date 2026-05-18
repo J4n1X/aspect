@@ -3,35 +3,41 @@ use std::path::Path;
 use std::process::Command;
 use tempfile::NamedTempFile;
 
+use inkwell::context::Context;
+use tjlb_macros::generate_tests;
+use tjlb_rust::codegen::CodeGenerator;
 use tjlb_rust::lexer::tokenize;
 use tjlb_rust::parser::Parser;
 use tjlb_rust::typechecker::TypeChecker;
-use tjlb_rust::codegen::CodeGenerator;
-use inkwell::context::Context;
-use tjlb_macros::generate_tests;
 
 fn compile_to_ir_tempfile(source_path: &str) -> Result<NamedTempFile, String> {
     // Read source file
-    let source = fs::read_to_string(source_path)
-        .map_err(|e| format!("Failed to read source file: {e}"))?;
+    let source =
+        fs::read_to_string(source_path).map_err(|e| format!("Failed to read source file: {e}"))?;
 
     // Tokenize
-    let tokens = tokenize(source)
-        .map_err(|e| format!("Tokenization failed: {e}"))?;
+    let tokens = tokenize(source).map_err(|e| format!("Tokenization failed: {e}"))?;
 
     // Parse
     let mut parser = Parser::new(tokens).with_source_file(source_path.to_string());
     let parse_result = parser.parse_program();
     let program = parse_result.map_err(|errors| {
-        errors.iter().map(|e| parser.format_error(e)).collect::<Vec<_>>().join("\n")
+        errors
+            .iter()
+            .map(|e| parser.format_error(e))
+            .collect::<Vec<_>>()
+            .join("\n")
     })?;
 
     // Typecheck
     let mut typechecker = TypeChecker::new().with_source_file(source_path.to_string());
-    typechecker.check_program(&program)
-        .map_err(|errors| {
-            errors.iter().map(|e| typechecker.format_error(e)).collect::<Vec<_>>().join("\n")
-        })?;
+    typechecker.check_program(&program).map_err(|errors| {
+        errors
+            .iter()
+            .map(|e| typechecker.format_error(e))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
 
     // Generate LLVM IR
     let context = Context::create();
@@ -41,14 +47,15 @@ fn compile_to_ir_tempfile(source_path: &str) -> Result<NamedTempFile, String> {
         .unwrap_or("module");
 
     let mut codegen = CodeGenerator::new(&context, module_name);
-    codegen.generate(&program)
+    codegen
+        .generate(&program)
         .map_err(|e| format!("Code generation failed: {e}"))?;
 
     // Write IR to temporary file
-    let ir_file = NamedTempFile::new()
-        .map_err(|e| format!("Failed to create temp file: {e}"))?;
+    let ir_file = NamedTempFile::new().map_err(|e| format!("Failed to create temp file: {e}"))?;
 
-    codegen.write_ir_to_file(ir_file.path())
+    codegen
+        .write_ir_to_file(ir_file.path())
         .map_err(|e| format!("Failed to write IR: {e}"))?;
 
     Ok(ir_file)
@@ -59,9 +66,9 @@ fn compile_only(source_path: &str) -> Result<(), String> {
 }
 
 fn assert_compile_error_contains(source_path: &str, expected_fragments: &[&str]) {
-    let err = compile_only(source_path).expect_err(
-        &format!("Expected compilation to fail for {source_path}, but it succeeded")
-    );
+    let err = compile_only(source_path).expect_err(&format!(
+        "Expected compilation to fail for {source_path}, but it succeeded"
+    ));
 
     let err_lower = err.to_lowercase();
     for fragment in expected_fragments {
@@ -114,4 +121,3 @@ fn compile_and_run(source_path: &str) -> Result<i32, String> {
 }
 
 generate_tests!();
-

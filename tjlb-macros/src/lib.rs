@@ -15,8 +15,8 @@ use syn::visit_mut::VisitMut;
 ///    reflects which rule is currently executing.
 #[proc_macro_attribute]
 pub fn parse_rule(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    let mut func: syn::ItemFn = syn::parse(item)
-        .expect("#[parse_rule] can only be applied to functions");
+    let mut func: syn::ItemFn =
+        syn::parse(item).expect("#[parse_rule] can only be applied to functions");
 
     // Derive a human-readable label from the function name.
     // "parse_return_statement" -> "return statement"

@@ -1,20 +1,44 @@
-use tjlb_macros::parse_rule;
-use crate::lexer::{TokenKind, Keyword, Position};
-use crate::parser::{Statement, StatementKind, Expression, ExprKind, ParserError};
+use crate::lexer::{Keyword, Position, TokenKind};
 use crate::parser::expressions::Parser;
+use crate::parser::{ExprKind, Expression, ParserError, Statement, StatementKind};
+use tjlb_macros::parse_rule;
 
-type StatementPred    = fn(&Parser) -> bool;
+type StatementPred = fn(&Parser) -> bool;
 type StatementHandler = fn(&mut Parser) -> Result<Statement, ParserError>;
 
 const STATEMENT_TABLE: &[(StatementPred, StatementHandler)] = &[
-    (|p| p.check(&TokenKind::OpenBrace),                    Parser::parse_block_statement),
-    (|p| p.check_keyword(&Keyword::Return),                 Parser::parse_return_statement),
-    (|p| p.check_keyword(&Keyword::If),                     Parser::parse_if_statement),
-    (|p| p.check_keyword(&Keyword::While),                  Parser::parse_while_statement),
-    (|p| p.check_keyword(&Keyword::For),                    Parser::parse_for_statement),
-    (|p| p.check_keyword(&Keyword::Break),                  Parser::parse_break_statement),
-    (|p| p.check_keyword(&Keyword::Continue),               Parser::parse_continue_statement),
-    (|p| matches!(p.peek().kind, TokenKind::LangType(_)),   Parser::parse_var_decl_or_assignment),
+    (
+        |p| p.check(&TokenKind::OpenBrace),
+        Parser::parse_block_statement,
+    ),
+    (
+        |p| p.check_keyword(&Keyword::Return),
+        Parser::parse_return_statement,
+    ),
+    (
+        |p| p.check_keyword(&Keyword::If),
+        Parser::parse_if_statement,
+    ),
+    (
+        |p| p.check_keyword(&Keyword::While),
+        Parser::parse_while_statement,
+    ),
+    (
+        |p| p.check_keyword(&Keyword::For),
+        Parser::parse_for_statement,
+    ),
+    (
+        |p| p.check_keyword(&Keyword::Break),
+        Parser::parse_break_statement,
+    ),
+    (
+        |p| p.check_keyword(&Keyword::Continue),
+        Parser::parse_continue_statement,
+    ),
+    (
+        |p| matches!(p.peek().kind, TokenKind::LangType(_)),
+        Parser::parse_var_decl_or_assignment,
+    ),
 ];
 
 impl Parser {
@@ -38,7 +62,9 @@ impl Parser {
             let mut stmts = Vec::new();
             loop {
                 skip_nl!();
-                if self.check(&TokenKind::CloseBrace) || self.is_at_end() { break; }
+                if self.check(&TokenKind::CloseBrace) || self.is_at_end() {
+                    break;
+                }
                 if let Some(s) = sync!(parse_statement) {
                     stmts.push(s);
                 }
@@ -77,7 +103,14 @@ impl Parser {
         } else {
             None
         };
-        Ok(Statement::new(StatementKind::If { condition, then_block, else_block }, pos))
+        Ok(Statement::new(
+            StatementKind::If {
+                condition,
+                then_block,
+                else_block,
+            },
+            pos,
+        ))
     }
 
     /// Parse the condition + blocks of an elif chain (the 'elif' keyword has
@@ -87,7 +120,10 @@ impl Parser {
         let condition = self.parse_expression()?;
         self.skip_newlines();
         let then_block = match self.parse_block_statement()? {
-            Statement { kind: StatementKind::Block(stmts), .. } => stmts,
+            Statement {
+                kind: StatementKind::Block(stmts),
+                ..
+            } => stmts,
             _ => unreachable!(),
         };
         self.skip_newlines();
@@ -95,7 +131,10 @@ impl Parser {
             self.advance();
             self.skip_newlines();
             let blk = match self.parse_block_statement()? {
-                Statement { kind: StatementKind::Block(stmts), .. } => stmts,
+                Statement {
+                    kind: StatementKind::Block(stmts),
+                    ..
+                } => stmts,
                 _ => unreachable!(),
             };
             Some(blk)
@@ -105,7 +144,14 @@ impl Parser {
         } else {
             None
         };
-        Ok(Statement::new(StatementKind::If { condition, then_block, else_block }, pos))
+        Ok(Statement::new(
+            StatementKind::If {
+                condition,
+                then_block,
+                else_block,
+            },
+            pos,
+        ))
     }
 
     /// Parse a while loop
@@ -116,7 +162,10 @@ impl Parser {
         let condition = self.parse_expression()?;
         skip_nl!();
         let body = block_body!(parse_block_statement);
-        Ok(Statement::new(StatementKind::While { condition, body }, pos))
+        Ok(Statement::new(
+            StatementKind::While { condition, body },
+            pos,
+        ))
     }
 
     /// Parse a break statement
@@ -168,7 +217,15 @@ impl Parser {
             let body = block_body!(parse_block_statement);
             (init, condition, increment, body)
         });
-        Ok(Statement::new(StatementKind::For { init, condition, increment, body }, pos))
+        Ok(Statement::new(
+            StatementKind::For {
+                init,
+                condition,
+                increment,
+                body,
+            },
+            pos,
+        ))
     }
 
     /// Variable declaration inner (no trailing terminator).
@@ -186,7 +243,14 @@ impl Parser {
         self.symbol_table_mut()
             .add_variable(name.clone(), var_type, pos)
             .map_err(|e| ParserError::UnexpectedToken(e, pos))?;
-        Ok(Statement::new(StatementKind::VarDecl { var_type, name, initializer }, pos))
+        Ok(Statement::new(
+            StatementKind::VarDecl {
+                var_type,
+                name,
+                initializer,
+            },
+            pos,
+        ))
     }
 
     /// Parse variable declaration (with trailing terminator)
@@ -200,15 +264,15 @@ impl Parser {
     fn compound_op_for_token(kind: &TokenKind) -> Option<crate::parser::BinaryOp> {
         use crate::parser::BinaryOp;
         match kind {
-            TokenKind::PlusAssign       => Some(BinaryOp::Add),
-            TokenKind::MinusAssign      => Some(BinaryOp::Sub),
-            TokenKind::MultAssign       => Some(BinaryOp::Mul),
-            TokenKind::DivAssign        => Some(BinaryOp::Div),
-            TokenKind::ModAssign        => Some(BinaryOp::Mod),
-            TokenKind::AndAssign        => Some(BinaryOp::And),
-            TokenKind::OrAssign         => Some(BinaryOp::Or),
-            TokenKind::XorAssign        => Some(BinaryOp::Xor),
-            TokenKind::LeftShiftAssign  => Some(BinaryOp::LeftShift),
+            TokenKind::PlusAssign => Some(BinaryOp::Add),
+            TokenKind::MinusAssign => Some(BinaryOp::Sub),
+            TokenKind::MultAssign => Some(BinaryOp::Mul),
+            TokenKind::DivAssign => Some(BinaryOp::Div),
+            TokenKind::ModAssign => Some(BinaryOp::Mod),
+            TokenKind::AndAssign => Some(BinaryOp::And),
+            TokenKind::OrAssign => Some(BinaryOp::Or),
+            TokenKind::XorAssign => Some(BinaryOp::Xor),
+            TokenKind::LeftShiftAssign => Some(BinaryOp::LeftShift),
             TokenKind::RightShiftAssign => Some(BinaryOp::RightShift),
             _ => None,
         }
@@ -222,11 +286,7 @@ impl Parser {
         op: crate::parser::BinaryOp,
         pos: Position,
     ) -> Expression {
-        let var_expr = Expression::new(
-            ExprKind::Variable(name.to_string()),
-            var_type,
-            pos,
-        );
+        let var_expr = Expression::new(ExprKind::Variable(name.to_string()), var_type, pos);
         Expression::new(
             ExprKind::Binary {
                 left: Box::new(var_expr),
@@ -248,9 +308,18 @@ impl Parser {
             self.advance();
             let value = self.parse_expression()?;
             if let ExprKind::Variable(name) = expr.kind {
-                Ok(Statement::new(StatementKind::VarAssign { name, value }, pos))
+                Ok(Statement::new(
+                    StatementKind::VarAssign { name, value },
+                    pos,
+                ))
             } else if matches!(expr.kind, ExprKind::Dereference(_)) {
-                Ok(Statement::new(StatementKind::DerefAssign { target: expr, value }, pos))
+                Ok(Statement::new(
+                    StatementKind::DerefAssign {
+                        target: expr,
+                        value,
+                    },
+                    pos,
+                ))
             } else {
                 Err(ParserError::UnexpectedToken(
                     "cannot assign to this expression".to_string(),
@@ -265,8 +334,12 @@ impl Parser {
                     let var_type = expr.expr_type;
                     self.advance();
                     let value_expr = self.parse_expression()?;
-                    let value = Self::create_compound_assignment(&name, var_type, value_expr, op, pos);
-                    Ok(Statement::new(StatementKind::VarAssign { name, value }, pos))
+                    let value =
+                        Self::create_compound_assignment(&name, var_type, value_expr, op, pos);
+                    Ok(Statement::new(
+                        StatementKind::VarAssign { name, value },
+                        pos,
+                    ))
                 } else {
                     Err(ParserError::UnexpectedToken(
                         "compound assignment requires a variable".to_string(),

@@ -1,8 +1,10 @@
-use tjlb_macros::parse_rule;
-use crate::lexer::{Token, TokenKind, Keyword, LangType, TypeBase};
-use crate::parser::{Expression, ExprKind, BinaryOp, ComparisonOp, LiteralValue, ParserError,
-                    Statement, StatementKind};
+use crate::lexer::{Keyword, LangType, Token, TokenKind, TypeBase};
+use crate::parser::{
+    BinaryOp, ComparisonOp, ExprKind, Expression, LiteralValue, ParserError, Statement,
+    StatementKind,
+};
 use crate::symbol::table::SymbolTable;
+use tjlb_macros::parse_rule;
 
 #[derive(Clone, Copy)]
 enum OpKind {
@@ -18,24 +20,114 @@ struct InfixEntry {
 }
 
 const INFIX_OPS: &[InfixEntry] = &[
-    InfixEntry { token: TokenKind::LogicalOr,    op: OpKind::Binary(BinaryOp::LogicalOr),              prec: 1,  right_assoc: false },
-    InfixEntry { token: TokenKind::LogicalAnd,   op: OpKind::Binary(BinaryOp::LogicalAnd),             prec: 2,  right_assoc: false },
-    InfixEntry { token: TokenKind::Equal,        op: OpKind::Comparison(ComparisonOp::Equal),          prec: 3,  right_assoc: false },
-    InfixEntry { token: TokenKind::NotEqual,     op: OpKind::Comparison(ComparisonOp::NotEqual),       prec: 3,  right_assoc: false },
-    InfixEntry { token: TokenKind::Less,         op: OpKind::Comparison(ComparisonOp::Less),           prec: 3,  right_assoc: false },
-    InfixEntry { token: TokenKind::Greater,      op: OpKind::Comparison(ComparisonOp::Greater),        prec: 3,  right_assoc: false },
-    InfixEntry { token: TokenKind::LessEqual,    op: OpKind::Comparison(ComparisonOp::LessEqual),      prec: 3,  right_assoc: false },
-    InfixEntry { token: TokenKind::GreaterEqual, op: OpKind::Comparison(ComparisonOp::GreaterEqual),   prec: 3,  right_assoc: false },
-    InfixEntry { token: TokenKind::Pipe,         op: OpKind::Binary(BinaryOp::Or),                     prec: 4,  right_assoc: false },
-    InfixEntry { token: TokenKind::Caret,        op: OpKind::Binary(BinaryOp::Xor),                    prec: 5,  right_assoc: false },
-    InfixEntry { token: TokenKind::Ampersand,    op: OpKind::Binary(BinaryOp::And),                    prec: 6,  right_assoc: false },
-    InfixEntry { token: TokenKind::LeftShift,    op: OpKind::Binary(BinaryOp::LeftShift),              prec: 7,  right_assoc: false },
-    InfixEntry { token: TokenKind::RightShift,   op: OpKind::Binary(BinaryOp::RightShift),             prec: 7,  right_assoc: false },
-    InfixEntry { token: TokenKind::Plus,         op: OpKind::Binary(BinaryOp::Add),                    prec: 10, right_assoc: false },
-    InfixEntry { token: TokenKind::Minus,        op: OpKind::Binary(BinaryOp::Sub),                    prec: 10, right_assoc: false },
-    InfixEntry { token: TokenKind::Asterisk,     op: OpKind::Binary(BinaryOp::Mul),                    prec: 20, right_assoc: false },
-    InfixEntry { token: TokenKind::Slash,        op: OpKind::Binary(BinaryOp::Div),                    prec: 20, right_assoc: false },
-    InfixEntry { token: TokenKind::Percent,      op: OpKind::Binary(BinaryOp::Mod),                    prec: 20, right_assoc: false },
+    InfixEntry {
+        token: TokenKind::LogicalOr,
+        op: OpKind::Binary(BinaryOp::LogicalOr),
+        prec: 1,
+        right_assoc: false,
+    },
+    InfixEntry {
+        token: TokenKind::LogicalAnd,
+        op: OpKind::Binary(BinaryOp::LogicalAnd),
+        prec: 2,
+        right_assoc: false,
+    },
+    InfixEntry {
+        token: TokenKind::Equal,
+        op: OpKind::Comparison(ComparisonOp::Equal),
+        prec: 3,
+        right_assoc: false,
+    },
+    InfixEntry {
+        token: TokenKind::NotEqual,
+        op: OpKind::Comparison(ComparisonOp::NotEqual),
+        prec: 3,
+        right_assoc: false,
+    },
+    InfixEntry {
+        token: TokenKind::Less,
+        op: OpKind::Comparison(ComparisonOp::Less),
+        prec: 3,
+        right_assoc: false,
+    },
+    InfixEntry {
+        token: TokenKind::Greater,
+        op: OpKind::Comparison(ComparisonOp::Greater),
+        prec: 3,
+        right_assoc: false,
+    },
+    InfixEntry {
+        token: TokenKind::LessEqual,
+        op: OpKind::Comparison(ComparisonOp::LessEqual),
+        prec: 3,
+        right_assoc: false,
+    },
+    InfixEntry {
+        token: TokenKind::GreaterEqual,
+        op: OpKind::Comparison(ComparisonOp::GreaterEqual),
+        prec: 3,
+        right_assoc: false,
+    },
+    InfixEntry {
+        token: TokenKind::Pipe,
+        op: OpKind::Binary(BinaryOp::Or),
+        prec: 4,
+        right_assoc: false,
+    },
+    InfixEntry {
+        token: TokenKind::Caret,
+        op: OpKind::Binary(BinaryOp::Xor),
+        prec: 5,
+        right_assoc: false,
+    },
+    InfixEntry {
+        token: TokenKind::Ampersand,
+        op: OpKind::Binary(BinaryOp::And),
+        prec: 6,
+        right_assoc: false,
+    },
+    InfixEntry {
+        token: TokenKind::LeftShift,
+        op: OpKind::Binary(BinaryOp::LeftShift),
+        prec: 7,
+        right_assoc: false,
+    },
+    InfixEntry {
+        token: TokenKind::RightShift,
+        op: OpKind::Binary(BinaryOp::RightShift),
+        prec: 7,
+        right_assoc: false,
+    },
+    InfixEntry {
+        token: TokenKind::Plus,
+        op: OpKind::Binary(BinaryOp::Add),
+        prec: 10,
+        right_assoc: false,
+    },
+    InfixEntry {
+        token: TokenKind::Minus,
+        op: OpKind::Binary(BinaryOp::Sub),
+        prec: 10,
+        right_assoc: false,
+    },
+    InfixEntry {
+        token: TokenKind::Asterisk,
+        op: OpKind::Binary(BinaryOp::Mul),
+        prec: 20,
+        right_assoc: false,
+    },
+    InfixEntry {
+        token: TokenKind::Slash,
+        op: OpKind::Binary(BinaryOp::Div),
+        prec: 20,
+        right_assoc: false,
+    },
+    InfixEntry {
+        token: TokenKind::Percent,
+        op: OpKind::Binary(BinaryOp::Mod),
+        prec: 20,
+        right_assoc: false,
+    },
 ];
 
 pub struct Parser {
@@ -73,8 +165,9 @@ impl Parser {
     #[must_use]
     pub fn format_error(&self, err: &ParserError) -> String {
         match err.position() {
-            Some(pos) if !self.source_file.is_empty() =>
-                format!("{}:{}:{}: {}", self.source_file, pos.line, pos.column, err),
+            Some(pos) if !self.source_file.is_empty() => {
+                format!("{}:{}:{}: {}", self.source_file, pos.line, pos.column, err)
+            }
             _ => err.to_string(),
         }
     }
@@ -85,15 +178,27 @@ impl Parser {
         while !self.is_at_end() {
             match &self.peek().kind {
                 TokenKind::CloseBrace => return,
-                TokenKind::Keyword(k) if matches!(k,
-                    Keyword::Fn | Keyword::If | Keyword::While | Keyword::For |
-                    Keyword::Return | Keyword::Break | Keyword::Continue
-                ) => return,
+                TokenKind::Keyword(k)
+                    if matches!(
+                        k,
+                        Keyword::Fn
+                            | Keyword::If
+                            | Keyword::While
+                            | Keyword::For
+                            | Keyword::Return
+                            | Keyword::Break
+                            | Keyword::Continue
+                    ) =>
+                {
+                    return
+                }
                 TokenKind::Newline | TokenKind::Semicolon => {
                     self.advance();
                     return;
                 }
-                _ => { self.advance(); }
+                _ => {
+                    self.advance();
+                }
             }
         }
     }
@@ -163,7 +268,11 @@ impl Parser {
     }
 
     /// Expect a specific keyword and consume it (validates the inner keyword, unlike `expect`)
-    pub(crate) fn expect_keyword(&mut self, keyword: &Keyword, message: &str) -> Result<&Token, ParserError> {
+    pub(crate) fn expect_keyword(
+        &mut self,
+        keyword: &Keyword,
+        message: &str,
+    ) -> Result<&Token, ParserError> {
         if self.check_keyword(keyword) {
             Ok(self.advance())
         } else {
@@ -176,7 +285,11 @@ impl Parser {
     }
 
     /// Expect a specific token kind and consume it
-    pub(crate) fn expect(&mut self, kind: &TokenKind, message: &str) -> Result<&Token, ParserError> {
+    pub(crate) fn expect(
+        &mut self,
+        kind: &TokenKind,
+        message: &str,
+    ) -> Result<&Token, ParserError> {
         if self.check(kind) {
             Ok(self.advance())
         } else {
@@ -197,8 +310,7 @@ impl Parser {
 
     /// True when the current token is a statement terminator or EOF.
     pub(crate) fn check_terminator(&self) -> bool {
-        matches!(self.peek().kind, TokenKind::Newline | TokenKind::Semicolon)
-            || self.is_at_end()
+        matches!(self.peek().kind, TokenKind::Newline | TokenKind::Semicolon) || self.is_at_end()
     }
 
     /// Parse an expression
@@ -210,9 +322,12 @@ impl Parser {
         let mut left = self.parse_cast_or_alloc()?;
 
         loop {
-            let Some(entry) = INFIX_OPS.iter()
+            let Some(entry) = INFIX_OPS
+                .iter()
                 .find(|e| self.check(&e.token) && e.prec >= min_prec)
-            else { break };
+            else {
+                break;
+            };
 
             let (op, prec, right_assoc) = (entry.op, entry.prec, entry.right_assoc);
             self.advance();
@@ -224,7 +339,11 @@ impl Parser {
                 OpKind::Binary(bop) => {
                     let result_type = left.expr_type;
                     Expression::new(
-                        ExprKind::Binary { left: Box::new(left), op: bop, right: Box::new(right) },
+                        ExprKind::Binary {
+                            left: Box::new(left),
+                            op: bop,
+                            right: Box::new(right),
+                        },
                         result_type,
                         pos,
                     )
@@ -232,7 +351,11 @@ impl Parser {
                 OpKind::Comparison(cop) => {
                     let result_type = LangType::new(TypeBase::SInt, 32, 0, false);
                     Expression::new(
-                        ExprKind::Comparison { left: Box::new(left), op: cop, right: Box::new(right) },
+                        ExprKind::Comparison {
+                            left: Box::new(left),
+                            op: cop,
+                            right: Box::new(right),
+                        },
                         result_type,
                         pos,
                     )
@@ -426,7 +549,9 @@ impl Parser {
         };
 
         // Look up function in symbol table
-        let func_symbol = self.symbol_table.lookup_function(&func_name)
+        let func_symbol = self
+            .symbol_table
+            .lookup_function(&func_name)
             .ok_or_else(|| ParserError::UndefinedFunction(func_name.clone(), pos))?;
 
         let return_type = func_symbol.return_type;
@@ -458,7 +583,7 @@ impl Parser {
 
     fn parse_array_access(&mut self, array_expr: &Expression) -> Result<Expression, ParserError> {
         let pos = array_expr.pos;
-        
+
         // Fetch the index expression
         let index_expr = self.parse_expression()?;
         self.expect(&TokenKind::CloseBracket, "]")?;
@@ -573,11 +698,7 @@ impl Parser {
                     LangType::new(TypeBase::Void, 0, 0, false)
                 };
 
-                Ok(Expression::new(
-                    ExprKind::Variable(name),
-                    expr_type,
-                    pos,
-                ))
+                Ok(Expression::new(ExprKind::Variable(name), expr_type, pos))
             }
 
             // Parenthesized expression
@@ -589,9 +710,7 @@ impl Parser {
             }
 
             // List initializer (for array literals and in the future, for struct initializers)
-            TokenKind::OpenBrace => {
-                self.parse_init_list()
-            }
+            TokenKind::OpenBrace => self.parse_init_list(),
 
             _ => Err(ParserError::ExpectedExpression(pos)),
         }
@@ -656,12 +775,18 @@ impl Parser {
         match result {
             Ok(prog) if errs.is_empty() => Ok(prog),
             Ok(_) => {
-                errs.sort_by_key(|e| e.position().map_or((usize::MAX, usize::MAX), |p| (p.line, p.column)));
+                errs.sort_by_key(|e| {
+                    e.position()
+                        .map_or((usize::MAX, usize::MAX), |p| (p.line, p.column))
+                });
                 Err(errs)
             }
             Err(e) => {
                 errs.push(e);
-                errs.sort_by_key(|e| e.position().map_or((usize::MAX, usize::MAX), |p| (p.line, p.column)));
+                errs.sort_by_key(|e| {
+                    e.position()
+                        .map_or((usize::MAX, usize::MAX), |p| (p.line, p.column))
+                });
                 Err(errs)
             }
         }
@@ -725,7 +850,9 @@ impl Parser {
                 let param_type = lang_type!();
                 let param_name = ident!();
                 params.push((param_type, param_name));
-                if !self.match_token(&[TokenKind::Comma]) { break; }
+                if !self.match_token(&[TokenKind::Comma]) {
+                    break;
+                }
             }
         }
         token!(CloseParen);
@@ -736,7 +863,13 @@ impl Parser {
             LangType::new(TypeBase::Void, 0, 0, false)
         };
 
-        let proto = FunctionProto { name: name.clone(), params: params.clone(), return_type, is_extern, pos };
+        let proto = FunctionProto {
+            name: name.clone(),
+            params: params.clone(),
+            return_type,
+            is_extern,
+            pos,
+        };
 
         self.symbol_table_mut()
             .add_function(FunctionSymbol {
@@ -762,7 +895,10 @@ impl Parser {
                         .map_err(|e| ParserError::UnexpectedToken(e, pos))?;
                 }
                 match self.parse_block_statement()? {
-                    Statement { kind: StatementKind::Block(stmts), .. } => stmts,
+                    Statement {
+                        kind: StatementKind::Block(stmts),
+                        ..
+                    } => stmts,
                     _ => unreachable!(),
                 }
             })
@@ -792,7 +928,12 @@ impl Parser {
 
         term!();
 
-        Ok(GlobalVar { var_type, name, initializer, pos })
+        Ok(GlobalVar {
+            var_type,
+            name,
+            initializer,
+            pos,
+        })
     }
 
     fn parse_init_list(&mut self) -> Result<Expression, ParserError> {
@@ -806,7 +947,9 @@ impl Parser {
                 self.skip_newlines();
                 elements.push(self.parse_expression()?);
                 self.skip_newlines();
-                if !self.match_token(&[TokenKind::Comma]) { break; }
+                if !self.match_token(&[TokenKind::Comma]) {
+                    break;
+                }
             }
         }
         self.skip_newlines();

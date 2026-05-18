@@ -1,5 +1,5 @@
-use thiserror::Error;
 use crate::lexer::Position;
+use thiserror::Error;
 
 /// Code generation error types
 #[derive(Error, Debug)]

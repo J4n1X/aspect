@@ -2,7 +2,8 @@ use super::errors::TypeCheckError;
 use super::types::{cast_valid, literal_float_compatible, literal_int_fits, types_coercible};
 use crate::lexer::{LangType, Position, TypeBase};
 use crate::parser::{
-    BinaryOp, ExprKind, Expression, Function, GlobalVar, LiteralValue, Program, Statement, StatementKind,
+    BinaryOp, ExprKind, Expression, Function, GlobalVar, LiteralValue, Program, Statement,
+    StatementKind,
 };
 use std::collections::HashMap;
 
@@ -58,10 +59,7 @@ impl TypeChecker {
             return format!("{err}");
         }
         match err.position() {
-            Some(pos) => format!(
-                "{}:{}:{}: {}",
-                self.source_file, pos.line, pos.column, err
-            ),
+            Some(pos) => format!("{}:{}:{}: {}", self.source_file, pos.line, pos.column, err),
             None => format!("{}: {}", self.source_file, err),
         }
     }
@@ -126,10 +124,20 @@ impl TypeChecker {
                 // Validate each element type
                 let elem_type = var_type.element_type();
                 for elem in elements {
-                    self.check_expr_coercible(elem, &elem_type, "global array initializer element", elem.pos);
+                    self.check_expr_coercible(
+                        elem,
+                        &elem_type,
+                        "global array initializer element",
+                        elem.pos,
+                    );
                 }
             } else {
-                self.check_expr_coercible(init_expr, var_type, "global variable initializer", init_expr.pos);
+                self.check_expr_coercible(
+                    init_expr,
+                    var_type,
+                    "global variable initializer",
+                    init_expr.pos,
+                );
             }
         }
     }
@@ -157,7 +165,11 @@ impl TypeChecker {
     #[allow(clippy::too_many_lines)]
     fn check_statement(&mut self, stmt: &Statement) {
         match &stmt.kind {
-            StatementKind::VarDecl { var_type, name, initializer } => {
+            StatementKind::VarDecl {
+                var_type,
+                name,
+                initializer,
+            } => {
                 self.define_var(name.clone(), *var_type);
                 if let Some(init_expr) = initializer {
                     if let ExprKind::ListInitializer(elements) = &init_expr.kind {
@@ -172,10 +184,20 @@ impl TypeChecker {
                         }
                         let elem_type = var_type.element_type();
                         for elem in elements {
-                            self.check_expr_coercible(elem, &elem_type, "array initializer element", elem.pos);
+                            self.check_expr_coercible(
+                                elem,
+                                &elem_type,
+                                "array initializer element",
+                                elem.pos,
+                            );
                         }
                     } else {
-                        self.check_expr_coercible(init_expr, var_type, "initialization", init_expr.pos);
+                        self.check_expr_coercible(
+                            init_expr,
+                            var_type,
+                            "initialization",
+                            init_expr.pos,
+                        );
                     }
                 }
             }
@@ -202,7 +224,12 @@ impl TypeChecker {
                     if let Some(sig) = self.functions.get(&func_name).cloned() {
                         match opt_expr {
                             Some(expr) => {
-                                self.check_expr_coercible(expr, &sig.return_type, "return", expr.pos);
+                                self.check_expr_coercible(
+                                    expr,
+                                    &sig.return_type,
+                                    "return",
+                                    expr.pos,
+                                );
                             }
                             None => {
                                 let void = LangType::new(TypeBase::Void, 0, 0, false);
@@ -219,19 +246,28 @@ impl TypeChecker {
                 }
             }
 
-            StatementKind::If { condition, then_block, else_block } => {
+            StatementKind::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
                 let cond_type = self.check_expression(condition);
                 if cond_type.base == TypeBase::Void && cond_type.pointer_depth == 0 {
                     self.errors.push(TypeCheckError::InvalidConditionType(
-                        cond_type, condition.pos,
+                        cond_type,
+                        condition.pos,
                     ));
                 }
                 self.enter_scope();
-                for s in then_block { self.check_statement(s); }
+                for s in then_block {
+                    self.check_statement(s);
+                }
                 self.exit_scope();
                 if let Some(else_stmts) = else_block {
                     self.enter_scope();
-                    for s in else_stmts { self.check_statement(s); }
+                    for s in else_stmts {
+                        self.check_statement(s);
+                    }
                     self.exit_scope();
                 }
             }
@@ -240,33 +276,50 @@ impl TypeChecker {
                 let cond_type = self.check_expression(condition);
                 if cond_type.base == TypeBase::Void && cond_type.pointer_depth == 0 {
                     self.errors.push(TypeCheckError::InvalidConditionType(
-                        cond_type, condition.pos,
+                        cond_type,
+                        condition.pos,
                     ));
                 }
                 self.enter_scope();
-                for s in body { self.check_statement(s); }
+                for s in body {
+                    self.check_statement(s);
+                }
                 self.exit_scope();
             }
 
-            StatementKind::For { init, condition, increment, body } => {
+            StatementKind::For {
+                init,
+                condition,
+                increment,
+                body,
+            } => {
                 self.enter_scope();
-                if let Some(init_stmt) = init { self.check_statement(init_stmt); }
+                if let Some(init_stmt) = init {
+                    self.check_statement(init_stmt);
+                }
                 if let Some(cond_expr) = condition {
                     let cond_type = self.check_expression(cond_expr);
                     if cond_type.base == TypeBase::Void && cond_type.pointer_depth == 0 {
                         self.errors.push(TypeCheckError::InvalidConditionType(
-                            cond_type, cond_expr.pos,
+                            cond_type,
+                            cond_expr.pos,
                         ));
                     }
                 }
-                if let Some(inc_stmt) = increment { self.check_statement(inc_stmt); }
-                for s in body { self.check_statement(s); }
+                if let Some(inc_stmt) = increment {
+                    self.check_statement(inc_stmt);
+                }
+                for s in body {
+                    self.check_statement(s);
+                }
                 self.exit_scope();
             }
 
             StatementKind::Block(stmts) => {
                 self.enter_scope();
-                for s in stmts { self.check_statement(s); }
+                for s in stmts {
+                    self.check_statement(s);
+                }
                 self.exit_scope();
             }
 
@@ -289,15 +342,14 @@ impl TypeChecker {
                 if let Some(ty) = self.lookup_var(name) {
                     ty
                 } else {
-                    self.errors.push(TypeCheckError::UndefinedVariable(
-                        name.clone(), expr.pos,
-                    ));
+                    self.errors
+                        .push(TypeCheckError::UndefinedVariable(name.clone(), expr.pos));
                     expr.expr_type
                 }
             }
 
             ExprKind::Binary { left, op, right } => {
-                let left_type  = self.check_expression(left);
+                let left_type = self.check_expression(left);
                 let right_type = self.check_expression(right);
 
                 if !Self::binary_op_types_valid(&left_type, &right_type, op) {
@@ -313,7 +365,7 @@ impl TypeChecker {
             }
 
             ExprKind::Comparison { left, op: _, right } => {
-                let left_type  = self.check_expression(left);
+                let left_type = self.check_expression(left);
                 let right_type = self.check_expression(right);
 
                 if !Self::binary_op_types_valid(&left_type, &right_type, &BinaryOp::Add) {
@@ -338,7 +390,8 @@ impl TypeChecker {
                 // Array subscript `arr[i]` is lowered to `*(arr + i)` by the parser,
                 // so array types (pointer_depth == 0 but is_array()) must be accepted here.
                 if inner_type.pointer_depth == 0 && !inner_type.is_array() {
-                    self.errors.push(TypeCheckError::InvalidDereference(inner_type, expr.pos));
+                    self.errors
+                        .push(TypeCheckError::InvalidDereference(inner_type, expr.pos));
                 }
                 expr.expr_type
             }
@@ -357,7 +410,8 @@ impl TypeChecker {
                             position: expr.pos,
                         });
                     } else {
-                        for (i, (param, arg_expr)) in sig.params.iter().zip(args.iter()).enumerate() {
+                        for (i, (param, arg_expr)) in sig.params.iter().zip(args.iter()).enumerate()
+                        {
                             if !Self::expr_coercible_to(arg_expr, param) {
                                 let arg_type = arg_types[i];
                                 self.errors.push(TypeCheckError::ArgumentTypeMismatch {
@@ -370,14 +424,16 @@ impl TypeChecker {
                         }
                     }
                 } else {
-                    self.errors.push(TypeCheckError::UndefinedFunction(
-                        name.clone(), expr.pos,
-                    ));
+                    self.errors
+                        .push(TypeCheckError::UndefinedFunction(name.clone(), expr.pos));
                 }
                 expr.expr_type
             }
 
-            ExprKind::Cast { expr: inner, target_type } => {
+            ExprKind::Cast {
+                expr: inner,
+                target_type,
+            } => {
                 let from_type = self.check_expression(inner);
                 if !cast_valid(&from_type, target_type) {
                     self.errors.push(TypeCheckError::InvalidCast {
@@ -389,7 +445,10 @@ impl TypeChecker {
                 *target_type
             }
 
-            ExprKind::Alloc { alloc_type: _, count } => {
+            ExprKind::Alloc {
+                alloc_type: _,
+                count,
+            } => {
                 let count_type = self.check_expression(count);
                 if !matches!(count_type.base, TypeBase::SInt | TypeBase::UInt)
                     || count_type.pointer_depth > 0
@@ -467,12 +526,10 @@ impl TypeChecker {
     fn expr_coercible_to(expr: &Expression, target: &LangType) -> bool {
         match &expr.kind {
             ExprKind::Literal(LiteralValue::Integer(val)) => {
-                literal_int_fits(*val, target)
-                    || types_coercible(&expr.expr_type, target)
+                literal_int_fits(*val, target) || types_coercible(&expr.expr_type, target)
             }
             ExprKind::Literal(LiteralValue::Float(_)) => {
-                literal_float_compatible(target)
-                    || types_coercible(&expr.expr_type, target)
+                literal_float_compatible(target) || types_coercible(&expr.expr_type, target)
             }
             _ => types_coercible(&expr.expr_type, target),
         }
@@ -483,12 +540,14 @@ impl TypeChecker {
     /// Check if two operand types are valid for the given binary operation.
     fn binary_op_types_valid(left: &LangType, right: &LangType, op: &BinaryOp) -> bool {
         // Pointer arithmetic: ptr ± int or int ± ptr
-        let left_is_ptr  = left.pointer_depth  > 0 || left.is_array();
+        let left_is_ptr = left.pointer_depth > 0 || left.is_array();
         let right_is_ptr = right.pointer_depth > 0 || right.is_array();
-        let left_is_int  = matches!(left.base,  TypeBase::SInt | TypeBase::UInt)
-            && left.pointer_depth  == 0 && !left.is_array();
+        let left_is_int = matches!(left.base, TypeBase::SInt | TypeBase::UInt)
+            && left.pointer_depth == 0
+            && !left.is_array();
         let right_is_int = matches!(right.base, TypeBase::SInt | TypeBase::UInt)
-            && right.pointer_depth == 0 && !right.is_array();
+            && right.pointer_depth == 0
+            && !right.is_array();
 
         if matches!(op, BinaryOp::Add | BinaryOp::Sub)
             && ((left_is_ptr && right_is_int) || (left_is_int && right_is_ptr))

@@ -43,23 +43,23 @@ impl VisitMut for DslRewriter {
 fn expand_macro(mac: &Macro) -> Option<TokenStream> {
     let name = mac.path.get_ident()?.to_string();
     match name.as_str() {
-        "pos"             => Some(expand_pos()),
-        "kw"              => Some(expand_kw(&mac.tokens)),
-        "token"           => Some(expand_token(&mac.tokens)),
-        "token_if"        => Some(expand_token_if(&mac.tokens)),
-        "kw_if"           => Some(expand_kw_if(&mac.tokens)),
-        "skip_nl"         => Some(expand_skip_nl()),
-        "term"            => Some(expand_term()),
+        "pos" => Some(expand_pos()),
+        "kw" => Some(expand_kw(&mac.tokens)),
+        "token" => Some(expand_token(&mac.tokens)),
+        "token_if" => Some(expand_token_if(&mac.tokens)),
+        "kw_if" => Some(expand_kw_if(&mac.tokens)),
+        "skip_nl" => Some(expand_skip_nl()),
+        "term" => Some(expand_term()),
         "opt_unless_term" => Some(expand_opt_unless_term(&mac.tokens)),
-        "block_body"      => Some(expand_block_body(&mac.tokens)),
-        "ident"           => Some(expand_ident()),
-        "lang_type"       => Some(expand_lang_type()),
-        "opt"             => Some(expand_opt(&mac.tokens)),
-        "many"            => Some(expand_many(&mac.tokens)),
-        "alt"             => Some(expand_alt(&mac.tokens)),
-        "scoped"          => Some(expand_scoped(&mac.tokens)),
-        "sync"            => Some(expand_sync(&mac.tokens)),
-        _                 => None,
+        "block_body" => Some(expand_block_body(&mac.tokens)),
+        "ident" => Some(expand_ident()),
+        "lang_type" => Some(expand_lang_type()),
+        "opt" => Some(expand_opt(&mac.tokens)),
+        "many" => Some(expand_many(&mac.tokens)),
+        "alt" => Some(expand_alt(&mac.tokens)),
+        "scoped" => Some(expand_scoped(&mac.tokens)),
+        "sync" => Some(expand_sync(&mac.tokens)),
+        _ => None,
     }
 }
 
@@ -106,36 +106,36 @@ fn expand_kw(tokens: &TokenStream) -> TokenStream {
 }
 
 fn expand_token(tokens: &TokenStream) -> TokenStream {
-    let variant: syn::Ident = syn::parse2(tokens.clone())
-        .unwrap_or_else(|_| panic!("token! expects a single TokenKind variant, e.g. token!(OpenParen)"));
+    let variant: syn::Ident = syn::parse2(tokens.clone()).unwrap_or_else(|_| {
+        panic!("token! expects a single TokenKind variant, e.g. token!(OpenParen)")
+    });
     let display = token_display(&variant.to_string());
     quote! { self.expect(&TokenKind::#variant, #display)? }
 }
 
 fn token_display(variant: &str) -> &'static str {
     match variant {
-        "OpenParen"    => "(",
-        "CloseParen"   => ")",
-        "OpenBrace"    => "{",
-        "CloseBrace"   => "}",
-        "OpenBracket"  => "[",
+        "OpenParen" => "(",
+        "CloseParen" => ")",
+        "OpenBrace" => "{",
+        "CloseBrace" => "}",
+        "OpenBracket" => "[",
         "CloseBracket" => "]",
-        "Semicolon"    => ";",
-        "Comma"        => ",",
-        "Arrow"        => "->",
-        "Assign"       => "=",
-        "Colon"        => ":",
-        _              => "token",
+        "Semicolon" => ";",
+        "Comma" => ",",
+        "Arrow" => "->",
+        "Assign" => "=",
+        "Colon" => ":",
+        _ => "token",
     }
 }
 
 fn expand_token_if(tokens: &TokenStream) -> TokenStream {
-    let idents: Vec<syn::Ident> =
-        Punctuated::<syn::Ident, Token![,]>::parse_terminated
-            .parse2(tokens.clone())
-            .unwrap_or_else(|_| panic!("token_if! expects comma-separated TokenKind variants"))
-            .into_iter()
-            .collect();
+    let idents: Vec<syn::Ident> = Punctuated::<syn::Ident, Token![,]>::parse_terminated
+        .parse2(tokens.clone())
+        .unwrap_or_else(|_| panic!("token_if! expects comma-separated TokenKind variants"))
+        .into_iter()
+        .collect();
     quote! { self.match_token(&[#(TokenKind::#idents),*]) }
 }
 
@@ -148,16 +148,18 @@ fn expand_kw_if(tokens: &TokenStream) -> TokenStream {
 }
 
 fn expand_opt_unless_term(tokens: &TokenStream) -> TokenStream {
-    let func: syn::Ident = syn::parse2(tokens.clone())
-        .unwrap_or_else(|_| panic!("opt_unless_term! expects a method name, e.g. opt_unless_term!(parse_expression)"));
+    let func: syn::Ident = syn::parse2(tokens.clone()).unwrap_or_else(|_| {
+        panic!("opt_unless_term! expects a method name, e.g. opt_unless_term!(parse_expression)")
+    });
     quote! {
         if self.check_terminator() { None } else { Some(self.#func()?) }
     }
 }
 
 fn expand_block_body(tokens: &TokenStream) -> TokenStream {
-    let func: syn::Ident = syn::parse2(tokens.clone())
-        .unwrap_or_else(|_| panic!("block_body! expects a method name, e.g. block_body!(parse_block_statement)"));
+    let func: syn::Ident = syn::parse2(tokens.clone()).unwrap_or_else(|_| {
+        panic!("block_body! expects a method name, e.g. block_body!(parse_block_statement)")
+    });
     quote! {
         match self.#func()? {
             Statement { kind: StatementKind::Block(stmts), .. } => stmts,
@@ -211,12 +213,13 @@ fn expand_many(tokens: &TokenStream) -> TokenStream {
 }
 
 fn expand_alt(tokens: &TokenStream) -> TokenStream {
-    let funcs: Vec<syn::Ident> =
-        Punctuated::<syn::Ident, Token![,]>::parse_terminated
-            .parse2(tokens.clone())
-            .unwrap_or_else(|_| panic!("alt! expects comma-separated method names, e.g. alt!(parse_a, parse_b)"))
-            .into_iter()
-            .collect();
+    let funcs: Vec<syn::Ident> = Punctuated::<syn::Ident, Token![,]>::parse_terminated
+        .parse2(tokens.clone())
+        .unwrap_or_else(|_| {
+            panic!("alt! expects comma-separated method names, e.g. alt!(parse_a, parse_b)")
+        })
+        .into_iter()
+        .collect();
     if funcs.is_empty() {
         panic!("alt! requires at least one alternative");
     }
@@ -230,7 +233,7 @@ fn build_alt_chain(funcs: &[syn::Ident]) -> TokenStream {
         let f = &funcs[0];
         return quote! { self.#f() };
     }
-    let f    = &funcs[0];
+    let f = &funcs[0];
     let rest = build_alt_chain(&funcs[1..]);
     quote! {
         {

@@ -68,7 +68,12 @@ impl SymbolTable {
     /// Add a variable to the current scope
     /// # Errors
     /// If the variable already exists in the current scope
-    pub fn add_variable(&mut self, name: String, symbol_type: LangType, pos: Position) -> Result<(), String> {
+    pub fn add_variable(
+        &mut self,
+        name: String,
+        symbol_type: LangType,
+        pos: Position,
+    ) -> Result<(), String> {
         let symbol = VarSymbol {
             name: name.clone(),
             symbol_type,
@@ -109,12 +114,15 @@ impl SymbolTable {
             Some(existing) if !existing.has_body && func.has_body => {
                 // Forward declaration followed by definition - check compatibility
                 if existing.params != func.params || existing.return_type != func.return_type {
-                    return Err(format!("Function definition doesn't match declaration for '{}'", func.name));
+                    return Err(format!(
+                        "Function definition doesn't match declaration for '{}'",
+                        func.name
+                    ));
                 }
             }
             _ => {}
         }
-        
+
         self.functions.insert(func.name.clone(), func);
         Ok(())
     }
