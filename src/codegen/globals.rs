@@ -41,6 +41,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             global_var.set_initializer(&global_type.const_zero());
         }
 
+        // Check if the global is constant, and set the LLVM global accordingly.
+        if global.var_type.is_const {
+            global_var.set_constant(true);
+        }
+
         self.scope.insert_global(
             global.name.clone(),
             GlobalVarInfo {

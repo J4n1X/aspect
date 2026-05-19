@@ -1,23 +1,20 @@
 use crate::lexer::{Keyword, LangType, LexerError, Position, Token, TokenKind};
-use std::collections::VecDeque;
 
 pub struct Scanner {
-    input: String,
+    input: Vec<char>,
     current: usize,
     line: usize,
     column: usize,
-    tokens: VecDeque<Token>,
 }
 
 impl Scanner {
     #[must_use]
     pub fn new(input: String) -> Self {
         Self {
-            input,
+            input: input.chars().collect(),
             current: 0,
             line: 1,
             column: 1,
-            tokens: VecDeque::new(),
         }
     }
 
@@ -25,6 +22,8 @@ impl Scanner {
     /// # Errors
     /// Returns `LexerError` if an invalid token is encountered
     pub fn scan_all(&mut self) -> Result<Vec<Token>, LexerError> {
+        let mut tokens = Vec::new();
+
         while !self.is_at_end() {
             self.skip_whitespace();
             if self.is_at_end() {
@@ -32,17 +31,21 @@ impl Scanner {
             }
 
             let token = self.scan_token()?;
-            self.tokens.push_back(token);
+            tokens.push(token);
         }
 
-        // Add EOF token
-        self.tokens.push_back(Token::new(
+        tokens.push(Token::new(
             TokenKind::Eof,
             self.current_position(),
             String::new(),
         ));
 
-        Ok(self.tokens.drain(..).collect())
+        Ok(tokens)
+    }
+
+    /// Collect a slice of the char buffer into a `String`.
+    fn slice_to_string(&self, start: usize, end: usize) -> String {
+        self.input[start..end].iter().collect()
     }
 
     fn current_position(&self) -> Position {
@@ -54,16 +57,17 @@ impl Scanner {
     }
 
     fn peek(&self) -> Option<char> {
-        self.input.chars().nth(self.current)
+        self.input.get(self.current).copied()
     }
 
     fn peek_ahead(&self, offset: usize) -> Option<char> {
-        self.input.chars().nth(self.current + offset)
+        self.input.get(self.current + offset).copied()
     }
 
     fn advance(&mut self) -> Option<char> {
-        if let Some(ch) = self.peek() {
-            self.current += ch.len_utf8();
+        if self.current < self.input.len() {
+            let ch = self.input[self.current];
+            self.current += 1;
             if ch == '\n' {
                 self.line += 1;
                 self.column = 1;
@@ -92,9 +96,8 @@ impl Scanner {
                     self.advance();
                 }
                 '#' => {
-                    // Handle comments
                     if self.skip_comment().is_err() {
-                        break; // Stop on comment errors, let main scanning handle them
+                        break;
                     }
                 }
                 _ => break,
@@ -105,10 +108,8 @@ impl Scanner {
     fn skip_comment(&mut self) -> Result<(), LexerError> {
         if self.match_char('#') {
             if self.match_char('-') {
-                // Block comment
                 self.skip_block_comment()
             } else {
-                // Line comment
                 while self.peek().is_some() && self.peek() != Some('\n') {
                     self.advance();
                 }
@@ -265,17 +266,17 @@ impl Scanner {
             '"' => return self.scan_string_literal(start_pos),
 
             // Numbers
-            '0'..='9' => return self.scan_number(ch),
+            '0'..='9' => return self.scan_number(ch, start_idx, start_pos),
 
             // Identifiers, keywords, and types
             ch if Self::is_alpha(ch) || ch == '_' => {
-                return Ok(self.scan_identifier_or_keyword(start_pos));
+                return Ok(self.scan_identifier_or_keyword(start_pos, start_idx));
             }
 
             _ => return Err(LexerError::UnexpectedChar(ch, start_pos)),
         };
 
-        let lexeme = self.input[start_idx..self.current].to_string();
+        let lexeme = self.slice_to_string(start_idx, self.current);
         Ok(Token::new(kind, start_pos, lexeme))
     }
 
@@ -319,11 +320,12 @@ impl Scanner {
         ))
     }
 
-    fn scan_number(&mut self, first: char) -> Result<Token, LexerError> {
-        let start_pos = self.current_position();
-        let start_idx = self.current - first.len_utf8();
-
-        // Handle hex and binary literals
+    fn scan_number(
+        &mut self,
+        first: char,
+        start_idx: usize,
+        start_pos: Position,
+    ) -> Result<Token, LexerError> {
         if first == '0' {
             if self.match_char('x') || self.match_char('X') {
                 return self.scan_hex_number(start_pos, start_idx);
@@ -332,12 +334,10 @@ impl Scanner {
             }
         }
 
-        // Scan decimal digits
         while Self::is_digit(self.peek().unwrap_or('\0')) {
             self.advance();
         }
 
-        // Check for float (not supported according to spec, but handle for error)
         let mut is_float = false;
         if self.peek() == Some('.') && Self::is_digit(self.peek_ahead(1).unwrap_or('\0')) {
             is_float = true;
@@ -347,7 +347,7 @@ impl Scanner {
             }
         }
 
-        let lexeme = self.input[start_idx..self.current].to_string();
+        let lexeme = self.slice_to_string(start_idx, self.current);
 
         if is_float {
             let value: f64 = lexeme
@@ -371,7 +371,7 @@ impl Scanner {
             self.advance();
         }
 
-        let lexeme = self.input[start_idx..self.current].to_string();
+        let lexeme = self.slice_to_string(start_idx, self.current);
         let hex_str = &lexeme[2..]; // Skip "0x"
 
         let value = i64::from_str_radix(hex_str, 16)
@@ -389,7 +389,7 @@ impl Scanner {
             self.advance();
         }
 
-        let lexeme = self.input[start_idx..self.current].to_string();
+        let lexeme = self.slice_to_string(start_idx, self.current);
         let bin_str = &lexeme[2..]; // Skip "0b"
 
         let value = i64::from_str_radix(bin_str, 2)
@@ -398,18 +398,15 @@ impl Scanner {
         Ok(Token::new(TokenKind::Integer(value), start_pos, lexeme))
     }
 
-    fn scan_identifier_or_keyword(&mut self, start_pos: Position) -> Token {
-        let start_idx = self.current - 1; // We already consumed the first character
-
+    fn scan_identifier_or_keyword(&mut self, start_pos: Position, start_idx: usize) -> Token {
         while Self::is_alphanumeric(self.peek().unwrap_or('\0')) || self.peek() == Some('_') {
             self.advance();
         }
 
-        let text = self.input[start_idx..self.current].to_string();
+        let text = self.slice_to_string(start_idx, self.current);
 
         // Check for keywords first
         if let Some(keyword) = Keyword::keyword_from_str(&text) {
-            // Handle special case of 'const' keyword followed by type
             if keyword == Keyword::Const {
                 self.skip_inline_whitespace();
                 if let Ok(type_token) = self.scan_type_after_const(start_pos) {
@@ -427,13 +424,12 @@ impl Scanner {
             let saved_line = self.line;
             let saved_col = self.column;
             if self.match_char('[') {
-                // Parse array size
                 self.skip_inline_whitespace();
                 let size_start = self.current;
                 while self.peek().is_some_and(|c| c.is_ascii_digit()) {
                     self.advance();
                 }
-                let size_str = &self.input[size_start..self.current];
+                let size_str = self.slice_to_string(size_start, self.current);
                 let mut parsed = false;
                 if let Ok(size) = size_str.parse::<u32>() {
                     self.skip_inline_whitespace();
@@ -443,7 +439,6 @@ impl Scanner {
                     }
                 }
                 if !parsed {
-                    // Not a valid array-size token; backtrack past the '['
                     self.current = saved_cur;
                     self.line = saved_line;
                     self.column = saved_col;
@@ -459,7 +454,7 @@ impl Scanner {
             }
             lang_type.pointer_depth = depth;
 
-            let full_lexeme = self.input[start_idx..self.current].to_string();
+            let full_lexeme = self.slice_to_string(start_idx, self.current);
             return Token::new(TokenKind::LangType(lang_type), start_pos, full_lexeme);
         }
 
@@ -470,7 +465,6 @@ impl Scanner {
     fn scan_type_after_const(&mut self, start_pos: Position) -> Result<Token, LexerError> {
         let type_start = self.current;
 
-        // Scan the type identifier
         if !Self::is_alpha(self.peek().unwrap_or('\0')) {
             return Err(LexerError::UnexpectedChar(
                 self.peek().unwrap_or('\0'),
@@ -482,24 +476,22 @@ impl Scanner {
             self.advance();
         }
 
-        let type_text = self.input[type_start..self.current].to_string();
+        let type_text = self.slice_to_string(type_start, self.current);
 
         if let Some(mut lang_type) = LangType::langtype_from_str(&type_text) {
             lang_type.is_const = true;
 
-            // Check for array syntax: type[size] -- only when followed by decimal int + ']'
             self.skip_inline_whitespace();
             let saved_cur = self.current;
             let saved_line = self.line;
             let saved_col = self.column;
             if self.match_char('[') {
-                // Parse array size
                 self.skip_inline_whitespace();
                 let size_start = self.current;
                 while self.peek().is_some_and(|c| c.is_ascii_digit()) {
                     self.advance();
                 }
-                let size_str = &self.input[size_start..self.current];
+                let size_str = self.slice_to_string(size_start, self.current);
                 let mut parsed = false;
                 if let Ok(size) = size_str.parse::<u32>() {
                     self.skip_inline_whitespace();
@@ -515,7 +507,6 @@ impl Scanner {
                 }
             }
 
-            // Handle pointer depth
             self.skip_inline_whitespace();
             let mut depth = 0;
             while self.match_char('*') {
@@ -524,7 +515,7 @@ impl Scanner {
             }
             lang_type.pointer_depth = depth;
 
-            let full_lexeme = format!("const {}", &self.input[type_start..self.current]);
+            let full_lexeme = format!("const {}", self.slice_to_string(type_start, self.current));
             Ok(Token::new(
                 TokenKind::LangType(lang_type),
                 start_pos,

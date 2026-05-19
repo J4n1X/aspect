@@ -1,0 +1,17 @@
+# expected: 0
+# Verifies that deduplicated string literals are read-accessible via pointer arithmetic.
+# Both "Hello" occurrences compile to the same global; reads must still agree.
+
+fn main() -> i32 {
+    # Two literals, same content. These should be deduplicated. As such, a and b should have the exact same pointer value.
+    u8* a = "Hello"
+    u8* b = "Hello"
+    # Very similar, but obviously not the same string. 
+    u8* c = "Hello!"
+
+    if a != b { return 1 } # Pointers should be the same due to deduplication.
+    # And thus, clearly, c should not be the same pointer as a and b.
+    if a == c { return 1 } 
+
+    return 0
+}

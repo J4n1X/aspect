@@ -198,7 +198,6 @@ pub(crate) fn walk_expression<'ctx>(
             let left_val = walk_expression(left, gen, mode)?;
             let right_val = walk_expression(right, gen, mode)?;
 
-            // Pointer arithmetic is runtime-only.
             if left.expr_type.pointer_depth > 0 {
                 if mode == EmitMode::Constant {
                     return Err(CodegenError::InvalidOperation(
@@ -283,7 +282,12 @@ pub(crate) fn walk_expression<'ctx>(
             let left_val = walk_expression(left, gen, mode)?;
             let right_val = walk_expression(right, gen, mode)?;
 
-            if matches!(left.expr_type.base, TypeBase::SFloat) {
+            if left.expr_type.pointer_depth > 0 && right.expr_type.pointer_depth > 0 {
+                return Ok(gen
+                    .builder
+                    .build_int_compare(int_cmp_pred(op, false), left_val.into_pointer_value(), right_val.into_pointer_value(), "ptr_cmp")?
+                    .into());
+            } else if matches!(left.expr_type.base, TypeBase::SFloat) {
                 let lf = left_val.into_float_value();
                 let rf = right_val.into_float_value();
                 let (lf, rf) = {

@@ -1,3 +1,5 @@
+use indexmap::IndexSet;
+
 use crate::lexer::{Keyword, LangType, Token, TokenKind, TypeBase};
 use crate::parser::{
     BinaryOp, ComparisonOp, ExprKind, Expression, LiteralValue, ParserError, Statement,
@@ -134,7 +136,7 @@ pub struct Parser {
     tokens: Vec<Token>,
     pub(crate) current: usize,
     symbol_table: SymbolTable,
-    pub(crate) string_literals: Vec<String>,
+    pub(crate) string_literals: IndexSet<String>,
     pub(crate) context_stack: Vec<&'static str>,
     pub(crate) errors: Vec<ParserError>,
     source_file: String,
@@ -147,7 +149,7 @@ impl Parser {
             tokens,
             current: 0,
             symbol_table: SymbolTable::new(),
-            string_literals: Vec::new(),
+            string_literals: IndexSet::new(),
             context_stack: Vec::new(),
             errors: Vec::new(),
             source_file: String::new(),
@@ -217,7 +219,7 @@ impl Parser {
     /// Get string literals
     #[must_use]
     pub fn take_string_literals(self) -> Vec<String> {
-        self.string_literals
+        self.string_literals.into_iter().collect()
     }
 
     /// Check if we've reached the end of tokens
@@ -664,9 +666,8 @@ impl Parser {
                 let string_value = s.clone();
                 self.advance();
 
-                // Add to string literals table
-                let index = self.string_literals.len();
-                self.string_literals.push(string_value);
+                // insert_full deduplicates and returns the stable index in O(1)
+                let (index, _) = self.string_literals.insert_full(string_value);
 
                 // String literals are u8 pointers
                 let expr_type = LangType::new(TypeBase::UInt, 8, 1, false);
@@ -829,7 +830,7 @@ impl Parser {
         Ok(Program {
             functions,
             global_vars,
-            string_literals: self.string_literals.clone(),
+            string_literals: self.string_literals.iter().cloned().collect(),
         })
     }
 

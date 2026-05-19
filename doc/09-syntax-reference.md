@@ -371,6 +371,9 @@ Comparison operators produce `i1` (1 = true, 0 = false). When assigned to an int
 variable the `i1` is zero-extended to the target width. Logical NOT (`!`) produces `i32`.
 All other binary operators preserve the type of the left operand.
 
+Pointer-to-pointer comparisons (`==`, `!=`, `<`, `>`, `<=`, `>=`) are supported; operands
+must both be pointers. Comparison is unsigned (address order) and yields `i1`.
+
 ---
 
 ## Scoping rules

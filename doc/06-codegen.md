@@ -211,6 +211,7 @@ fn generate_coerced_value(expr: &Expression, target: Option<&LangType>) -> Basic
 - Widens operands before comparing
 - Uses `int_cmp_pred(op, is_signed)` and `float_cmp_pred(op)` for predicate selection
 - Result is an `i1` value; fed to `br` directly in conditionals
+- **Pointer comparisons**: pointer-to-pointer comparisons are supported — `build_int_compare` is called with both pointer values directly (unsigned predicates via `int_cmp_pred(op, false)`), relying on Inkwell accepting `ptr` operands for `icmp`
 
 ### Casts (`RuntimeEmitter::emit_cast`)
 
@@ -487,6 +488,7 @@ Dispatches to specialized methods based on left operand type:
 - Result is an `i1` value emitted directly by `icmp`/`fcmp` — **no `zext` to `i32`**
 - The `i1` feeds `br` directly in conditionals; when stored to an integer variable it is
   widened via `zext` (always unsigned-extend for booleans, regardless of target type)
+- **Pointer comparisons**: pointer-to-pointer comparisons are supported — `build_int_compare` is called with both pointer values directly (unsigned predicates via `int_cmp_pred(op, false)`), relying on Inkwell accepting `ptr` operands for `icmp`
 
 ### Casts (`cast_value`)
 
