@@ -283,10 +283,10 @@ pub(crate) fn walk_expression<'ctx>(
             let right_val = walk_expression(right, gen, mode)?;
 
             if left.expr_type.pointer_depth > 0 && right.expr_type.pointer_depth > 0 {
-                return Ok(gen
+                Ok(gen
                     .builder
                     .build_int_compare(int_cmp_pred(op, false), left_val.into_pointer_value(), right_val.into_pointer_value(), "ptr_cmp")?
-                    .into());
+                    .into())
             } else if matches!(left.expr_type.base, TypeBase::SFloat) {
                 let lf = left_val.into_float_value();
                 let rf = right_val.into_float_value();
@@ -526,7 +526,6 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Generate a literal with an explicit target type and overflow checking.
-    #[allow(clippy::cast_sign_loss)]
     pub(crate) fn generate_literal_typed(
         &self,
         lit: &LiteralValue,
@@ -539,22 +538,38 @@ impl<'ctx> CodeGenerator<'ctx> {
                 match llvm_type {
                     BasicTypeEnum::IntType(int_ty) => {
                         let bits = int_ty.get_bit_width();
-                        if bits < 64 {
-                            let fits = if matches!(ty.base, TypeBase::SInt) {
+                        if matches!(ty.base, TypeBase::SInt) {
+                            if bits < 64 {
                                 let min = -(1i64 << (bits - 1));
                                 let max = (1i64 << (bits - 1)) - 1;
-                                *val >= min && *val <= max
-                            } else {
-                                *val >= 0 && (*val as u64) < (1u64 << bits)
-                            };
-                            if !fits {
+                                if *val < min || *val > max {
+                                    return Err(CodegenError::TypeError(
+                                        format!("integer literal {} overflows {}", val, ty),
+                                        pos,
+                                    ));
+                                }
+                            }
+
+                            // Preserve two's-complement bit pattern explicitly.
+                            let signed_bits = u64::from_ne_bytes(val.to_ne_bytes());
+                            Ok(int_ty.const_int(signed_bits, true).into())
+                        } else {
+                            let unsigned = u64::try_from(*val).map_err(|_| {
+                                CodegenError::TypeError(
+                                    format!("integer literal {} overflows {}", val, ty),
+                                    pos,
+                                )
+                            })?;
+
+                            if bits < 64 && unsigned >= (1u64 << bits) {
                                 return Err(CodegenError::TypeError(
                                     format!("integer literal {} overflows {}", val, ty),
                                     pos,
                                 ));
                             }
+
+                            Ok(int_ty.const_int(unsigned, false).into())
                         }
-                        Ok(int_ty.const_int(*val as u64, true).into())
                     }
                     _ => Err(CodegenError::TypeError(
                         "integer literal must have integer type".to_string(),

@@ -111,14 +111,16 @@ impl SymbolTable {
             Some(existing) if existing.has_body && func.has_body => {
                 return Err(format!("Function '{}' already has a body", func.name));
             }
-            Some(existing) if !existing.has_body && func.has_body => {
-                // Forward declaration followed by definition - check compatibility
-                if existing.params != func.params || existing.return_type != func.return_type {
-                    return Err(format!(
-                        "Function definition doesn't match declaration for '{}'",
-                        func.name
-                    ));
-                }
+            Some(existing)
+                if !existing.has_body
+                    && func.has_body
+                    && (existing.params != func.params
+                        || existing.return_type != func.return_type) =>
+            {
+                return Err(format!(
+                    "Function definition doesn't match declaration for '{}'",
+                    func.name
+                ));
             }
             _ => {}
         }

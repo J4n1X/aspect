@@ -45,7 +45,7 @@ pub fn parse_rule(_attr: TokenStream, item: TokenStream) -> TokenStream {
     })
     .expect("parse_rule: failed to build context-wrapped block");
 
-    func.block = Box::new(wrapped);
+    *func.block = wrapped;
 
     // Suppress the unused-import warning that appears when `TokenStream2` is
     // only referenced inside the `quote!` expansion.

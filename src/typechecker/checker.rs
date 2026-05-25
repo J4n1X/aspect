@@ -162,7 +162,6 @@ impl TypeChecker {
 
     // ── Statement checking ───────────────────────────────────────────────────
 
-    #[allow(clippy::too_many_lines)]
     fn check_statement(&mut self, stmt: &Statement) {
         match &stmt.kind {
             StatementKind::VarDecl {

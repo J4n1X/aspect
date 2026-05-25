@@ -180,18 +180,15 @@ impl Parser {
         while !self.is_at_end() {
             match &self.peek().kind {
                 TokenKind::CloseBrace => return,
-                TokenKind::Keyword(k)
-                    if matches!(
-                        k,
-                        Keyword::Fn
-                            | Keyword::If
-                            | Keyword::While
-                            | Keyword::For
-                            | Keyword::Return
-                            | Keyword::Break
-                            | Keyword::Continue
-                    ) =>
-                {
+                TokenKind::Keyword(
+                    Keyword::Fn
+                    | Keyword::If
+                    | Keyword::While
+                    | Keyword::For
+                    | Keyword::Return
+                    | Keyword::Break
+                    | Keyword::Continue,
+                ) => {
                     return
                 }
                 TokenKind::Newline | TokenKind::Semicolon => {
@@ -323,15 +320,11 @@ impl Parser {
     fn parse_expr_prec(&mut self, min_prec: i32) -> Result<Expression, ParserError> {
         let mut left = self.parse_cast_or_alloc()?;
 
-        loop {
-            let Some(entry) = INFIX_OPS
-                .iter()
-                .find(|e| self.check(&e.token) && e.prec >= min_prec)
-            else {
-                break;
-            };
-
-            let (op, prec, right_assoc) = (entry.op, entry.prec, entry.right_assoc);
+        while let Some((op, prec, right_assoc)) = INFIX_OPS
+            .iter()
+            .find(|e| self.check(&e.token) && e.prec >= min_prec)
+            .map(|entry| (entry.op, entry.prec, entry.right_assoc))
+        {
             self.advance();
             let next_min = if right_assoc { prec } else { prec + 1 };
             let right = self.parse_expr_prec(next_min)?;

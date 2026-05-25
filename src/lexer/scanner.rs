@@ -133,7 +133,6 @@ impl Scanner {
         Err(LexerError::UnterminatedBlockComment(start_pos))
     }
 
-    #[allow(clippy::too_many_lines)]
     fn scan_token(&mut self) -> Result<Token, LexerError> {
         let start_pos = self.current_position();
         let start_idx = self.current;
@@ -303,8 +302,8 @@ impl Scanner {
                     other => return Err(LexerError::InvalidEscape(other, self.current_position())),
                 };
                 value.push(ch);
-            } else {
-                value.push(self.advance().unwrap());
+            } else if let Some(ch) = self.advance() {
+                value.push(ch);
             }
         }
 

@@ -32,6 +32,26 @@ impl Drop for FunctionScope<'_, '_> {
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
+    fn generate_call_args(
+        &mut self,
+        name: &str,
+        args: &[Expression],
+    ) -> Result<Vec<inkwell::values::BasicMetadataValueEnum<'ctx>>, CodegenError> {
+        let param_types = self
+            .function_lang_params
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+
+        let mut arg_values = Vec::with_capacity(args.len());
+        for (i, arg) in args.iter().enumerate() {
+            let target_ty = param_types.get(i);
+            let val = self.generate_coerced_value(arg, target_ty)?;
+            arg_values.push(val.into());
+        }
+        Ok(arg_values)
+    }
+
     /// Declare a function (without body)
     pub(crate) fn declare_function(
         &mut self,
@@ -150,17 +170,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .get(name)
             .ok_or_else(|| CodegenError::UndefinedFunction(name.to_string(), pos))?;
 
-        let param_types = self
-            .function_lang_params
-            .get(name)
-            .cloned()
-            .unwrap_or_default();
-        let mut arg_values = Vec::new();
-        for (i, arg) in args.iter().enumerate() {
-            let target_ty = param_types.get(i);
-            let val = self.generate_coerced_value(arg, target_ty)?;
-            arg_values.push(val.into());
-        }
+        let arg_values = self.generate_call_args(name, args)?;
 
         let call_result = self.builder.build_call(function, &arg_values, "call")?;
         call_result
@@ -181,17 +191,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .get(name)
             .ok_or_else(|| CodegenError::UndefinedFunction(name.to_string(), pos))?;
 
-        let param_types = self
-            .function_lang_params
-            .get(name)
-            .cloned()
-            .unwrap_or_default();
-        let mut arg_values = Vec::new();
-        for (i, arg) in args.iter().enumerate() {
-            let target_ty = param_types.get(i);
-            let val = self.generate_coerced_value(arg, target_ty)?;
-            arg_values.push(val.into());
-        }
+        let arg_values = self.generate_call_args(name, args)?;
 
         self.builder.build_call(function, &arg_values, "call")?;
         Ok(())
