@@ -158,7 +158,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     ///
     /// # Errors
     /// Returns `CodegenError` if the passes fail to run
-    pub fn optimize(&self, level: u8) -> Result<(), CodegenError> {
+    pub fn optimize(&self, level: u8, verify_each: bool) -> Result<(), CodegenError> {
         if level == 0 {
             return Ok(());
         }
@@ -173,10 +173,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
 
         let pass_options = PassBuilderOptions::create();
-        // Verifying after each pass adds overhead, but since this compiler is in
-        // active development, this helps us debug codegen issues.
-        // TODO: Enable only via a flag once the codegen is more stable.
-        pass_options.set_verify_each(true);
+        // Verifying after each pass helps debugging invalid IR but can be expensive.
+        pass_options.set_verify_each(verify_each);
         pass_options.set_loop_interleaving(true);
         pass_options.set_merge_functions(true);
         pass_options.set_loop_slp_vectorization(true);

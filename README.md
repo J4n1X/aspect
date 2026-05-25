@@ -68,6 +68,7 @@ Options:
 - `-o, --output <OUTPUT>` - Write IR to a file instead of stdout
 - `-p, --print` - Print IR to stdout even when writing to a file
 - `-O, --optimize <LEVEL>` - Optimization level (0-3, default: 0)
+- `--verify-each` - Verify IR after each optimization pass (slower, useful for debugging)
 
 Examples:
 ```bash
@@ -79,6 +80,9 @@ tjlb-parser compile program.tjlb -o program.ll
 
 # Compile with optimization level 2
 tjlb-parser compile program.tjlb -O 2
+
+# Compile with O3 and verify after each pass
+tjlb-parser compile program.tjlb -O 3 --verify-each
 
 # Write to file and also print to stdout
 tjlb-parser compile program.tjlb -o program.ll --print

@@ -188,9 +188,7 @@ impl Parser {
                     | Keyword::Return
                     | Keyword::Break
                     | Keyword::Continue,
-                ) => {
-                    return
-                }
+                ) => return,
                 TokenKind::Newline | TokenKind::Semicolon => {
                     self.advance();
                     return;

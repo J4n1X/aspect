@@ -53,6 +53,10 @@ enum Commands {
             default_value = "0"
         )]
         opt_level: u8,
+
+        /// Verify LLVM IR after each optimization pass (slower, useful for debugging)
+        #[arg(long)]
+        verify_each: bool,
     },
 }
 
@@ -67,7 +71,8 @@ fn main() -> Result<()> {
             output,
             print,
             opt_level,
-        } => compile_file(&file, output.as_deref(), print, opt_level)?,
+            verify_each,
+        } => compile_file(&file, output.as_deref(), print, opt_level, verify_each)?,
     }
 
     Ok(())
@@ -171,6 +176,7 @@ fn compile_file(
     output: Option<&std::path::Path>,
     print: bool,
     opt_level: u8,
+    verify_each: bool,
 ) -> Result<()> {
     let input = fs::read_to_string(path)
         .with_context(|| format!("failed to read file '{}'", path.display()))?;
@@ -215,23 +221,23 @@ fn compile_file(
     // Run optimization passes
     if opt_level > 0 {
         codegen
-            .optimize(opt_level)
+            .optimize(opt_level, verify_each)
             .with_context(|| format!("failed to optimize code for '{}'", path.display()))?;
     }
 
     // Output
-    let ir = codegen.print_ir_to_string();
-
     if let Some(output_path) = output {
         codegen
             .write_ir_to_file(output_path)
             .with_context(|| format!("failed to write IR to '{}'", output_path.display()))?;
         if print {
+            let ir = codegen.print_ir_to_string();
             println!("{ir}");
         } else {
             println!("LLVM IR written to: {}", output_path.display());
         }
     } else {
+        let ir = codegen.print_ir_to_string();
         println!("{ir}");
     }
 

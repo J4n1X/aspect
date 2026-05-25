@@ -328,7 +328,7 @@ gep([N x elem], array_ptr, [i64 0, i64 i])  // &array[i]
 ## Optimization
 
 ```rust
-codegen.optimize(level: u8) -> Result<(), CodegenError>
+codegen.optimize(level: u8, verify_each: bool) -> Result<(), CodegenError>
 ```
 
 | Level | Pipeline |
@@ -338,7 +338,7 @@ codegen.optimize(level: u8) -> Result<(), CodegenError>
 | 2+ | `default<O2>` |
 | 3 | `default<O3>` |
 
-Options: `verify_each(true)`, `loop_interleaving(true)`, `loop_vectorization(true)`, `loop_unrolling(true)`, `merge_functions(true)`.
+Options: `verify_each(verify_each)`, `loop_interleaving(true)`, `loop_vectorization(true)`, `loop_unrolling(true)`, `merge_functions(true)`.
 
 ## Critical Gotchas
 
@@ -669,7 +669,7 @@ Global arrays must use the constant path (all-literal). `generate_constant_array
 ## Optimization
 
 ```rust
-codegen.optimize(level: u8) -> Result<(), CodegenError>
+codegen.optimize(level: u8, verify_each: bool) -> Result<(), CodegenError>
 ```
 
 | Level | Pipeline |
@@ -679,7 +679,7 @@ codegen.optimize(level: u8) -> Result<(), CodegenError>
 | 2+ | `default<O2>` |
 | 3 | `default<O3>` |
 
-Options: `verify_each(true)`, `loop_interleaving(true)`, `loop_vectorization(true)`, `loop_unrolling(true)`, `merge_functions(true)`.
+Options: `verify_each(verify_each)`, `loop_interleaving(true)`, `loop_vectorization(true)`, `loop_unrolling(true)`, `merge_functions(true)`.
 
 ## Critical Gotchas
 

@@ -1,4 +1,4 @@
-use inkwell::types::{BasicTypeEnum};
+use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicValueEnum, FloatValue, IntValue, PointerValue};
 use inkwell::AddressSpace;
 
