@@ -141,8 +141,8 @@ cargo run -- lex <FILE>
 # Parse and print AST
 cargo run -- parse <FILE>
 
-# Compile to LLVM IR
-cargo run -- compile <FILE> [-o OUTPUT] [--print] [-O LEVEL]
+# Compile (emit IR by default)
+cargo run -- compile <FILE> [-e ir|obj|exe] [-o OUTPUT] [--print] [-O LEVEL]
 
 # Compile to native executable
 ./compile-file.sh program.tjlb   # produces program.out

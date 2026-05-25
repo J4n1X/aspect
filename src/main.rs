@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use clap::{Parser as ClapParser, Subcommand};
+use clap::{Parser as ClapParser, Subcommand, ValueEnum};
 use inkwell::context::Context as LLVMContext;
 use std::fmt::Write;
 use std::fs;
@@ -17,6 +17,13 @@ struct Cli {
     command: Commands,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum EmitTarget {
+    Ir,
+    Obj,
+    Exe,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Tokenize the input file and print tokens
@@ -31,11 +38,15 @@ enum Commands {
         #[arg(value_name = "FILE")]
         file: PathBuf,
     },
-    /// Compile the input file to LLVM IR
+    /// Compile the input file and emit a selected artifact target
     Compile {
         /// Input file path
         #[arg(value_name = "FILE")]
         file: PathBuf,
+
+        /// Output target kind
+        #[arg(short = 'e', long = "emit", value_enum, default_value_t = EmitTarget::Ir)]
+        emit: EmitTarget,
 
         /// Output file path (defaults to stdout)
         #[arg(short, long, value_name = "OUTPUT")]
@@ -68,11 +79,12 @@ fn main() -> Result<()> {
         Commands::Parse { file } => parse_file(&file)?,
         Commands::Compile {
             file,
+            emit,
             output,
             print,
             opt_level,
             verify_each,
-        } => compile_file(&file, output.as_deref(), print, opt_level, verify_each)?,
+        } => compile_file(&file, emit, output.as_deref(), print, opt_level, verify_each)?,
     }
 
     Ok(())
@@ -173,6 +185,7 @@ fn parse_file(path: &PathBuf) -> Result<()> {
 
 fn compile_file(
     path: &PathBuf,
+    emit: EmitTarget,
     output: Option<&std::path::Path>,
     print: bool,
     opt_level: u8,
@@ -226,19 +239,46 @@ fn compile_file(
     }
 
     // Output
-    if let Some(output_path) = output {
-        codegen
-            .write_ir_to_file(output_path)
-            .with_context(|| format!("failed to write IR to '{}'", output_path.display()))?;
-        if print {
-            let ir = codegen.print_ir_to_string();
-            println!("{ir}");
-        } else {
-            println!("LLVM IR written to: {}", output_path.display());
+    match emit {
+        EmitTarget::Ir => {
+            if let Some(output_path) = output {
+                codegen
+                    .write_ir_to_file(output_path)
+                    .with_context(|| format!("failed to write IR to '{}'", output_path.display()))?;
+                if print {
+                    let ir = codegen.print_ir_to_string();
+                    println!("{ir}");
+                } else {
+                    println!("LLVM IR written to: {}", output_path.display());
+                }
+            } else {
+                let ir = codegen.print_ir_to_string();
+                println!("{ir}");
+            }
         }
-    } else {
-        let ir = codegen.print_ir_to_string();
-        println!("{ir}");
+        EmitTarget::Obj => {
+            let output_path = output
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| path.with_extension("o"));
+
+            codegen
+                .write_object_to_file(&output_path)
+                .with_context(|| {
+                    format!("failed to write object file to '{}'", output_path.display())
+                })?;
+
+            println!("Object file written to: {}", output_path.display());
+
+            if print {
+                let ir = codegen.print_ir_to_string();
+                println!("{ir}");
+            }
+        }
+        EmitTarget::Exe => {
+            anyhow::bail!(
+                "--emit exe is accepted but not implemented yet; use --emit ir or --emit obj"
+            );
+        }
     }
 
     Ok(())

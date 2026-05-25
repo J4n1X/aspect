@@ -56,16 +56,17 @@ Example:
 tjlb-parser parse program.tjlb
 ```
 
-### Compilation (LLVM IR Generation)
+### Compilation
 
-Compile a source file to LLVM IR:
+Compile a source file and choose what artifact to emit:
 
 ```bash
 tjlb-parser compile <FILE> [OPTIONS]
 ```
 
 Options:
-- `-o, --output <OUTPUT>` - Write IR to a file instead of stdout
+- `-e, --emit <TARGET>` - Output target: `ir`, `obj`, or `exe` (default: `ir`; `exe` currently unimplemented)
+- `-o, --output <OUTPUT>` - Output file path (default depends on emit target)
 - `-p, --print` - Print IR to stdout even when writing to a file
 - `-O, --optimize <LEVEL>` - Optimization level (0-3, default: 0)
 - `--verify-each` - Verify IR after each optimization pass (slower, useful for debugging)
@@ -77,6 +78,9 @@ tjlb-parser compile program.tjlb
 
 # Write IR to a file
 tjlb-parser compile program.tjlb -o program.ll
+
+# Emit an object file (defaults to program.o when -o is omitted)
+tjlb-parser compile program.tjlb --emit obj
 
 # Compile with optimization level 2
 tjlb-parser compile program.tjlb -O 2
@@ -103,14 +107,11 @@ This will produce `program.out`.
 ### Manual Compilation
 
 ```bash
-# Generate LLVM IR
-tjlb-parser compile program.tjlb -o program.ll
-
-# Compile to assembly
-llc-19 -o program.s program.ll -x86-asm-syntax=intel
+# Emit object code directly
+tjlb-parser compile program.tjlb --emit obj -o program.o
 
 # Link to executable
-gcc -o program program.s
+gcc -o program program.o
 ```
 
 ## Example

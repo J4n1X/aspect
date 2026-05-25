@@ -23,7 +23,7 @@ pub struct CodeGenerator<'ctx> {
     pub(crate) context: &'ctx Context,
     pub(crate) module: Module<'ctx>,
     pub(crate) builder: Builder<'ctx>,
-    pub(crate) target: Target,
+  pub(crate) target_machine: TargetMachine,
 
     pub(crate) functions: HashMap<String, FunctionValue<'ctx>>,
     pub(crate) function_lang_params: HashMap<String, Vec<LangType>>,
@@ -34,6 +34,8 @@ pub struct CodeGenerator<'ctx> {
     pub(crate) loop_stack: Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>,
 }
 ```
+
+The target machine is created once in `CodeGenerator::new` and reused for optimization and object emission.
 
 Variable storage has been extracted into `ScopeStack` (see `scope.rs`).
 
@@ -343,6 +345,12 @@ Extra options by level:
 - `O2`: no extra pass options beyond the default pipeline
 - `O3`: `loop_interleaving(true)`, `loop_slp_vectorization(true)`, `merge_functions(true)`, `call_graph_profile(true)`
 - Any level outside `0..=3` falls back to the `O2` pipeline with no extra pass options.
+
+## Emission Helpers
+
+- `print_ir_to_string()` returns textual LLVM IR.
+- `write_ir_to_file(path)` writes LLVM IR (`.ll`) to disk.
+- `write_object_to_file(path)` emits target object code (`.o`) through LLVM's `FileType::Object`.
 
 ## Critical Gotchas
 

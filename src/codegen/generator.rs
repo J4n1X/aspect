@@ -4,7 +4,7 @@ use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::passes::PassBuilderOptions;
-use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine};
+use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine};
 use inkwell::values::FunctionValue;
 use inkwell::OptimizationLevel;
 use std::collections::HashMap;
@@ -17,7 +17,7 @@ pub struct CodeGenerator<'ctx> {
     pub(crate) context: &'ctx Context,
     pub(crate) module: Module<'ctx>,
     pub(crate) builder: Builder<'ctx>,
-    pub(crate) target: Target,
+    pub(crate) target_machine: TargetMachine,
 
     pub(crate) functions: HashMap<String, FunctionValue<'ctx>>,
 
@@ -73,7 +73,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             context,
             module,
             builder,
-            target,
+            target_machine,
             functions: HashMap::new(),
             function_lang_params: HashMap::new(),
             scope: ScopeStack::new(),
@@ -121,30 +121,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self.module
     }
 
-    /// Get a target machine for the current platform
-    ///
-    /// # Errors
-    /// Returns `CodegenError` if the target machine cannot be created
-    ///
-    /// # Panics
-    /// Panics if target machine creation fails unexpectedly
-    pub fn get_target_machine(&self) -> Result<TargetMachine, CodegenError> {
-        let opt = OptimizationLevel::Default;
-        let reloc = RelocMode::Default;
-        let model = CodeModel::Default;
-        let target_machine = self
-            .target
-            .create_target_machine(
-                &TargetMachine::get_default_triple(),
-                "generic",
-                "",
-                opt,
-                reloc,
-                model,
-            )
-            .context("failed to create target machine")
-            .unwrap();
-        Ok(target_machine)
+    /// Get the cached target machine for the current platform.
+    pub fn get_target_machine(&self) -> &TargetMachine {
+        &self.target_machine
     }
 
     /// Run optimization passes on the module
@@ -163,7 +142,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Ok(());
         }
 
-        let target_machine = self.get_target_machine()?;
+        let target_machine = self.get_target_machine();
 
         // Build the pass pipeline string based on optimization level
         let passes = match level {
@@ -193,7 +172,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         self.module
-            .run_passes(passes, &target_machine, pass_options)
+            .run_passes(passes, target_machine, pass_options)
             .map_err(|e| {
                 CodegenError::InvalidOperation(
                     format!("Failed to run optimization passes: {e}"),
@@ -217,5 +196,24 @@ impl<'ctx> CodeGenerator<'ctx> {
             .print_to_file(path)
             .expect("Failed to write LLVM IR to file");
         Ok(())
+    }
+
+    /// Write target object code to a file
+    ///
+    /// # Errors
+    /// Returns `CodegenError` when object emission fails
+    pub fn write_object_to_file(&self, path: &std::path::Path) -> Result<(), CodegenError> {
+        let target_machine = self.get_target_machine();
+        target_machine
+            .write_to_file(&self.module, FileType::Object, path)
+            .map_err(|e| {
+                CodegenError::InvalidOperation(
+                    format!(
+                        "Failed to write object file to '{}': {e}",
+                        path.display()
+                    ),
+                    crate::lexer::Position { line: 0, column: 0 },
+                )
+            })
     }
 }
