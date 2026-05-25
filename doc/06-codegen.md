@@ -338,7 +338,11 @@ codegen.optimize(level: u8, verify_each: bool) -> Result<(), CodegenError>
 | 2+ | `default<O2>` |
 | 3 | `default<O3>` |
 
-Options: `verify_each(verify_each)`, `loop_interleaving(true)`, `loop_vectorization(true)`, `loop_unrolling(true)`, `merge_functions(true)`.
+Extra options by level:
+- `O1`: no extra pass options beyond the default pipeline
+- `O2`: no extra pass options beyond the default pipeline
+- `O3`: `loop_interleaving(true)`, `loop_slp_vectorization(true)`, `merge_functions(true)`, `call_graph_profile(true)`
+- Any level outside `0..=3` falls back to the `O2` pipeline with no extra pass options.
 
 ## Critical Gotchas
 
@@ -679,7 +683,11 @@ codegen.optimize(level: u8, verify_each: bool) -> Result<(), CodegenError>
 | 2+ | `default<O2>` |
 | 3 | `default<O3>` |
 
-Options: `verify_each(verify_each)`, `loop_interleaving(true)`, `loop_vectorization(true)`, `loop_unrolling(true)`, `merge_functions(true)`.
+Extra options by level:
+- `O1`: no extra pass options beyond the default pipeline
+- `O2`: no extra pass options beyond the default pipeline
+- `O3`: `loop_interleaving(true)`, `loop_slp_vectorization(true)`, `merge_functions(true)`, `call_graph_profile(true)`
+- Any level outside `0..=3` falls back to the `O2` pipeline with no extra pass options.
 
 ## Critical Gotchas
 

@@ -51,6 +51,11 @@ fn compile_to_ir_tempfile(source_path: &str) -> Result<NamedTempFile, String> {
         .generate(&program)
         .map_err(|e| format!("Code generation failed: {e}"))?;
 
+    // Run optimization passes (O0, verify_each to make sure we catch any invalid IR early)
+    codegen
+        .optimize(0, true)
+        .map_err(|e| format!("Optimization failed: {e}"))?;
+
     // Write IR to temporary file
     let ir_file = NamedTempFile::new().map_err(|e| format!("Failed to create temp file: {e}"))?;
 

@@ -117,7 +117,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             BasicTypeEnum::IntType(int_ty) => {
                 let vals: Vec<IntValue> = const_vals
                     .iter()
-                    .map(|v| coerce_constant_to_type(*v, elem_llvm_type, self.context).into_int_value())
+                    .map(|v| {
+                        coerce_constant_to_type(*v, elem_llvm_type, self.context).into_int_value()
+                    })
                     .collect();
                 Ok(int_ty.const_array(&vals).into())
             }

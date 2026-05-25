@@ -285,7 +285,12 @@ pub(crate) fn walk_expression<'ctx>(
             if left.expr_type.pointer_depth > 0 && right.expr_type.pointer_depth > 0 {
                 Ok(gen
                     .builder
-                    .build_int_compare(int_cmp_pred(op, false), left_val.into_pointer_value(), right_val.into_pointer_value(), "ptr_cmp")?
+                    .build_int_compare(
+                        int_cmp_pred(op, false),
+                        left_val.into_pointer_value(),
+                        right_val.into_pointer_value(),
+                        "ptr_cmp",
+                    )?
                     .into())
             } else if matches!(left.expr_type.base, TypeBase::SFloat) {
                 let lf = left_val.into_float_value();
