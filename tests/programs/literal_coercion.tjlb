@@ -4,7 +4,7 @@
    including negative literals. Returns 0 on success.
 -#
 
-fn main() -> i32 {
+fn main(u32 argc, u8 **argv) -> i32 {
     # u8: boundaries and mid-range
     u8 a = 0
     u8 b = 127

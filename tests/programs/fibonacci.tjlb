@@ -7,6 +7,6 @@ fn fib(i32 n) -> i32 {
     return fib(n - 1) + fib(n - 2)
 }
 
-fn main() -> i32 {
+fn main(u32 argc, u8 **argv) -> i32 {
     return fib(7)  # Should be 13
 }

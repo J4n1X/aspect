@@ -4,7 +4,7 @@ fn modify(i32* ptr) {
     *ptr = *ptr + 10
 }
 
-fn main() -> i32 {
+fn main(u32 argc, u8 **argv) -> i32 {
     i32 value = 32
     modify(&value)
     return value  # Should be 42

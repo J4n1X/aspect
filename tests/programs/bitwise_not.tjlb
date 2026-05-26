@@ -1,6 +1,6 @@
 # expected: 42
 # Test bitwise NOT operator (~)
-fn main() -> i32 {
+fn main(u32 argc, u8 **argv) -> i32 {
     # ~0xFF = 0xFFFFFF00 for 32-bit
     # But we only care about the low 8 bits of the exit code
     # So let's use a simpler test

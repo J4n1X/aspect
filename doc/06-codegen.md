@@ -697,6 +697,46 @@ Extra options by level:
 - `O3`: `loop_interleaving(true)`, `loop_slp_vectorization(true)`, `merge_functions(true)`, `call_graph_profile(true)`
 - Any level outside `0..=3` falls back to the `O2` pipeline with no extra pass options.
 
+## JIT Execution
+
+The codegen exposes two methods for running the just-emitted module via
+Inkwell's `ExecutionEngine`, without writing IR to disk or invoking an external
+interpreter:
+
+```rust
+codegen.jit_execute(func_name: &str, args: &[&GenericValue<'ctx>], opt_level: u8)
+    -> AnyhowResult<u64>
+codegen.jit_execute_main(args: &[&str], opt_level: u8) -> AnyhowResult<i32>
+```
+
+`jit_execute` is the generic entry point: the caller supplies LLVM
+`GenericValue`s (build them with `IntType::create_generic_value`,
+`FloatType::create_generic_value`, or
+`GenericValue::create_generic_value_of_pointer`) and is responsible for keeping
+any pointed-at storage alive for the duration of the call. The arg count is
+validated against `func.count_params()`; mismatches return an error rather than
+invoking undefined behavior. Returns the call's integer result as `u64` (or
+`0` for void-returning functions).
+
+`jit_execute_main` is a thin wrapper for the canonical
+`main(u32 argc, u8 **argv) -> i32` entry point. It:
+
+1. Looks up `main` via `get_function("main")` and validates the arity (2).
+2. Builds a `Vec<CString>` and a null-terminated `Vec<*mut c_char>` from
+   `args` — kept on the wrapper's stack frame so the raw `argv` pointer stays
+   valid through the synchronous JIT call.
+3. Constructs `argc` as a `u32` `GenericValue` and `argv` via
+   `create_generic_value_of_pointer`.
+4. Delegates to `jit_execute("main", ...)` and truncates the result to `i32`.
+
+Both methods build the `ExecutionEngine` with an `OptimizationLevel` derived
+from `opt_level` (`0`→`None`, `1`→`Less`, `2`→`Default`, `3`→`Aggressive`;
+out-of-range values fall back to `Default`).
+
+Consumers: the CLI `interpret` subcommand (`src/main.rs`) and the integration
+test harness (`tests/integration_tests.rs`) both call `jit_execute_main`,
+prepending the source path as `argv[0]` per C convention.
+
 ## Critical Gotchas
 
 1. **Entry-block alloca hoisting**: All allocas must be in the entry block for `mem2reg`.

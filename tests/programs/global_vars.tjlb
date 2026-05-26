@@ -6,7 +6,7 @@ fn increment() {
     counter = counter + 1
 }
 
-fn main() -> i32 {
+fn main(u32 argc, u8 **argv) -> i32 {
     increment()
     increment()
     increment()

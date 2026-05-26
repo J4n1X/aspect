@@ -69,6 +69,23 @@ enum Commands {
         #[arg(long)]
         verify_each: bool,
     },
+    Interpret {
+        /// Input file path
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+        /// Optimization level (0-3)
+        #[arg(
+            short = 'O',
+            long = "optimize",
+            value_name = "LEVEL",
+            default_value = "0"
+        )]
+        opt_level: u8,
+        /// Arguments forwarded to the interpreted program's `main(argc, argv)`.
+        /// Use `--` to separate them from this CLI's own flags.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_name = "ARGS")]
+        program_args: Vec<String>,
+    }
 }
 
 fn main() -> Result<()> {
@@ -85,6 +102,13 @@ fn main() -> Result<()> {
             opt_level,
             verify_each,
         } => compile_file(&file, emit, output.as_deref(), print, opt_level, verify_each)?,
+        Commands::Interpret {
+            file,
+            opt_level,
+            program_args,
+        } => {
+            interpret_file(&file, opt_level, &program_args)?;
+        }
     }
 
     Ok(())
@@ -280,6 +304,70 @@ fn compile_file(
             );
         }
     }
+
+    Ok(())
+}
+
+fn interpret_file(path: &PathBuf, opt_level: u8, program_args: &[String]) -> Result<()> {
+    let input = fs::read_to_string(path)
+        .with_context(|| format!("failed to read file '{}'", path.display()))?;
+
+    // Tokenize
+    let tokens =
+        tokenize(input).with_context(|| format!("failed to tokenize '{}'", path.display()))?;
+
+    // Parse
+    let mut parser = Parser::new(tokens).with_source_file(path.display().to_string());
+    let parse_result = parser.parse_program();
+    let program = parse_result.map_err(|errors| {
+        let msgs: Vec<String> = errors.iter().map(|e| parser.format_error(e)).collect();
+        anyhow::anyhow!("{}", msgs.join("\n"))
+    })?;
+
+    // Type check
+    let mut typechecker = TypeChecker::new().with_source_file(path.display().to_string());
+    typechecker.check_program(&program).map_err(|errors| {
+        let mut err_msg = String::new();
+        for error in &errors {
+            let _ = writeln!(err_msg, "{}", typechecker.format_error(error));
+        }
+        anyhow::anyhow!(
+            "Type checking failed for '{}':\n{}",
+            path.display(),
+            err_msg.trim_end()
+        )
+    })?;
+
+    // Generate LLVM IR
+    let context = LLVMContext::create();
+    let module_name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("module");
+
+    let mut codegen = CodeGenerator::new(&context, module_name);
+    codegen
+        .generate(&program)
+        .with_context(|| format!("failed to generate code for '{}'", path.display()))?;
+
+    // Run optimization passes
+    if opt_level > 0 {
+        codegen
+            .optimize(opt_level, false)
+            .with_context(|| format!("failed to optimize code for '{}'", path.display()))?;
+    }
+
+    // argv[0] is the source path by C convention; user args follow.
+    let path_str = path.display().to_string();
+    let mut argv: Vec<&str> = Vec::with_capacity(program_args.len() + 1);
+    argv.push(&path_str);
+    argv.extend(program_args.iter().map(String::as_str));
+
+    let result = codegen
+        .jit_execute_main(&argv, opt_level)
+        .with_context(|| format!("failed to execute 'main' function in '{}'", path.display()))?;
+
+    println!("Execution result: {result}");
 
     Ok(())
 }

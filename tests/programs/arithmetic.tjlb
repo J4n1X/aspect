@@ -1,6 +1,6 @@
 # expected: 27
 # Test arithmetic operations
-fn main() -> i32 {
+fn main(u32 argc, u8 **argv) -> i32 {
     i32 a = 10
     i32 b = 5
     i32 result = (a + b) * 2 - 3

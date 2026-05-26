@@ -1,6 +1,6 @@
 # expected: 121
 # Test logical operators (&&, ||, !)
-fn main() -> i32 {
+fn main(u32 argc, u8 **argv) -> i32 {
     i32 result = 0
 
     # Test logical AND (short-circuit)

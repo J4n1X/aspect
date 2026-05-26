@@ -1,6 +1,6 @@
 # expected: 28
 # Test bitwise operations
-fn main() -> i32 {
+fn main(u32 argc, u8 **argv) -> i32 {
     i32 a = 12    # 1100
     i32 b = 10    # 1010
 

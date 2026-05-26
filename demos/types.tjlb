@@ -191,7 +191,7 @@ fn print_f64_2dp(f64 v) -> u0 {
     write(1, &buf as u8*, strlen(&buf as u8*))
 }
 
-fn main() -> i32 {
+fn main(u32 argc, u8 **argv) -> i32 {
     println("=== TJLB Type System Demo ===")
     println("")
 

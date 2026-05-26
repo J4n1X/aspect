@@ -202,7 +202,7 @@ fn pi2_over6_scaled() -> i64 {
 
 # -- main ------------------------------------------------------------------
 
-fn main() -> i32 {
+fn main(u32 argc, u8 **argv) -> i32 {
     puts("=== CPU Benchmark (TJLB / LLVM) ===")
     puts("")
 

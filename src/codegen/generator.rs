@@ -5,9 +5,11 @@ use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::passes::PassBuilderOptions;
 use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine};
-use inkwell::values::FunctionValue;
+use inkwell::values::{FunctionValue, GenericValue};
 use inkwell::OptimizationLevel;
 use std::collections::HashMap;
+use std::ffi::CString;
+use std::os::raw::c_char;
 
 use crate::codegen::scope::ScopeStack;
 use crate::codegen::CodegenError;
@@ -126,6 +128,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self.target_machine
     }
 
+    /// Look up a declared/defined function by name.
+    pub fn get_function(&self, name: &str) -> Option<FunctionValue<'ctx>> {
+        self.functions.get(name).copied()
+    }
+
     /// Run optimization passes on the module
     ///
     /// # Arguments
@@ -215,5 +222,108 @@ impl<'ctx> CodeGenerator<'ctx> {
                     crate::lexer::Position { line: 0, column: 0 },
                 )
             })
+    }
+
+    /// JIT-compile the module and run `func_name`, forwarding `args` to it.
+    ///
+    /// Each `GenericValue` must match the corresponding LLVM parameter type
+    /// (build them via `IntType::create_generic_value`,
+    /// `FloatType::create_generic_value`, or
+    /// `GenericValue::create_generic_value_of_pointer`). Any backing storage
+    /// referenced by pointer arguments must remain valid for the duration of
+    /// the call.
+    ///
+    /// Returns the integer return value as `u64`, or `0` for void functions.
+    ///
+    /// # Errors
+    /// Returns an error if the execution engine cannot be created, the
+    /// function is not found, or the argument count does not match the
+    /// function's parameter count.
+    pub fn jit_execute(
+        &self,
+        func_name: &str,
+        args: &[&GenericValue<'ctx>],
+        opt_level: u8,
+    ) -> AnyhowResult<u64> {
+        let level = match opt_level {
+            0 => OptimizationLevel::None,
+            1 => OptimizationLevel::Less,
+            2 => OptimizationLevel::Default,
+            3 => OptimizationLevel::Aggressive,
+            _ => OptimizationLevel::Default, // Default to O2 for out-of-range values
+        };
+
+        let execution_engine = self
+            .module
+            .create_jit_execution_engine(level)
+            .context("failed to create JIT execution engine")?;
+
+        let func = *self
+            .functions
+            .get(func_name)
+            .ok_or_else(|| anyhow::anyhow!("function '{}' not found for JIT execution", func_name))?;
+
+        let expected = func.count_params() as usize;
+        if expected != args.len() {
+            anyhow::bail!(
+                "function '{func_name}' expects {expected} argument(s), got {}",
+                args.len()
+            );
+        }
+
+        unsafe {
+            let result = execution_engine.run_function(func, args);
+            if func.get_type().get_return_type().is_none() {
+                // Void return type: return 0 by convention
+                Ok(0)
+            } else {
+                Ok(result.as_int(false))
+            }
+        }
+    }
+
+    /// JIT-compile and call `main(u32 argc, u8** argv) -> i32`, forwarding
+    /// `args` as the program's argv. The caller controls the full argv
+    /// (including the conventional `argv[0]` program-name slot).
+    ///
+    /// Returns the value returned by `main`, truncated to `i32`.
+    ///
+    /// # Errors
+    /// Returns an error if `main` is missing or has the wrong arity, any
+    /// argument contains an interior null byte, `args.len()` exceeds `u32::MAX`,
+    /// or the underlying JIT call fails.
+    pub fn jit_execute_main(&self, args: &[&str], opt_level: u8) -> AnyhowResult<i32> {
+        let main_func = self
+            .get_function("main")
+            .ok_or_else(|| anyhow::anyhow!("no 'main' function in module"))?;
+        let param_count = main_func.count_params();
+        if param_count != 2 {
+            anyhow::bail!(
+                "'main' must take 2 parameters (u32 argc, u8** argv), but takes {param_count}"
+            );
+        }
+
+        // Keep CStrings and the pointer array alive on the stack so the raw
+        // pointer we hand to LLVM stays valid for the synchronous JIT call.
+        let cstrings: Vec<CString> = args
+            .iter()
+            .map(|s| CString::new(*s))
+            .collect::<Result<_, _>>()
+            .context("program arguments must not contain interior null bytes")?;
+        let mut argv_ptrs: Vec<*mut c_char> =
+            cstrings.iter().map(|cs| cs.as_ptr() as *mut c_char).collect();
+        argv_ptrs.push(std::ptr::null_mut()); // null-terminate argv per C convention
+
+        let argc = u32::try_from(args.len())
+            .context("too many program arguments to fit in u32 argc")?;
+        let argc_gv = self
+            .context
+            .i32_type()
+            .create_generic_value(u64::from(argc), false);
+        let argv_gv =
+            unsafe { GenericValue::create_generic_value_of_pointer(&mut argv_ptrs[0]) };
+
+        let raw = self.jit_execute("main", &[&argc_gv, &argv_gv], opt_level)?;
+        Ok(raw as i32)
     }
 }

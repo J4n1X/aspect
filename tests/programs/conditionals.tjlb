@@ -8,7 +8,7 @@ fn max(i32 a, i32 b) -> i32 {
     }
 }
 
-fn main() -> i32 {
+fn main(u32 argc, u8 **argv) -> i32 {
     i32 x = max(15, 20)
     i32 y = max(30, 25)
     return x + y  # Should be 20 + 30 = 50

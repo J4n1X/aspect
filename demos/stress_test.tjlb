@@ -294,7 +294,7 @@ fn strcpy(u8 *dst, u8 *src) -> u0 {
 
 # -- main ------------------------------------------------------------------
 
-fn main() -> i32 {
+fn main(u32 argc, u8 **argv) -> i32 {
     puts("=== TJLB Stress Test ===")
     puts("")
 

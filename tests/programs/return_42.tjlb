@@ -1,5 +1,5 @@
 # expected: 42
 # Simple test: return 42
-fn main() -> i32 {
+fn main(u32 argc, u8 **argv) -> i32 {
     return 42
 }

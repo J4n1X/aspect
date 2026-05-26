@@ -33,7 +33,7 @@ fn strcat(u8 *dst, u8 *src) -> u8 * {
     strcpy(dst, src)
 }
 
-fn main() -> i32 {
+fn main(u32 argc, u8 **argv) -> i32 {
     u8[256] input
     u8[512] output
 

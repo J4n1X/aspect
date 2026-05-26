@@ -130,7 +130,7 @@ Runs LLVM's new pass manager with pipeline strings `default<O0>` through `defaul
 | `anyhow` 1.0 | Contextual error handling |
 | `thiserror` 2.0.17 | Derive for custom error enums |
 
-External tools required on `PATH`: `lli-19` (LLVM interpreter/JIT) and `llc-19` (LLVM static compiler).
+External tools required on `PATH`: only `llc-19` (LLVM static compiler), and only for the optional native-compilation script `compile-file.sh`. JIT execution (`interpret` subcommand, integration test runner) goes through Inkwell's ExecutionEngine in-process — no `lli` binary needed.
 
 ## CLI Usage
 
@@ -143,6 +143,9 @@ cargo run -- parse <FILE>
 
 # Compile (emit IR by default)
 cargo run -- compile <FILE> [-e ir|obj|exe] [-o OUTPUT] [--print] [-O LEVEL]
+
+# JIT-compile and execute in-process; trailing args become argv[1..]
+cargo run -- interpret <FILE> [-O LEVEL] [-- ARGS...]
 
 # Compile to native executable
 ./compile-file.sh program.tjlb   # produces program.out

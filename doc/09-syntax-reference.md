@@ -391,7 +391,7 @@ same name as one in an outer scope. After the inner scope closes, the
 outer variable is visible again.
 
 ```
-fn main() -> i32 {
+fn main(u32 argc, u8 **argv) -> i32 {
     i32 x = 10
     {
         i32 x = 20   # shadows outer x
@@ -503,7 +503,7 @@ This is separate from the preallocated-array declaration `u8[1024] buf`
 ```tjlb
 extern fn puts(u8 *str) -> u0
 
-fn main() -> i32 {
+fn main(u32 argc, u8 **argv) -> i32 {
     const u8 *message = "Hello, World!"
     puts(message)
     return 0
@@ -520,7 +520,7 @@ fn fib(i32 n) -> i32 {
     return fib(n - 1) + fib(n - 2)
 }
 
-fn main() -> i32 {
+fn main(u32 argc, u8 **argv) -> i32 {
     return fib(10)  # Returns 55
 }
 ```
@@ -546,7 +546,7 @@ fn memset(u8 *dst, u64 len, u8 c) -> u0 {
     }
 }
 
-fn main() -> i32 {
+fn main(u32 argc, u8 **argv) -> i32 {
     u8[256] buffer
     memset(&buffer as u8*, 256 as u64, 0 as u8)
     return 0
@@ -558,10 +558,10 @@ fn main() -> i32 {
 ```tjlb
 extern fn puts(u8 *str) -> u0
 
-fn main(i32 argc, i8 **argv) -> i32 {
+fn main(u32 argc, u8 **argv) -> i32 {
     if argc > 1 {
-        i8 *first_arg = argv[1]
-        puts(first_arg as u8*)
+        u8 *first_arg = argv[1]
+        puts(first_arg)
     }
     return 0
 }
@@ -570,7 +570,7 @@ fn main(i32 argc, i8 **argv) -> i32 {
 ### Bitwise Operations
 
 ```tjlb
-fn main() -> i32 {
+fn main(u32 argc, u8 **argv) -> i32 {
     i32 a = 12    # Binary: 1100
     i32 b = 10    # Binary: 1010
 

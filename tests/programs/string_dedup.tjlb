@@ -2,7 +2,7 @@
 # Verifies that deduplicated string literals are read-accessible via pointer arithmetic.
 # Both "Hello" occurrences compile to the same global; reads must still agree.
 
-fn main() -> i32 {
+fn main(u32 argc, u8 **argv) -> i32 {
     # Two literals, same content. These should be deduplicated. As such, a and b should have the exact same pointer value.
     u8* a = "Hello"
     u8* b = "Hello"

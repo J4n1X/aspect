@@ -4,10 +4,12 @@
 
 Integration tests live in `tests/integration_tests.rs` and are split into two suites:
 
-1. Runtime tests: compile valid `.tjlb` programs from `tests/programs/`, execute with `lli-19`, and assert the process exit code.
+1. Runtime tests: compile valid `.tjlb` programs from `tests/programs/` through the full pipeline and JIT-execute them in-process via `CodeGenerator::jit_execute_main`. The `i32` returned by `main` is the asserted result.
 2. Compile-failure tests: compile invalid `.tjlb` programs from `tests/programs/failures/` and assert that compilation fails with stage-appropriate diagnostics.
 
-There is no stdout comparison.
+There is no stdout comparison. Programs must define the canonical
+`main(u32 argc, u8 **argv) -> i32` entry point; the test harness prepends the
+source path as `argv[0]` and forwards any `# run_args:` entries as `argv[1..]`.
 
 ## How Tests Work
 
@@ -19,15 +21,15 @@ Test functions are **generated at compile time** by the `generate_tests!()` proc
 
 At runtime each generated test calls the appropriate helper:
 
-- **Runtime test**: `compile_and_run[_with_args]` → tokenize → parse → typecheck → codegen → `lli-19` → assert exit code.
+- **Runtime test**: `compile_and_run[_with_args]` → tokenize → parse → typecheck → codegen → `jit_execute_main` → assert returned `i32`.
 - **Failure test**: `assert_compile_error_contains` → runs the compile pipeline, asserts it returns an `Err` whose message contains all expected fragments.
 
 ### Annotation format
 
 ```tjlb
-# expected: 42                         # compile & run; assert exit code == 42
+# expected: 42                         # compile & run; assert main's i32 return == 42
 # expected: "frag1", "frag2"           # compile only; assert error contains each fragment
-# run_args: "arg1", "arg2"            # optional: argv forwarded to lli-19
+# run_args: "arg1", "arg2"            # optional: forwarded as argv[1..] to main
 ```
 
 Files without a `# expected:` line are silently skipped by the macro.
@@ -38,12 +40,14 @@ Create a `.tjlb` file anywhere under `tests/programs/`, add a `# expected:` line
 
 ### Argument Passing
 
-`compile_and_run_with_args()` supports passing command-line arguments to `lli-19`. Controlled via the `# run_args:` annotation, used by `array_access.tjlb` which passes `"array_access_test"` as argv[1].
+`compile_and_run_with_args()` forwards the `# run_args:` entries as the
+program's `argv[1..]` (argv[0] is set to the source path by the harness).
+Used by `array_access.tjlb`, which passes `"array_access_test"` as `argv[1]`.
 
 ## Prerequisites
 
-- `lli-19` must be on `PATH` for runtime tests.
-- Compile-failure tests do not execute `lli-19`; they only run compiler stages and assert diagnostics.
+- None beyond `cargo test`. The runtime suite JITs in-process via Inkwell's
+  `ExecutionEngine`; no external `lli` binary is needed.
 
 ## Test Programs
 

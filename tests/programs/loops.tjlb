@@ -1,6 +1,6 @@
 # expected: 60
 # Test loops
-fn main() -> i32 {
+fn main(u32 argc, u8 **argv) -> i32 {
     i32 sum = 0
 
     # While loop: sum 1..5

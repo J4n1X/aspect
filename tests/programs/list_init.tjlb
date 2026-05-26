@@ -27,7 +27,7 @@ fn sum_local_runtime(i32 x) -> i32 {
     return arr[0] + arr[1] + arr[2]  # 3 * x
 }
 
-fn main() -> i32 {
+fn main(u32 argc, u8 **argv) -> i32 {
     i32 a = sum_local_const()    # 42
     i32 b = sum_local_runtime(1) # 3
     i32 c = sum_global()         # 150

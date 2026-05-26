@@ -28,7 +28,7 @@ The compiler binary will be available as `target/release/tjlb-parser`.
 
 ## Usage
 
-The compiler provides three main commands:
+The compiler provides four main commands:
 
 ### Lexical Analysis (Tokenization)
 
@@ -92,6 +92,36 @@ tjlb-parser compile program.tjlb -O 3 --verify-each
 tjlb-parser compile program.tjlb -o program.ll --print
 ```
 
+### Interpretation (JIT)
+
+Compile and immediately execute the program in-process via LLVM's JIT — no
+intermediate files, no external runtime required:
+
+```bash
+tjlb-parser interpret <FILE> [-O LEVEL] [-- ARGS...]
+```
+
+Options:
+- `-O, --optimize <LEVEL>` - Optimization level (0-3, default: 0)
+- Trailing positional arguments are forwarded to the program as `argv[1..]`
+  (the source path is used as `argv[0]`). Use `--` to separate them from this
+  CLI's own flags.
+
+The program must define `main(u32 argc, u8 **argv) -> i32`. The integer
+returned by `main` is reported as the execution result.
+
+Examples:
+```bash
+# Run with no extra args
+tjlb-parser interpret program.tjlb
+
+# Pass args through to main
+tjlb-parser interpret demos/concat_args.tjlb -- hello world foo
+
+# Run with optimizations
+tjlb-parser interpret program.tjlb -O 2 -- arg1 arg2
+```
+
 ## Compiling to Native Executable
 
 To compile a TJLB program to a native executable, you can use the provided script or run the commands manually:
@@ -121,7 +151,7 @@ Here's a simple "Hello World" style program:
 ```tjlb
 extern fn puts(u8 *str) -> u0
 
-fn main() -> i32 {
+fn main(u32 argc, u8 **argv) -> i32 {
     const u8 *message = "Hello, TJLB!"
     puts(message)
     return 0

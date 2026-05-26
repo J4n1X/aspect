@@ -2,7 +2,7 @@
 # run_args: "array_access_test"
 extern fn strlen(const i8 *str) -> u64
 
-fn main(i32 argc, i8 **argv) -> i32 {
+fn main(u32 argc, i8 **argv) -> i32 {
   i8 *prog_name = argv[1]
   return strlen(prog_name) as i32
 }
