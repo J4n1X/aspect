@@ -1,3 +1,10 @@
+"on":
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+
 jobs:
   build:
     strategy:
@@ -13,26 +20,36 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+
+      - name: Install LLVM (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          curl -L -o llvm.7z https://github.com/vovkos/llvm-package-windows/releases/download/llvm-19.1.7/llvm-19.1.7-windows-amd64-msvc17-msvcrt.7z
+          7z x llvm.7z -o"C:/LLVM" -y
 
       - name: Install LLVM (Linux)
         if: runner.os == 'Linux'
         run: |
           wget -qO - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
           echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-19 main" | sudo tee /etc/apt/sources.list.d/llvm.list
-          sudo apt-get update && sudo apt-get install -y llvm-19-dev
+          sudo apt-get update && sudo apt-get install -y llvm-19-dev libpolly-19-dev
 
-      - name: Install LLVM (Windows)
-        if: runner.os == 'Windows'
-        run: choco install llvm --version=19.1.0 --allow-downgrade
-
-      - name: Set LLVM_SYS_190_PREFIX
+          
+      - name: Set LLVM prefixes
         shell: bash
-        run: echo "LLVM_SYS_190_PREFIX=${{ matrix.llvm_prefix }}" >> $GITHUB_ENV
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            echo "LLVM_SYS_190_PREFIX=C:/LLVM/llvm-19.1.7-windows-amd64-msvc17-msvcrt" >> $GITHUB_ENV
+            echo "LLVM_SYS_191_PREFIX=C:/LLVM/llvm-19.1.7-windows-amd64-msvc17-msvcrt" >> $GITHUB_ENV
+          else
+            echo "LLVM_SYS_190_PREFIX=/usr/lib/llvm-19" >> $GITHUB_ENV
+            echo "LLVM_SYS_191_PREFIX=/usr/lib/llvm-19" >> $GITHUB_ENV
+          fi
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -42,7 +59,15 @@ jobs:
 
       - run: cargo build --release
 
-      - uses: actions/upload-artifact@v4
+      - name: Rename artifact for upload (Windows)
+        if: runner.os == 'Windows'
+        run: move target\release\tjlb-parser.exe target\release\tjlc.exe
+       
+      - name: Rename artifact for upload (Linux)
+        if: runner.os == 'Linux'
+        run: mv target/release/tjlb-parser target/release/tjlc
+
+      - uses: actions/upload-artifact@v7
         with:
           name: binary-${{ matrix.os }}
           path: ${{ matrix.artifact }}
