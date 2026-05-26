@@ -69,6 +69,7 @@ enum Commands {
         #[arg(long)]
         verify_each: bool,
     },
+    /// Compile and JIT-execute the input file in-process
     Interpret {
         /// Input file path
         #[arg(value_name = "FILE")]
