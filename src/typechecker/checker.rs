@@ -1,6 +1,7 @@
 use super::errors::TypeCheckError;
 use super::types::{cast_valid, literal_float_compatible, literal_int_fits, types_coercible};
-use crate::lexer::{LangType, Position, TypeBase};
+use crate::lexer::{LangType, TypeBase};
+use crate::scope::ScopeStack;
 use crate::parser::{
     BinaryOp, ExprKind, Expression, Function, GlobalVar, LiteralValue, Program, Statement,
     StatementKind,
@@ -19,10 +20,21 @@ struct FunctionSig {
 /// Walks the AST once and emits errors directly into `self.errors`.
 /// No constraint-collection phase — errors are reported immediately upon discovery.
 ///
+/// The checker is **bidirectional**: every expression is visited in one of two
+/// modes.
+/// - [`TypeChecker::synth_expression`] *synthesises* a type bottom-up when no
+///   surrounding context constrains it (conditions, callees, indices, cast and
+///   dereference operands).
+/// - [`TypeChecker::check_expression`] *checks* an expression against a target
+///   type supplied by its context (assignment RHS, `return` value, call
+///   arguments, declaration initialisers). It pushes the target down into the
+///   children where the child's type *is* the parent's type, and **stamps
+///   `expr_type` on the AST in place** so codegen reads the final width directly.
+///
 /// Use `with_source_file` to include the filename in formatted error messages.
 pub struct TypeChecker {
     functions: HashMap<String, FunctionSig>,
-    scopes: Vec<HashMap<String, LangType>>,
+    scopes: ScopeStack<LangType>,
     globals: HashMap<String, LangType>,
     current_function: Option<String>,
     source_file: String,
@@ -35,7 +47,7 @@ impl TypeChecker {
     pub fn new() -> Self {
         Self {
             functions: HashMap::new(),
-            scopes: vec![HashMap::new()],
+            scopes: ScopeStack::new(),
             globals: HashMap::new(),
             current_function: None,
             source_file: String::new(),
@@ -66,16 +78,20 @@ impl TypeChecker {
 
     /// Check a complete program.
     ///
+    /// The AST is taken by mutable reference: the checker stamps the resolved
+    /// `expr_type` onto literal and arithmetic nodes as it pushes target types
+    /// down into expressions.
+    ///
     /// # Errors
     /// Returns `Err(Vec<TypeCheckError>)` listing every type error found.
-    pub fn check_program(&mut self, program: &Program) -> Result<(), Vec<TypeCheckError>> {
+    pub fn check_program(&mut self, program: &mut Program) -> Result<(), Vec<TypeCheckError>> {
         self.register_declarations(program);
 
-        for global in &program.global_vars {
+        for global in &mut program.global_vars {
             self.check_global_var(global);
         }
 
-        for func in &program.functions {
+        for func in &mut program.functions {
             if !func.proto.is_extern {
                 self.check_function(func);
             }
@@ -107,44 +123,35 @@ impl TypeChecker {
 
     // ── Global variable checking ─────────────────────────────────────────────
 
-    fn check_global_var(&mut self, global: &GlobalVar) {
-        let var_type = &global.var_type;
-        if let Some(init_expr) = &global.initializer {
-            if let ExprKind::ListInitializer(elements) = &init_expr.kind {
+    fn check_global_var(&mut self, global: &mut GlobalVar) {
+        let var_type = global.var_type;
+        if let Some(init_expr) = &mut global.initializer {
+            let init_pos = init_expr.pos;
+            if let ExprKind::ListInitializer(elements) = &mut init_expr.kind {
                 // Validate element count
-                if let Some(expected) = var_type.array_size {
-                    if elements.len() > expected as usize {
-                        self.errors.push(TypeCheckError::ListInitLengthMismatch {
-                            expected: expected as usize,
-                            found: elements.len(),
-                            position: init_expr.pos,
-                        });
-                    }
+                if let Some(expected) = var_type.array_size
+                    && elements.len() > expected as usize
+                {
+                    self.errors.push(TypeCheckError::ListInitLengthMismatch {
+                        expected: expected as usize,
+                        found: elements.len(),
+                        position: init_pos,
+                    });
                 }
-                // Validate each element type
+                // Validate each element against the element type
                 let elem_type = var_type.element_type();
-                for elem in elements {
-                    self.check_expr_coercible(
-                        elem,
-                        &elem_type,
-                        "global array initializer element",
-                        elem.pos,
-                    );
+                for elem in elements.iter_mut() {
+                    self.check_expression(elem, &elem_type);
                 }
             } else {
-                self.check_expr_coercible(
-                    init_expr,
-                    var_type,
-                    "global variable initializer",
-                    init_expr.pos,
-                );
+                self.check_expression(init_expr, &var_type);
             }
         }
     }
 
     // ── Function checking ────────────────────────────────────────────────────
 
-    fn check_function(&mut self, func: &Function) {
+    fn check_function(&mut self, func: &mut Function) {
         self.current_function = Some(func.proto.name.clone());
         self.enter_scope();
 
@@ -152,7 +159,7 @@ impl TypeChecker {
             self.define_var(param_name.clone(), *param_type);
         }
 
-        for stmt in &func.body {
+        for stmt in &mut func.body {
             self.check_statement(stmt);
         }
 
@@ -162,41 +169,34 @@ impl TypeChecker {
 
     // ── Statement checking ───────────────────────────────────────────────────
 
-    fn check_statement(&mut self, stmt: &Statement) {
-        match &stmt.kind {
+    fn check_statement(&mut self, stmt: &mut Statement) {
+        let stmt_pos = stmt.pos;
+        match &mut stmt.kind {
             StatementKind::VarDecl {
                 var_type,
                 name,
                 initializer,
             } => {
-                self.define_var(name.clone(), *var_type);
+                let var_type = *var_type;
+                self.define_var(name.clone(), var_type);
                 if let Some(init_expr) = initializer {
-                    if let ExprKind::ListInitializer(elements) = &init_expr.kind {
-                        if let Some(expected_count) = var_type.array_size {
-                            if elements.len() > expected_count as usize {
-                                self.errors.push(TypeCheckError::ListInitLengthMismatch {
-                                    expected: expected_count as usize,
-                                    found: elements.len(),
-                                    position: init_expr.pos,
-                                });
-                            }
+                    let init_pos = init_expr.pos;
+                    if let ExprKind::ListInitializer(elements) = &mut init_expr.kind {
+                        if let Some(expected_count) = var_type.array_size
+                            && elements.len() > expected_count as usize
+                        {
+                            self.errors.push(TypeCheckError::ListInitLengthMismatch {
+                                expected: expected_count as usize,
+                                found: elements.len(),
+                                position: init_pos,
+                            });
                         }
                         let elem_type = var_type.element_type();
-                        for elem in elements {
-                            self.check_expr_coercible(
-                                elem,
-                                &elem_type,
-                                "array initializer element",
-                                elem.pos,
-                            );
+                        for elem in elements.iter_mut() {
+                            self.check_expression(elem, &elem_type);
                         }
                     } else {
-                        self.check_expr_coercible(
-                            init_expr,
-                            var_type,
-                            "initialization",
-                            init_expr.pos,
-                        );
+                        self.check_expression(init_expr, &var_type);
                     }
                 }
             }
@@ -209,36 +209,31 @@ impl TypeChecker {
                             position: value.pos,
                         });
                     }
-                    self.check_expr_coercible(value, &var_type, "assignment", value.pos);
+                    self.check_expression(value, &var_type);
                 }
             }
 
             StatementKind::DerefAssign { target, value } => {
-                let target_type = self.check_expression(target);
-                self.check_expr_coercible(value, &target_type, "dereference assignment", value.pos);
+                let target_type = self.synth_expression(target);
+                self.check_expression(value, &target_type);
             }
 
             StatementKind::Return(opt_expr) => {
-                if let Some(func_name) = self.current_function.clone() {
-                    if let Some(sig) = self.functions.get(&func_name).cloned() {
-                        match opt_expr {
-                            Some(expr) => {
-                                self.check_expr_coercible(
-                                    expr,
-                                    &sig.return_type,
-                                    "return",
-                                    expr.pos,
-                                );
-                            }
-                            None => {
-                                let void = LangType::new(TypeBase::Void, 0, 0, false);
-                                if sig.return_type != void {
-                                    self.errors.push(TypeCheckError::ReturnTypeMismatch {
-                                        expected: sig.return_type,
-                                        found: void,
-                                        position: stmt.pos,
-                                    });
-                                }
+                if let Some(func_name) = self.current_function.clone()
+                    && let Some(sig) = self.functions.get(&func_name).cloned()
+                {
+                    match opt_expr {
+                        Some(expr) => {
+                            self.check_expression(expr, &sig.return_type);
+                        }
+                        None => {
+                            let void = LangType::new(TypeBase::Void, 0, 0, false);
+                            if sig.return_type != void {
+                                self.errors.push(TypeCheckError::ReturnTypeMismatch {
+                                    expected: sig.return_type,
+                                    found: void,
+                                    position: stmt_pos,
+                                });
                             }
                         }
                     }
@@ -250,21 +245,15 @@ impl TypeChecker {
                 then_block,
                 else_block,
             } => {
-                let cond_type = self.check_expression(condition);
-                if cond_type.base == TypeBase::Void && cond_type.pointer_depth == 0 {
-                    self.errors.push(TypeCheckError::InvalidConditionType(
-                        cond_type,
-                        condition.pos,
-                    ));
-                }
+                self.check_condition(condition);
                 self.enter_scope();
-                for s in then_block {
+                for s in then_block.iter_mut() {
                     self.check_statement(s);
                 }
                 self.exit_scope();
                 if let Some(else_stmts) = else_block {
                     self.enter_scope();
-                    for s in else_stmts {
+                    for s in else_stmts.iter_mut() {
                         self.check_statement(s);
                     }
                     self.exit_scope();
@@ -272,15 +261,9 @@ impl TypeChecker {
             }
 
             StatementKind::While { condition, body } => {
-                let cond_type = self.check_expression(condition);
-                if cond_type.base == TypeBase::Void && cond_type.pointer_depth == 0 {
-                    self.errors.push(TypeCheckError::InvalidConditionType(
-                        cond_type,
-                        condition.pos,
-                    ));
-                }
+                self.check_condition(condition);
                 self.enter_scope();
-                for s in body {
+                for s in body.iter_mut() {
                     self.check_statement(s);
                 }
                 self.exit_scope();
@@ -297,18 +280,12 @@ impl TypeChecker {
                     self.check_statement(init_stmt);
                 }
                 if let Some(cond_expr) = condition {
-                    let cond_type = self.check_expression(cond_expr);
-                    if cond_type.base == TypeBase::Void && cond_type.pointer_depth == 0 {
-                        self.errors.push(TypeCheckError::InvalidConditionType(
-                            cond_type,
-                            cond_expr.pos,
-                        ));
-                    }
+                    self.check_condition(cond_expr);
                 }
                 if let Some(inc_stmt) = increment {
                     self.check_statement(inc_stmt);
                 }
-                for s in body {
+                for s in body.iter_mut() {
                     self.check_statement(s);
                 }
                 self.exit_scope();
@@ -316,129 +293,135 @@ impl TypeChecker {
 
             StatementKind::Block(stmts) => {
                 self.enter_scope();
-                for s in stmts {
+                for s in stmts.iter_mut() {
                     self.check_statement(s);
                 }
                 self.exit_scope();
             }
 
             StatementKind::Expression(expr) => {
-                self.check_expression(expr);
+                self.synth_expression(expr);
             }
 
             StatementKind::Break | StatementKind::Continue => {}
         }
     }
 
-    // ── Expression type resolution ───────────────────────────────────────────
+    /// Synthesise a condition expression and verify it is usable as a truth value.
+    ///
+    /// Conditions impose no target type, so they run in synthesis mode; the
+    /// "must be numeric or pointer" rule then rejects `void`.
+    fn check_condition(&mut self, cond: &mut Expression) {
+        let cond_type = self.synth_expression(cond);
+        if cond_type.base == TypeBase::Void && cond_type.pointer_depth == 0 {
+            self.errors
+                .push(TypeCheckError::InvalidConditionType(cond_type, cond.pos));
+        }
+    }
 
-    /// Walk an expression, emit any type errors found, and return its resolved type.
-    fn check_expression(&mut self, expr: &Expression) -> LangType {
-        match &expr.kind {
-            ExprKind::Literal(_) => expr.expr_type,
+    // ── Expression type resolution (synthesis mode) ──────────────────────────
+
+    /// Synthesise the type of `expr` with no contextual expectation.
+    ///
+    /// Walks the expression, emits any type errors found, and returns its
+    /// resolved type. Used at sites where nothing constrains the type: callee
+    /// resolution, indices, conditions, cast/dereference operands.
+    fn synth_expression(&mut self, expr: &mut Expression) -> LangType {
+        let pos = expr.pos;
+        let default_type = expr.expr_type;
+        match &mut expr.kind {
+            ExprKind::Literal(_) => default_type,
 
             ExprKind::Variable(name) => {
                 if let Some(ty) = self.lookup_var(name) {
                     ty
                 } else {
                     self.errors
-                        .push(TypeCheckError::UndefinedVariable(name.clone(), expr.pos));
-                    expr.expr_type
+                        .push(TypeCheckError::UndefinedVariable(name.clone(), pos));
+                    default_type
                 }
             }
 
             ExprKind::Binary { left, op, right } => {
-                let left_type = self.check_expression(left);
-                let right_type = self.check_expression(right);
+                let left_type = self.synth_expression(left);
+                let right_type = self.synth_expression(right);
 
                 if !Self::binary_op_types_valid(&left_type, &right_type, op) {
                     self.errors.push(TypeCheckError::InvalidBinaryOperation {
                         operator: format!("{op:?}"),
                         left: left_type,
                         right: right_type,
-                        position: expr.pos,
+                        position: pos,
                     });
                 }
-                // Result type: the wider of the two operand types (or left if equal)
-                Self::wider_type(&left_type, &right_type)
+                if matches!(op, BinaryOp::LogicalAnd | BinaryOp::LogicalOr) {
+                    // Logical `&&`/`||` yield a boolean regardless of operand type.
+                    let bool_ty = Self::bool_type();
+                    expr.expr_type = bool_ty;
+                    bool_ty
+                } else {
+                    // Result type: the wider of the two operand types (or left if equal)
+                    Self::wider_type(&left_type, &right_type)
+                }
             }
 
             ExprKind::Comparison { left, op: _, right } => {
-                let left_type = self.check_expression(left);
-                let right_type = self.check_expression(right);
+                let left_type = self.synth_expression(left);
+                let right_type = self.synth_expression(right);
 
                 if !Self::binary_op_types_valid(&left_type, &right_type, &BinaryOp::Add) {
                     self.errors.push(TypeCheckError::InvalidBinaryOperation {
                         operator: "comparison".to_string(),
                         left: left_type,
                         right: right_type,
-                        position: expr.pos,
+                        position: pos,
                     });
                 }
-                LangType::new(TypeBase::SInt, 32, 0, false)
+                // A comparison never propagates its own (`i32`) result type into
+                // its operands, but a literal operand may adopt its *sibling's*
+                // narrower integer type so codegen compares at that width instead
+                // of widening both sides to the literal's default `i32`. The
+                // boolean result is unaffected because the literal fits the
+                // sibling's exact type.
+                Self::narrow_literal_to_sibling(left, right_type);
+                Self::narrow_literal_to_sibling(right, left_type);
+                let bool_ty = Self::bool_type();
+                expr.expr_type = bool_ty;
+                bool_ty
             }
 
             ExprKind::Reference(inner) => {
-                self.check_expression(inner);
-                expr.expr_type
+                self.synth_expression(inner);
+                default_type
             }
 
             ExprKind::Dereference(inner) => {
-                let inner_type = self.check_expression(inner);
+                let inner_type = self.synth_expression(inner);
                 // Arrays and pointers are both valid dereference targets.
                 // Array subscript `arr[i]` is lowered to `*(arr + i)` by the parser,
                 // so array types (pointer_depth == 0 but is_array()) must be accepted here.
                 if inner_type.pointer_depth == 0 && !inner_type.is_array() {
                     self.errors
-                        .push(TypeCheckError::InvalidDereference(inner_type, expr.pos));
+                        .push(TypeCheckError::InvalidDereference(inner_type, pos));
                 }
-                expr.expr_type
+                default_type
             }
 
             ExprKind::FunctionCall { name, args } => {
-                // Evaluate all arg types first
-                let arg_types: Vec<LangType> =
-                    args.iter().map(|a| self.check_expression(a)).collect();
-
-                if let Some(sig) = self.functions.get(name).cloned() {
-                    if sig.params.len() != arg_types.len() {
-                        self.errors.push(TypeCheckError::ArgumentCountMismatch {
-                            name: name.clone(),
-                            expected: sig.params.len(),
-                            found: arg_types.len(),
-                            position: expr.pos,
-                        });
-                    } else {
-                        for (i, (param, arg_expr)) in sig.params.iter().zip(args.iter()).enumerate()
-                        {
-                            if !Self::expr_coercible_to(arg_expr, param) {
-                                let arg_type = arg_types[i];
-                                self.errors.push(TypeCheckError::ArgumentTypeMismatch {
-                                    name: name.clone(),
-                                    expected: *param,
-                                    found: arg_type,
-                                    position: arg_expr.pos,
-                                });
-                            }
-                        }
-                    }
-                } else {
-                    self.errors
-                        .push(TypeCheckError::UndefinedFunction(name.clone(), expr.pos));
-                }
-                expr.expr_type
+                self.check_call(name, args, pos);
+                default_type
             }
 
             ExprKind::Cast {
                 expr: inner,
                 target_type,
             } => {
-                let from_type = self.check_expression(inner);
+                let from_type = self.synth_expression(inner);
                 if !cast_valid(&from_type, target_type) {
                     self.errors.push(TypeCheckError::InvalidCast {
                         from: from_type,
                         to: *target_type,
-                        position: expr.pos,
+                        position: pos,
                     });
                 }
                 *target_type
@@ -448,90 +431,255 @@ impl TypeChecker {
                 alloc_type: _,
                 count,
             } => {
-                let count_type = self.check_expression(count);
+                let count_pos = count.pos;
+                let count_type = self.synth_expression(count);
                 if !matches!(count_type.base, TypeBase::SInt | TypeBase::UInt)
                     || count_type.pointer_depth > 0
                 {
                     self.errors.push(TypeCheckError::TypeMismatch {
                         expected: LangType::new(TypeBase::UInt, 64, 0, false),
                         found: count_type,
-                        position: count.pos,
+                        position: count_pos,
                     });
                 }
-                expr.expr_type
+                default_type
             }
 
             ExprKind::UnaryNot(inner) => {
-                let inner_type = self.check_expression(inner);
+                let inner_type = self.synth_expression(inner);
                 if inner_type.base == TypeBase::Void {
                     self.errors.push(TypeCheckError::InvalidUnaryOperation {
                         operator: "!".to_string(),
                         operand: inner_type,
-                        position: expr.pos,
+                        position: pos,
                     });
                 }
-                LangType::new(TypeBase::SInt, 32, 0, false)
+                // Logical negation yields a boolean.
+                let bool_ty = Self::bool_type();
+                expr.expr_type = bool_ty;
+                bool_ty
             }
 
             ExprKind::BitwiseNot(inner) => {
-                let inner_type = self.check_expression(inner);
+                let inner_type = self.synth_expression(inner);
                 if inner_type.base == TypeBase::Void {
                     self.errors.push(TypeCheckError::InvalidUnaryOperation {
                         operator: "~".to_string(),
                         operand: inner_type,
-                        position: expr.pos,
+                        position: pos,
                     });
                 }
-                expr.expr_type
+                default_type
             }
 
             ExprKind::ListInitializer(elements) => {
-                for elem in elements {
-                    self.check_expression(elem);
+                for elem in elements.iter_mut() {
+                    self.synth_expression(elem);
                 }
-                expr.expr_type
+                default_type
             }
         }
     }
 
-    // ── Coercibility helpers ─────────────────────────────────────────────────
-
-    /// Check if `expr` can be coerced to `target`. Emits an error on failure.
-    fn check_expr_coercible(
+    /// Resolve a function call: validate the callee, arity, and argument types.
+    ///
+    /// Each argument is *checked* against its declared parameter type, which
+    /// pushes the parameter type into literal arguments.
+    fn check_call(
         &mut self,
-        expr: &Expression,
-        target: &LangType,
-        context: &str,
-        pos: Position,
+        name: &str,
+        args: &mut [Expression],
+        pos: crate::lexer::Position,
     ) {
-        if Self::expr_coercible_to(expr, target) {
-            // Visit sub-expressions for their own errors
-            self.check_expression(expr);
+        if let Some(sig) = self.functions.get(name).cloned() {
+            if sig.params.len() != args.len() {
+                self.errors.push(TypeCheckError::ArgumentCountMismatch {
+                    name: name.to_string(),
+                    expected: sig.params.len(),
+                    found: args.len(),
+                    position: pos,
+                });
+                // Still synthesise the arguments so their own errors surface.
+                for arg in args.iter_mut() {
+                    self.synth_expression(arg);
+                }
+            } else {
+                for (param, arg_expr) in sig.params.iter().zip(args.iter_mut()) {
+                    self.check_expression(arg_expr, param);
+                }
+            }
         } else {
-            let found = self.check_expression(expr);
+            self.errors
+                .push(TypeCheckError::UndefinedFunction(name.to_string(), pos));
+            for arg in args.iter_mut() {
+                self.synth_expression(arg);
+            }
+        }
+    }
+
+    // ── Expression type checking (checking mode) ─────────────────────────────
+
+    /// Check `expr` against the expected `target` type.
+    ///
+    /// Stamps `expr.expr_type` and pushes the target into children where the
+    /// child's type *is* the parent's type (arithmetic operands, bitwise-not,
+    /// reference/dereference, list-initialiser elements). Emits a single
+    /// `TypeMismatch` (or a more specific literal-fit error) on failure.
+    fn check_expression(&mut self, expr: &mut Expression, target: &LangType) {
+        let pos = expr.pos;
+        match &mut expr.kind {
+            // Integer literal: validate value-fit against the target and stamp it.
+            ExprKind::Literal(LiteralValue::Integer(val)) => {
+                let val = *val;
+                if literal_int_fits(val, target) {
+                    expr.expr_type = *target;
+                } else if !types_coercible(&expr.expr_type, target) {
+                    self.errors.push(TypeCheckError::TypeMismatch {
+                        expected: *target,
+                        found: expr.expr_type,
+                        position: pos,
+                    });
+                }
+            }
+
+            // Float literal: any float target accepts it; stamp the target.
+            ExprKind::Literal(LiteralValue::Float(_)) => {
+                if literal_float_compatible(target) {
+                    expr.expr_type = *target;
+                } else if !types_coercible(&expr.expr_type, target) {
+                    self.errors.push(TypeCheckError::TypeMismatch {
+                        expected: *target,
+                        found: expr.expr_type,
+                        position: pos,
+                    });
+                }
+            }
+
+            // String literal: type is fixed; verify coercibility only.
+            ExprKind::Literal(LiteralValue::String(_)) => {
+                self.assert_coercible(expr.expr_type, target, pos);
+            }
+
+            // Binary arithmetic with a plain numeric target: propagate the
+            // target into both operands; the operation shares its result type.
+            // Logical `&&`/`||` are excluded — they yield a boolean, not the
+            // target type, so they fall through to the synth arm below.
+            ExprKind::Binary { left, op, right }
+                if Self::propagates_into_arithmetic(target)
+                    && !matches!(op, BinaryOp::LogicalAnd | BinaryOp::LogicalOr) =>
+            {
+                self.check_expression(left, target);
+                self.check_expression(right, target);
+                let left_type = left.expr_type;
+                let right_type = right.expr_type;
+                if !Self::binary_op_types_valid(&left_type, &right_type, op) {
+                    self.errors.push(TypeCheckError::InvalidBinaryOperation {
+                        operator: format!("{op:?}"),
+                        left: left_type,
+                        right: right_type,
+                        position: pos,
+                    });
+                }
+                expr.expr_type = *target;
+            }
+
+            // Bitwise-not preserves its operand type: propagate the target inward.
+            ExprKind::BitwiseNot(inner) => {
+                self.check_expression(inner, target);
+                let inner_type = inner.expr_type;
+                if inner_type.base == TypeBase::Void {
+                    self.errors.push(TypeCheckError::InvalidUnaryOperation {
+                        operator: "~".to_string(),
+                        operand: inner_type,
+                        position: pos,
+                    });
+                }
+                expr.expr_type = *target;
+            }
+
+            // Reference: the inner expression's target is the pointee type.
+            ExprKind::Reference(inner) => {
+                if target.pointer_depth > 0 {
+                    let mut inner_target = *target;
+                    inner_target.pointer_depth -= 1;
+                    self.check_expression(inner, &inner_target);
+                } else {
+                    self.synth_expression(inner);
+                }
+                self.assert_coercible(expr.expr_type, target, pos);
+            }
+
+            // Dereference: synthesise (the operand is a pointer/array, not the
+            // target type), then assert the produced type is coercible.
+            ExprKind::Dereference(_) => {
+                let found = self.synth_expression(expr);
+                self.assert_coercible(found, target, pos);
+            }
+
+            // List initialiser: decay the target to its element type and check
+            // every element against it.
+            ExprKind::ListInitializer(elements) => {
+                let elem_target = target.element_type();
+                for elem in elements.iter_mut() {
+                    self.check_expression(elem, &elem_target);
+                }
+            }
+
+            // Comparison, unary-not, cast, function call, variable, alloc, and
+            // binary ops with a non-numeric (pointer) target: the expression's
+            // type is not the target's type, so synthesise and assert
+            // coercibility at the boundary.
+            _ => {
+                let found = self.synth_expression(expr);
+                self.assert_coercible(found, target, pos);
+            }
+        }
+    }
+
+    /// Emit a `TypeMismatch` unless `found` is coercible to `target`.
+    fn assert_coercible(&mut self, found: LangType, target: &LangType, pos: crate::lexer::Position) {
+        if !types_coercible(&found, target) {
             self.errors.push(TypeCheckError::TypeMismatch {
                 expected: *target,
                 found,
                 position: pos,
             });
-            let _ = context; // context available for richer messages in the future
         }
     }
 
-    /// Pure predicate: can `expr` be used where `target` is expected?
+    /// The TJLB boolean type: an `i1` logical value stored as `i8`.
+    fn bool_type() -> LangType {
+        LangType::new(TypeBase::Bool, 8, 0, false)
+    }
+
+    /// If `operand` is an integer literal that fits the concrete integer type
+    /// `sibling`, restamp the literal to that type.
     ///
-    /// - Integer/float literals: value-based fit check
-    /// - All other expressions: `types_coercible`
-    fn expr_coercible_to(expr: &Expression, target: &LangType) -> bool {
-        match &expr.kind {
-            ExprKind::Literal(LiteralValue::Integer(val)) => {
-                literal_int_fits(*val, target) || types_coercible(&expr.expr_type, target)
-            }
-            ExprKind::Literal(LiteralValue::Float(_)) => {
-                literal_float_compatible(target) || types_coercible(&expr.expr_type, target)
-            }
-            _ => types_coercible(&expr.expr_type, target),
+    /// Used for comparison operands: `u8 i; ... i < 10` compares at `i8` rather
+    /// than zero-extending `i` to `i32` to meet the literal's default width.
+    /// Restricted to literals that fit `sibling`, so the comparison's result is
+    /// unchanged.
+    fn narrow_literal_to_sibling(operand: &mut Expression, sibling: LangType) {
+        if let ExprKind::Literal(LiteralValue::Integer(val)) = operand.kind
+            && sibling.pointer_depth == 0
+            && !sibling.is_array()
+            && matches!(sibling.base, TypeBase::SInt | TypeBase::UInt)
+            && literal_int_fits(val, &sibling)
+        {
+            operand.expr_type = sibling;
         }
+    }
+
+    /// A target type is propagated into arithmetic operands only when it is a
+    /// plain (non-pointer, non-array) integer or float — the regime in which
+    /// the operands share the operation's result type.
+    fn propagates_into_arithmetic(target: &LangType) -> bool {
+        target.pointer_depth == 0
+            && !target.is_array()
+            && matches!(
+                target.base,
+                TypeBase::SInt | TypeBase::UInt | TypeBase::SFloat
+            )
     }
 
     // ── Binary op helpers ────────────────────────────────────────────────────
@@ -574,31 +722,220 @@ impl TypeChecker {
     // ── Scope helpers ────────────────────────────────────────────────────────
 
     fn enter_scope(&mut self) {
-        self.scopes.push(HashMap::new());
+        self.scopes.enter();
     }
 
     fn exit_scope(&mut self) {
-        self.scopes.pop();
+        self.scopes.exit();
     }
 
     fn define_var(&mut self, name: String, var_type: LangType) {
-        if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name, var_type);
-        }
+        self.scopes.insert(name, var_type);
     }
 
     fn lookup_var(&self, name: &str) -> Option<LangType> {
-        for scope in self.scopes.iter().rev() {
-            if let Some(t) = scope.get(name) {
-                return Some(*t);
-            }
-        }
-        self.globals.get(name).copied()
+        self.scopes
+            .lookup(name)
+            .copied()
+            .or_else(|| self.globals.get(name).copied())
     }
 }
 
 impl Default for TypeChecker {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::{tokenize, Position};
+    use crate::parser::{ExprKind, LiteralValue, Parser, Program, StatementKind};
+
+    /// Lex, parse, and type-check `src`, returning the (mutated) AST and the result.
+    fn check(src: &str) -> (Program, Result<(), Vec<TypeCheckError>>) {
+        let tokens = tokenize(src.to_string()).expect("tokenization should succeed");
+        let mut parser = Parser::new(tokens);
+        let mut program = parser.parse_program().expect("parsing should succeed");
+        let mut checker = TypeChecker::new();
+        let result = checker.check_program(&mut program);
+        (program, result)
+    }
+
+    /// Find a function by name.
+    fn func<'a>(program: &'a Program, name: &str) -> &'a Function {
+        program
+            .functions
+            .iter()
+            .find(|f| f.proto.name == name)
+            .unwrap_or_else(|| panic!("function `{name}` not found"))
+    }
+
+    /// Initializer expression of the `idx`-th `VarDecl` in function `fname`.
+    fn nth_var_init<'a>(program: &'a Program, fname: &str, idx: usize) -> &'a Expression {
+        let mut count = 0;
+        for stmt in &func(program, fname).body {
+            if let StatementKind::VarDecl {
+                initializer: Some(init),
+                ..
+            } = &stmt.kind
+            {
+                if count == idx {
+                    return init;
+                }
+                count += 1;
+            }
+        }
+        panic!("var decl #{idx} not found in `{fname}`");
+    }
+
+    fn assert_ty(actual: LangType, base: TypeBase, bits: u32, ptr: u32) {
+        assert_eq!(actual.base, base, "base type");
+        assert_eq!(actual.size_bits, bits, "size_bits");
+        assert_eq!(actual.pointer_depth, ptr, "pointer_depth");
+    }
+
+    fn has_type_mismatch(errs: &[TypeCheckError], at: Position) -> bool {
+        errs.iter().any(|e| {
+            matches!(e, TypeCheckError::TypeMismatch { position, .. } if *position == at)
+        })
+    }
+
+    // 1. Literal fits target on assignment — stamped at the target type.
+    #[test]
+    fn literal_fits_target() {
+        let (program, res) = check("fn main() -> i32 {\n    u8 x = 200\n    return 0\n}\n");
+        assert!(res.is_ok(), "expected ok, got {res:?}");
+        assert_ty(nth_var_init(&program, "main", 0).expr_type, TypeBase::UInt, 8, 0);
+    }
+
+    // 2. Literal overflows target — error at the literal's position.
+    #[test]
+    fn literal_overflows_target() {
+        let (program, res) = check("fn main() -> i32 {\n    u8 x = 300\n    return 0\n}\n");
+        let lit_pos = nth_var_init(&program, "main", 0).pos;
+        let errs = res.expect_err("expected overflow error");
+        assert!(has_type_mismatch(&errs, lit_pos), "error should sit on the literal: {errs:?}");
+    }
+
+    // 3. Binary propagates target — both literals and the `+` stamped u8.
+    #[test]
+    fn binary_propagates_target() {
+        let (program, res) = check("fn main() -> i32 {\n    u8 x = 1 + 2\n    return 0\n}\n");
+        assert!(res.is_ok(), "expected ok, got {res:?}");
+        let init = nth_var_init(&program, "main", 0);
+        assert_ty(init.expr_type, TypeBase::UInt, 8, 0);
+        let ExprKind::Binary { left, right, .. } = &init.kind else {
+            panic!("expected binary");
+        };
+        assert_ty(left.expr_type, TypeBase::UInt, 8, 0);
+        assert_ty(right.expr_type, TypeBase::UInt, 8, 0);
+    }
+
+    // 4. Mixed literal and variable — the literal is stamped, result is u8.
+    #[test]
+    fn binary_mixed_literal_and_variable() {
+        let src = "fn main() -> i32 {\n    u8 y = 0\n    u8 x = y + 1\n    return 0\n}\n";
+        let (program, res) = check(src);
+        assert!(res.is_ok(), "expected ok, got {res:?}");
+        let init = nth_var_init(&program, "main", 1);
+        assert_ty(init.expr_type, TypeBase::UInt, 8, 0);
+        let ExprKind::Binary { right, .. } = &init.kind else {
+            panic!("expected binary");
+        };
+        assert_ty(right.expr_type, TypeBase::UInt, 8, 0);
+    }
+
+    // 5. Comparison yields `bool` and coerces into an integer target; the
+    //    target is never propagated into the operands.
+    #[test]
+    fn comparison_yields_bool() {
+        let src = "fn main() -> i32 {\n    i32 a = 1\n    i32 b = 2\n    i32 c = a < b\n    return 0\n}\n";
+        let (program, res) = check(src);
+        assert!(res.is_ok(), "expected ok, got {res:?}");
+        // The comparison node itself is `bool`; it coerces to the `i32` target.
+        assert_ty(nth_var_init(&program, "main", 2).expr_type, TypeBase::Bool, 8, 0);
+    }
+
+    // 6. Function-call argument fit — error at the literal argument.
+    #[test]
+    fn call_argument_overflow() {
+        let src = "fn f(u8 b) -> i32 {\n    return 0\n}\nfn main() -> i32 {\n    return f(300)\n}\n";
+        let (_program, res) = check(src);
+        let errs = res.expect_err("expected argument overflow error");
+        assert!(
+            errs.iter().any(|e| matches!(e, TypeCheckError::TypeMismatch { expected, .. }
+                if expected.base == TypeBase::UInt && expected.size_bits == 8)),
+            "expected u8 type mismatch on the argument: {errs:?}"
+        );
+    }
+
+    // 7. Return propagates the function's return type into the literal.
+    #[test]
+    fn return_literal_fits() {
+        let (_p, res) = check("fn f() -> u16 {\n    return 65535\n}\n");
+        assert!(res.is_ok(), "expected ok, got {res:?}");
+    }
+
+    #[test]
+    fn return_literal_overflows() {
+        let (_p, res) = check("fn f() -> u16 {\n    return 65536\n}\n");
+        assert!(res.is_err(), "expected overflow error");
+    }
+
+    // 8. Dereference takes the synth path; coercibility holds.
+    #[test]
+    fn dereference_synth_path() {
+        let src = "fn f(u8* p) -> u8 {\n    u8 x = *p\n    return x\n}\n";
+        let (_p, res) = check(src);
+        assert!(res.is_ok(), "expected ok, got {res:?}");
+    }
+
+    // 9. Reference checks its inner against the pointee type.
+    #[test]
+    fn reference_propagates_pointee() {
+        let src = "fn main() -> i32 {\n    u8 v = 5\n    u8* p = &v\n    return 0\n}\n";
+        let (_p, res) = check(src);
+        assert!(res.is_ok(), "expected ok, got {res:?}");
+    }
+
+    // 10. Cast forces its type; the inner literal is left at its synth default.
+    #[test]
+    fn cast_does_not_propagate() {
+        let (program, res) = check("fn main() -> i32 {\n    u32 x = 300 as u32\n    return 0\n}\n");
+        assert!(res.is_ok(), "expected ok, got {res:?}");
+        let init = nth_var_init(&program, "main", 0);
+        let ExprKind::Cast { expr: inner, .. } = &init.kind else {
+            panic!("expected cast");
+        };
+        // The literal keeps its synthesised default (i32), not the cast target.
+        assert!(matches!(inner.kind, ExprKind::Literal(LiteralValue::Integer(300))));
+        assert_eq!(inner.expr_type.base, TypeBase::SInt);
+    }
+
+    // 11. List initialiser propagates the element type into every element.
+    #[test]
+    fn list_init_propagates_element_type() {
+        let (program, res) = check("fn main() -> i32 {\n    u8[3] arr = {1, 2, 3}\n    return 0\n}\n");
+        assert!(res.is_ok(), "expected ok, got {res:?}");
+        let ExprKind::ListInitializer(elems) = &nth_var_init(&program, "main", 0).kind else {
+            panic!("expected list initializer");
+        };
+        for elem in elems {
+            assert_ty(elem.expr_type, TypeBase::UInt, 8, 0);
+        }
+    }
+
+    // 12. List initialiser element overflow — error at the offending element.
+    #[test]
+    fn list_init_element_overflow() {
+        let (program, res) = check("fn main() -> i32 {\n    u8[3] arr = {1, 2, 300}\n    return 0\n}\n");
+        let ExprKind::ListInitializer(elems) = &nth_var_init(&program, "main", 0).kind else {
+            panic!("expected list initializer");
+        };
+        let bad_pos = elems[2].pos;
+        let errs = res.expect_err("expected element overflow error");
+        assert!(has_type_mismatch(&errs, bad_pos), "error should sit on the `300` element: {errs:?}");
     }
 }

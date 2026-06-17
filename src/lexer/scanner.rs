@@ -417,42 +417,7 @@ impl Scanner {
 
         // Check for built-in types
         if let Some(mut lang_type) = LangType::langtype_from_str(&text) {
-            // Check for array syntax: type[size] -- only when followed by decimal int + ']'
-            self.skip_inline_whitespace();
-            let saved_cur = self.current;
-            let saved_line = self.line;
-            let saved_col = self.column;
-            if self.match_char('[') {
-                self.skip_inline_whitespace();
-                let size_start = self.current;
-                while self.peek().is_some_and(|c| c.is_ascii_digit()) {
-                    self.advance();
-                }
-                let size_str = self.slice_to_string(size_start, self.current);
-                let mut parsed = false;
-                if let Ok(size) = size_str.parse::<u32>() {
-                    self.skip_inline_whitespace();
-                    if self.match_char(']') {
-                        lang_type.array_size = Some(size);
-                        parsed = true;
-                    }
-                }
-                if !parsed {
-                    self.current = saved_cur;
-                    self.line = saved_line;
-                    self.column = saved_col;
-                }
-            }
-
-            // Handle pointer depth (after array syntax if present)
-            self.skip_inline_whitespace();
-            let mut depth = 0;
-            while self.match_char('*') {
-                depth += 1;
-                self.skip_inline_whitespace();
-            }
-            lang_type.pointer_depth = depth;
-
+            self.parse_type_modifiers(&mut lang_type);
             let full_lexeme = self.slice_to_string(start_idx, self.current);
             return Token::new(TokenKind::LangType(lang_type), start_pos, full_lexeme);
         }
@@ -479,41 +444,7 @@ impl Scanner {
 
         if let Some(mut lang_type) = LangType::langtype_from_str(&type_text) {
             lang_type.is_const = true;
-
-            self.skip_inline_whitespace();
-            let saved_cur = self.current;
-            let saved_line = self.line;
-            let saved_col = self.column;
-            if self.match_char('[') {
-                self.skip_inline_whitespace();
-                let size_start = self.current;
-                while self.peek().is_some_and(|c| c.is_ascii_digit()) {
-                    self.advance();
-                }
-                let size_str = self.slice_to_string(size_start, self.current);
-                let mut parsed = false;
-                if let Ok(size) = size_str.parse::<u32>() {
-                    self.skip_inline_whitespace();
-                    if self.match_char(']') {
-                        lang_type.array_size = Some(size);
-                        parsed = true;
-                    }
-                }
-                if !parsed {
-                    self.current = saved_cur;
-                    self.line = saved_line;
-                    self.column = saved_col;
-                }
-            }
-
-            self.skip_inline_whitespace();
-            let mut depth = 0;
-            while self.match_char('*') {
-                depth += 1;
-                self.skip_inline_whitespace();
-            }
-            lang_type.pointer_depth = depth;
-
+            self.parse_type_modifiers(&mut lang_type);
             let full_lexeme = format!("const {}", self.slice_to_string(type_start, self.current));
             Ok(Token::new(
                 TokenKind::LangType(lang_type),
@@ -523,6 +454,50 @@ impl Scanner {
         } else {
             Err(LexerError::UnexpectedChar('c', start_pos))
         }
+    }
+
+    /// Parse the optional `[size]` array suffix and `*` pointer-depth markers
+    /// that may follow a base type, writing them onto `lang_type`.
+    ///
+    /// The `[...]` suffix is only consumed when it is a well-formed `[decimal]`;
+    /// otherwise the scanner position is restored so a later `[` (e.g. an index
+    /// expression) is left untouched. Inline whitespace between parts is skipped.
+    fn parse_type_modifiers(&mut self, lang_type: &mut LangType) {
+        // Array syntax: type[size]
+        self.skip_inline_whitespace();
+        let saved_cur = self.current;
+        let saved_line = self.line;
+        let saved_col = self.column;
+        if self.match_char('[') {
+            self.skip_inline_whitespace();
+            let size_start = self.current;
+            while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                self.advance();
+            }
+            let size_str = self.slice_to_string(size_start, self.current);
+            let mut parsed = false;
+            if let Ok(size) = size_str.parse::<u32>() {
+                self.skip_inline_whitespace();
+                if self.match_char(']') {
+                    lang_type.array_size = Some(size);
+                    parsed = true;
+                }
+            }
+            if !parsed {
+                self.current = saved_cur;
+                self.line = saved_line;
+                self.column = saved_col;
+            }
+        }
+
+        // Pointer depth (after array syntax if present)
+        self.skip_inline_whitespace();
+        let mut depth = 0;
+        while self.match_char('*') {
+            depth += 1;
+            self.skip_inline_whitespace();
+        }
+        lang_type.pointer_depth = depth;
     }
 
     fn skip_inline_whitespace(&mut self) {

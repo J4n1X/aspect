@@ -242,7 +242,7 @@ impl Parser {
         };
         self.symbol_table_mut()
             .add_variable(name.clone(), var_type, pos)
-            .map_err(|e| ParserError::UnexpectedToken(e, pos))?;
+            .map_err(|e| ParserError::from_symbol(e, pos))?;
         Ok(Statement::new(
             StatementKind::VarDecl {
                 var_type,

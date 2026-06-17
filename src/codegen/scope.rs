@@ -1,4 +1,5 @@
 use crate::parser::LangType;
+use crate::scope::ScopeStack as LexicalScopes;
 use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicValueEnum, PointerValue};
 use std::collections::HashMap;
@@ -57,10 +58,10 @@ impl<'a, 'ctx> VarRef<'a, 'ctx> {
     }
 }
 
-/// Scoped variable storage: a stack of lexical scopes for locals plus a flat
-/// map for globals.
+/// Scoped variable storage: a stack of lexical scopes for locals (backed by the
+/// shared [`crate::scope::ScopeStack`]) plus a flat map for globals.
 pub struct ScopeStack<'ctx> {
-    scopes: Vec<HashMap<String, LocalVar<'ctx>>>,
+    locals: LexicalScopes<LocalVar<'ctx>>,
     globals: HashMap<String, GlobalVarInfo<'ctx>>,
 }
 
@@ -73,17 +74,17 @@ impl<'ctx> Default for ScopeStack<'ctx> {
 impl<'ctx> ScopeStack<'ctx> {
     pub fn new() -> Self {
         Self {
-            scopes: vec![HashMap::new()],
+            locals: LexicalScopes::new(),
             globals: HashMap::new(),
         }
     }
 
     pub fn enter(&mut self) {
-        self.scopes.push(HashMap::new());
+        self.locals.enter();
     }
 
     pub fn exit(&mut self) {
-        self.scopes.pop();
+        self.locals.exit();
     }
 
     pub fn insert_local(
@@ -94,17 +95,15 @@ impl<'ctx> ScopeStack<'ctx> {
         lang_type: LangType,
         const_value: Option<BasicValueEnum<'ctx>>,
     ) {
-        if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(
-                name,
-                LocalVar {
-                    ptr,
-                    llvm_type,
-                    lang_type,
-                    const_value,
-                },
-            );
-        }
+        self.locals.insert(
+            name,
+            LocalVar {
+                ptr,
+                llvm_type,
+                lang_type,
+                const_value,
+            },
+        );
     }
 
     pub fn insert_global(&mut self, name: String, info: GlobalVarInfo<'ctx>) {
@@ -113,12 +112,7 @@ impl<'ctx> ScopeStack<'ctx> {
 
     /// Look up a local variable, searching from innermost scope outward.
     pub fn lookup_local(&self, name: &str) -> Option<&LocalVar<'ctx>> {
-        for scope in self.scopes.iter().rev() {
-            if let Some(v) = scope.get(name) {
-                return Some(v);
-            }
-        }
-        None
+        self.locals.lookup(name)
     }
 
     pub fn lookup_global(&self, name: &str) -> Option<&GlobalVarInfo<'ctx>> {
@@ -135,7 +129,7 @@ impl<'ctx> ScopeStack<'ctx> {
 
     /// Iterate over all local scopes (innermost first) — used by const-folding.
     pub fn iter_scopes(&self) -> impl Iterator<Item = &HashMap<String, LocalVar<'ctx>>> {
-        self.scopes.iter().rev()
+        self.locals.iter_scopes()
     }
 
     /// Direct access to the globals map — used by const-folding.

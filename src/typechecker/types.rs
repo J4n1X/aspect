@@ -53,6 +53,10 @@ pub fn types_coercible(from: &LangType, to: &LangType) -> bool {
             decayed_from.size_bits <= decayed_to.size_bits
         }
         (TypeBase::SFloat, TypeBase::SFloat) => decayed_from.size_bits <= decayed_to.size_bits,
+        // `bool` is a 0/1 value: it coerces to itself and widens into any
+        // integer. Integers do NOT implicitly coerce to `bool` (that needs a
+        // `!= 0` test, not a width cast), so the reverse direction is absent.
+        (TypeBase::Bool, TypeBase::Bool | TypeBase::SInt | TypeBase::UInt) => true,
         _ => false,
     }
 }
@@ -85,6 +89,8 @@ pub fn literal_int_fits(val: i64, to: &LangType) -> bool {
                 (val as u64) < (1u64 << to.size_bits)
             }
         }
+        // A `bool` accepts only the literals `0` and `1`.
+        TypeBase::Bool => val == 0 || val == 1,
         _ => false,
     }
 }

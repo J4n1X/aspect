@@ -1,6 +1,6 @@
 use indexmap::IndexSet;
 
-use crate::lexer::{Keyword, LangType, Token, TokenKind, TypeBase};
+use crate::lexer::{Keyword, LangType, Position, Token, TokenKind, TypeBase};
 use crate::parser::{
     BinaryOp, ComparisonOp, ExprKind, Expression, LiteralValue, ParserError, Statement,
     StatementKind,
@@ -618,81 +618,32 @@ impl Parser {
         let pos = self.peek().pos;
 
         match &self.peek().kind {
-            // Integer literal
             TokenKind::Integer(value) => {
                 let value = *value;
                 self.advance();
-
-                // Choose the smallest signed type that fits the value
-                let expr_type = if value >= i32::MIN as i64 && value <= i32::MAX as i64 {
-                    LangType::new(TypeBase::SInt, 32, 0, false)
-                } else {
-                    LangType::new(TypeBase::SInt, 64, 0, false)
-                };
-
-                Ok(Expression::new(
-                    ExprKind::Literal(LiteralValue::Integer(value)),
-                    expr_type,
-                    pos,
-                ))
+                Ok(Self::integer_literal(value, pos))
             }
-
-            // Float literal
             TokenKind::Float(value) => {
                 let value = *value;
                 self.advance();
-
-                // Default type is f64
-                let expr_type = LangType::new(TypeBase::SFloat, 64, 0, false);
-
-                Ok(Expression::new(
-                    ExprKind::Literal(LiteralValue::Float(value)),
-                    expr_type,
-                    pos,
-                ))
+                Ok(Self::float_literal(value, pos))
             }
-
-            // String literal
             TokenKind::StringLiteral(s) => {
                 let string_value = s.clone();
                 self.advance();
-
-                // insert_full deduplicates and returns the stable index in O(1)
-                let (index, _) = self.string_literals.insert_full(string_value);
-
-                // String literals are u8 pointers
-                let expr_type = LangType::new(TypeBase::UInt, 8, 1, false);
-
-                Ok(Expression::new(
-                    ExprKind::Literal(LiteralValue::String(index)),
-                    expr_type,
-                    pos,
-                ))
+                Ok(self.string_literal(string_value, pos))
             }
-
-            // Identifier (variable reference or function name - defer type lookup)
             TokenKind::Identifier(name) => {
                 let name = name.clone();
                 self.advance();
-
-                // For now, return a placeholder type - will be resolved in postfix parsing
-                // if this is a function call, or should exist as a variable otherwise
-                let expr_type = if let Some(var_symbol) = self.symbol_table.lookup_variable(&name) {
-                    // Array-to-pointer decay: when an array variable is used in an expression,
-                    // it decays to a pointer to its first element
-                    if var_symbol.symbol_type.is_array() {
-                        var_symbol.symbol_type.decay_to_pointer()
-                    } else {
-                        var_symbol.symbol_type
-                    }
-                } else {
-                    // Might be a function name, use void as placeholder
-                    LangType::new(TypeBase::Void, 0, 0, false)
-                };
-
-                Ok(Expression::new(ExprKind::Variable(name), expr_type, pos))
+                Ok(self.variable_reference(name, pos))
             }
-
+            // Boolean literals
+            TokenKind::Keyword(kw @ (Keyword::True | Keyword::False)) => {
+                let value = *kw == Keyword::True;
+                self.advance();
+                Ok(Self::bool_literal(value, pos))
+            }
             // Parenthesized expression
             TokenKind::OpenParen => {
                 self.advance();
@@ -700,12 +651,57 @@ impl Parser {
                 self.expect(&TokenKind::CloseParen, ")")?;
                 Ok(expr)
             }
-
-            // List initializer (for array literals and in the future, for struct initializers)
+            // List initializer (array literals; in the future, struct initializers)
             TokenKind::OpenBrace => self.parse_init_list(),
 
             _ => Err(ParserError::ExpectedExpression(pos)),
         }
+    }
+
+    /// Build an integer-literal node, choosing the smallest signed type that fits.
+    fn integer_literal(value: i64, pos: Position) -> Expression {
+        let expr_type = if value >= i32::MIN as i64 && value <= i32::MAX as i64 {
+            LangType::new(TypeBase::SInt, 32, 0, false)
+        } else {
+            LangType::new(TypeBase::SInt, 64, 0, false)
+        };
+        Expression::new(ExprKind::Literal(LiteralValue::Integer(value)), expr_type, pos)
+    }
+
+    /// Build a float-literal node (default type `f64`).
+    fn float_literal(value: f64, pos: Position) -> Expression {
+        let expr_type = LangType::new(TypeBase::SFloat, 64, 0, false);
+        Expression::new(ExprKind::Literal(LiteralValue::Float(value)), expr_type, pos)
+    }
+
+    /// Build a boolean-literal node (`true`/`false`).
+    fn bool_literal(value: bool, pos: Position) -> Expression {
+        let expr_type = LangType::new(TypeBase::Bool, 8, 0, false);
+        Expression::new(ExprKind::Literal(LiteralValue::Bool(value)), expr_type, pos)
+    }
+
+    /// Intern a string literal and build its node (`u8*`).
+    fn string_literal(&mut self, value: String, pos: Position) -> Expression {
+        // insert_full deduplicates and returns the stable index in O(1)
+        let (index, _) = self.string_literals.insert_full(value);
+        let expr_type = LangType::new(TypeBase::UInt, 8, 1, false);
+        Expression::new(ExprKind::Literal(LiteralValue::String(index)), expr_type, pos)
+    }
+
+    /// Build a variable-reference node. The type is looked up in the parser's
+    /// symbol table (with array-to-pointer decay); unknown names get a `void`
+    /// placeholder and are resolved later (e.g. function names in a call).
+    fn variable_reference(&mut self, name: String, pos: Position) -> Expression {
+        let expr_type = if let Some(var_symbol) = self.symbol_table.lookup_variable(&name) {
+            if var_symbol.symbol_type.is_array() {
+                var_symbol.symbol_type.decay_to_pointer()
+            } else {
+                var_symbol.symbol_type
+            }
+        } else {
+            LangType::new(TypeBase::Void, 0, 0, false)
+        };
+        Expression::new(ExprKind::Variable(name), expr_type, pos)
     }
 
     /// Parse a type (including array types like u32[4])
@@ -872,7 +868,7 @@ impl Parser {
                 has_body: !is_extern,
                 pos,
             })
-            .map_err(|e| ParserError::UnexpectedToken(e, pos))?;
+            .map_err(|e| ParserError::from_symbol(e, pos))?;
 
         skip_nl!();
 
@@ -884,7 +880,7 @@ impl Parser {
                 for (param_type, param_name) in &params {
                     self.symbol_table_mut()
                         .add_variable(param_name.clone(), *param_type, pos)
-                        .map_err(|e| ParserError::UnexpectedToken(e, pos))?;
+                        .map_err(|e| ParserError::from_symbol(e, pos))?;
                 }
                 match self.parse_block_statement()? {
                     Statement {
@@ -916,7 +912,7 @@ impl Parser {
 
         self.symbol_table_mut()
             .add_variable(name.clone(), var_type, pos)
-            .map_err(|e| ParserError::UnexpectedToken(e, pos))?;
+            .map_err(|e| ParserError::from_symbol(e, pos))?;
 
         term!();
 

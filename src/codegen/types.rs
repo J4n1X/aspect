@@ -74,6 +74,9 @@ impl LangTypeExt for LangType {
             return Ok(ctx.ptr_type(AddressSpace::default()).into());
         }
         Ok(match self.base {
+            // `bool` is stored as i8 (0 or 1); its register form is i1, produced
+            // by comparisons and narrowed at load/condition sites.
+            TypeBase::Bool => ctx.i8_type().into(),
             TypeBase::SInt | TypeBase::UInt => match self.size_bits {
                 8 => ctx.i8_type().into(),
                 16 => ctx.i16_type().into(),
@@ -121,6 +124,7 @@ impl LangTypeExt for LangType {
         ctx: &'ctx Context,
     ) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
         Ok(match self.base {
+            TypeBase::Bool => ctx.i8_type().into(),
             TypeBase::SInt | TypeBase::UInt => match self.size_bits {
                 8 => ctx.i8_type().into(),
                 16 => ctx.i16_type().into(),
@@ -177,7 +181,7 @@ impl LangTypeExt for LangType {
 /// ```
 #[macro_export]
 macro_rules! signed_op {
-    ($builder:expr, $is_signed:expr, $signed:ident, $unsigned:ident, $($arg:expr),+) => {
+    ($builder:expr_2021, $is_signed:expr_2021, $signed:ident, $unsigned:ident, $($arg:expr_2021),+) => {
         if $is_signed {
             $builder.$signed($($arg),+)
         } else {
@@ -191,7 +195,7 @@ macro_rules! signed_op {
 /// Usage: `const_signed_op!(int_value, is_signed, const_signed_div, const_unsigned_div, rhs)`
 #[macro_export]
 macro_rules! const_signed_op {
-    ($val:expr, $is_signed:expr, $signed:ident, $unsigned:ident, $arg:expr) => {
+    ($val:expr_2021, $is_signed:expr_2021, $signed:ident, $unsigned:ident, $arg:expr_2021) => {
         if $is_signed {
             $val.$signed($arg)
         } else {

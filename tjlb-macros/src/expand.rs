@@ -14,27 +14,27 @@ impl VisitMut for DslRewriter {
         // Depth-first: rewrite inner macros before outer ones.
         visit_mut::visit_expr_mut(self, expr);
 
-        if let Expr::Macro(mac_expr) = expr {
-            if let Some(expanded) = expand_macro(&mac_expr.mac) {
-                *expr = syn::parse2(expanded)
-                    .unwrap_or_else(|e| panic!("parse_rule: DSL macro expansion failed: {e}"));
-            }
+        if let Expr::Macro(mac_expr) = expr
+            && let Some(expanded) = expand_macro(&mac_expr.mac)
+        {
+            *expr = syn::parse2(expanded)
+                .unwrap_or_else(|e| panic!("parse_rule: DSL macro expansion failed: {e}"));
         }
     }
 
     fn visit_stmt_mut(&mut self, stmt: &mut Stmt) {
         // syn 2.x parses `macro_call!(...);` at statement level as Stmt::Macro,
         // which is NOT visited by visit_expr_mut. Handle it here.
-        if let Stmt::Macro(mac_stmt) = stmt {
-            if let Some(expanded) = expand_macro(&mac_stmt.mac) {
-                let semi = mac_stmt.semi_token;
-                *stmt = Stmt::Expr(
-                    syn::parse2(expanded)
-                        .unwrap_or_else(|e| panic!("parse_rule: DSL macro expansion failed: {e}")),
-                    semi,
-                );
-                return;
-            }
+        if let Stmt::Macro(mac_stmt) = stmt
+            && let Some(expanded) = expand_macro(&mac_stmt.mac)
+        {
+            let semi = mac_stmt.semi_token;
+            *stmt = Stmt::Expr(
+                syn::parse2(expanded)
+                    .unwrap_or_else(|e| panic!("parse_rule: DSL macro expansion failed: {e}")),
+                semi,
+            );
+            return;
         }
         visit_mut::visit_stmt_mut(self, stmt);
     }

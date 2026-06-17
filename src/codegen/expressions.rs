@@ -80,7 +80,7 @@ fn emit_cast_dispatch<'ctx, E: ValueEmitter<'ctx>>(
 /// should call `generate_expression` instead.
 pub(crate) fn walk_expression<'ctx>(
     expr: &Expression,
-    gen: &mut CodeGenerator<'ctx>,
+    cg: &mut CodeGenerator<'ctx>,
     mode: EmitMode,
 ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
     match &expr.kind {
@@ -88,41 +88,45 @@ pub(crate) fn walk_expression<'ctx>(
         ExprKind::Literal(lit) => match lit {
             LiteralValue::Integer(val) => match mode {
                 EmitMode::Runtime => RuntimeEmitter {
-                    builder: &gen.builder,
-                    context: gen.context,
+                    builder: &cg.builder,
+                    context: cg.context,
                 }
                 .emit_int_literal(*val, &expr.expr_type, expr.pos),
                 EmitMode::Constant => ConstantEmitter {
-                    context: gen.context,
+                    context: cg.context,
                 }
                 .emit_int_literal(*val, &expr.expr_type, expr.pos),
             },
             LiteralValue::Float(val) => match mode {
                 EmitMode::Runtime => RuntimeEmitter {
-                    builder: &gen.builder,
-                    context: gen.context,
+                    builder: &cg.builder,
+                    context: cg.context,
                 }
                 .emit_float_literal(*val, &expr.expr_type, expr.pos),
                 EmitMode::Constant => ConstantEmitter {
-                    context: gen.context,
+                    context: cg.context,
                 }
                 .emit_float_literal(*val, &expr.expr_type, expr.pos),
             },
             LiteralValue::String(index) => {
                 let string_name = format!(".str.{index}");
-                let ptr = gen
+                let ptr = cg
                     .scope
                     .lookup_global(&string_name)
                     .expect("Internal error: String literal global not found")
                     .ptr;
-                let i8_ptr_type = gen.context.ptr_type(AddressSpace::default());
+                let i8_ptr_type = cg.context.ptr_type(AddressSpace::default());
                 match mode {
-                    EmitMode::Runtime => Ok(gen
+                    EmitMode::Runtime => Ok(cg
                         .builder
                         .build_pointer_cast(ptr, i8_ptr_type, "str")?
                         .into()),
                     EmitMode::Constant => Ok(ptr.const_cast(i8_ptr_type).into()),
                 }
+            }
+            // Boolean literal: an i1 value (zero-extended to i8 when stored).
+            LiteralValue::Bool(b) => {
+                Ok(cg.context.bool_type().const_int(u64::from(*b), false).into())
             }
         },
 
@@ -130,7 +134,7 @@ pub(crate) fn walk_expression<'ctx>(
         ExprKind::Variable(name) => match mode {
             EmitMode::Runtime => {
                 let (ptr, llvm_type, lang_type, const_value) = {
-                    let v = gen
+                    let v = cg
                         .scope
                         .lookup_any(name)
                         .ok_or_else(|| CodegenError::UndefinedVariable(name.clone(), expr.pos))?;
@@ -145,11 +149,25 @@ pub(crate) fn walk_expression<'ctx>(
                     return Ok(ptr.into());
                 }
 
-                let loaded = gen.builder.build_load(llvm_type, ptr, name)?;
+                let loaded = cg.builder.build_load(llvm_type, ptr, name)?;
+
+                // A `bool` is stored as i8 but only ever holds 0 or 1. Tagging
+                // the load with `!range !{i8 0, i8 2}` lets LLVM fold branches
+                // and selects that test it.
+                if lang_type.base == TypeBase::Bool
+                    && let BasicValueEnum::IntValue(v) = loaded
+                    && let Some(instr) = v.as_instruction_value()
+                {
+                    let i8t = cg.context.i8_type();
+                    let md = cg.context.metadata_node(&[
+                        i8t.const_int(0, false).into(),
+                        i8t.const_int(2, false).into(),
+                    ]);
+                    let kind_id = cg.context.get_kind_id("range");
+                    let _ = instr.set_metadata(md, kind_id);
+                }
 
                 if lang_type.is_const {
-                    let kind_id = gen.context.get_kind_id("invariant.load");
-                    let md = gen.context.metadata_node(&[]);
                     let instr = match loaded {
                         BasicValueEnum::IntValue(v) => v.as_instruction_value(),
                         BasicValueEnum::FloatValue(v) => v.as_instruction_value(),
@@ -157,6 +175,8 @@ pub(crate) fn walk_expression<'ctx>(
                         _ => None,
                     };
                     if let Some(instr) = instr {
+                        let kind_id = cg.context.get_kind_id("invariant.load");
+                        let md = cg.context.metadata_node(&[]);
                         let _ = instr.set_metadata(md, kind_id);
                     }
                 }
@@ -165,7 +185,7 @@ pub(crate) fn walk_expression<'ctx>(
             }
             EmitMode::Constant => {
                 // Check local scope first (const locals store their folded value).
-                for scope in gen.scope.iter_scopes() {
+                for scope in cg.scope.iter_scopes() {
                     if let Some(var) = scope.get(name) {
                         return var.const_value.ok_or_else(|| {
                             CodegenError::InvalidOperation(
@@ -176,7 +196,7 @@ pub(crate) fn walk_expression<'ctx>(
                     }
                 }
                 // Fall back to global initializer.
-                let global_val = gen
+                let global_val = cg
                     .module
                     .get_global(name)
                     .ok_or_else(|| CodegenError::UndefinedVariable(name.clone(), expr.pos))?;
@@ -194,10 +214,11 @@ pub(crate) fn walk_expression<'ctx>(
 
         // ── Binary operations ─────────────────────────────────────────────
         ExprKind::Binary { left, op, right } => {
-            // Evaluate sub-expressions first (recursive, needs &mut gen).
-            let left_val = walk_expression(left, gen, mode)?;
-            let right_val = walk_expression(right, gen, mode)?;
+            // Evaluate sub-expressions first (recursive, needs &mut cg).
+            let left_val = walk_expression(left, cg, mode)?;
+            let right_val = walk_expression(right, cg, mode)?;
 
+            // TODO: Move this into it's own function because it's unwieldy in here.
             if left.expr_type.pointer_depth > 0 {
                 if mode == EmitMode::Constant {
                     return Err(CodegenError::InvalidOperation(
@@ -213,20 +234,20 @@ pub(crate) fn walk_expression<'ctx>(
                 }
                 let left_ptr = left_val.into_pointer_value();
                 let right_int = right_val.into_int_value();
-                let pointee_type = left.expr_type.pointee().to_llvm(gen.context)?;
+                let pointee_type = left.expr_type.pointee().to_llvm(cg.context)?;
                 return match op {
                     BinaryOp::Add => unsafe {
-                        Ok(gen
+                        Ok(cg
                             .builder
-                            .build_gep(pointee_type, left_ptr, &[right_int], "ptr_add")
+                            .build_in_bounds_gep(pointee_type, left_ptr, &[right_int], "ptr_add")
                             .map(Into::into)?)
                     },
                     BinaryOp::Sub => {
-                        let neg = gen.builder.build_int_neg(right_int, "neg")?;
+                        let neg = cg.builder.build_int_neg(right_int, "neg")?;
                         unsafe {
-                            Ok(gen
+                            Ok(cg
                                 .builder
-                                .build_gep(pointee_type, left_ptr, &[neg], "ptr_sub")
+                                .build_in_bounds_gep(pointee_type, left_ptr, &[neg], "ptr_sub")
                                 .map(Into::into)?)
                         }
                     }
@@ -241,8 +262,8 @@ pub(crate) fn walk_expression<'ctx>(
             match mode {
                 EmitMode::Runtime => {
                     let e = RuntimeEmitter {
-                        builder: &gen.builder,
-                        context: gen.context,
+                        builder: &cg.builder,
+                        context: cg.context,
                     };
                     emit_binary_dispatch(
                         &e,
@@ -256,7 +277,7 @@ pub(crate) fn walk_expression<'ctx>(
                 }
                 EmitMode::Constant => {
                     let e = ConstantEmitter {
-                        context: gen.context,
+                        context: cg.context,
                     };
                     emit_binary_dispatch(
                         &e,
@@ -279,11 +300,11 @@ pub(crate) fn walk_expression<'ctx>(
                     expr.pos,
                 ));
             }
-            let left_val = walk_expression(left, gen, mode)?;
-            let right_val = walk_expression(right, gen, mode)?;
+            let left_val = walk_expression(left, cg, mode)?;
+            let right_val = walk_expression(right, cg, mode)?;
 
             if left.expr_type.pointer_depth > 0 && right.expr_type.pointer_depth > 0 {
-                Ok(gen
+                Ok(cg
                     .builder
                     .build_int_compare(
                         int_cmp_pred(op, false),
@@ -297,12 +318,12 @@ pub(crate) fn walk_expression<'ctx>(
                 let rf = right_val.into_float_value();
                 let (lf, rf) = {
                     let e = RuntimeEmitter {
-                        builder: &gen.builder,
-                        context: gen.context,
+                        builder: &cg.builder,
+                        context: cg.context,
                     };
                     e.emit_widen_floats(lf, rf)?
                 };
-                Ok(gen
+                Ok(cg
                     .builder
                     .build_float_compare(float_cmp_pred(op), lf, rf, "fcmp")?
                     .into())
@@ -313,12 +334,12 @@ pub(crate) fn walk_expression<'ctx>(
                 let ri = right_val.into_int_value();
                 let (li, ri) = {
                     let e = RuntimeEmitter {
-                        builder: &gen.builder,
-                        context: gen.context,
+                        builder: &cg.builder,
+                        context: cg.context,
                     };
                     e.emit_widen_ints(li, is_signed, ri, right_signed)?
                 };
-                Ok(gen
+                Ok(cg
                     .builder
                     .build_int_compare(int_cmp_pred(op, is_signed), li, ri, "icmp")?
                     .into())
@@ -329,7 +350,7 @@ pub(crate) fn walk_expression<'ctx>(
         ExprKind::Reference(inner) => match &inner.kind {
             ExprKind::Variable(name) => match mode {
                 EmitMode::Runtime => {
-                    let ptr = gen
+                    let ptr = cg
                         .scope
                         .lookup_any(name)
                         .ok_or_else(|| CodegenError::UndefinedVariable(name.clone(), inner.pos))?
@@ -337,7 +358,7 @@ pub(crate) fn walk_expression<'ctx>(
                     Ok(ptr.into())
                 }
                 EmitMode::Constant => {
-                    let ptr = gen
+                    let ptr = cg
                         .scope
                         .lookup_global(name.as_str())
                         .ok_or_else(|| CodegenError::UndefinedVariable(name.clone(), inner.pos))?
@@ -345,7 +366,7 @@ pub(crate) fn walk_expression<'ctx>(
                     Ok(ptr.into())
                 }
             },
-            ExprKind::Dereference(inner2) => walk_expression(inner2, gen, mode),
+            ExprKind::Dereference(inner2) => walk_expression(inner2, cg, mode),
             _ => Err(CodegenError::InvalidOperation(
                 "Cannot take address of non-lvalue".to_string(),
                 inner.pos,
@@ -360,7 +381,7 @@ pub(crate) fn walk_expression<'ctx>(
                     expr.pos,
                 ));
             }
-            let ptr = walk_expression(inner_expr, gen, mode)?;
+            let ptr = walk_expression(inner_expr, cg, mode)?;
             let derefed_type = if inner_expr.expr_type.pointer_depth == 0 {
                 return Err(CodegenError::TypeError(
                     "Cannot dereference a non-pointer type".to_string(),
@@ -375,8 +396,8 @@ pub(crate) fn walk_expression<'ctx>(
                     array_size: None,
                 }
             };
-            let pointee_type = derefed_type.to_llvm(gen.context)?;
-            Ok(gen
+            let pointee_type = derefed_type.to_llvm(cg.context)?;
+            Ok(cg
                 .builder
                 .build_load(pointee_type, ptr.into_pointer_value(), "deref")?)
         }
@@ -389,7 +410,7 @@ pub(crate) fn walk_expression<'ctx>(
                     expr.pos,
                 ));
             }
-            gen.generate_function_call(name, args, expr.pos)
+            cg.generate_function_call(name, args, expr.pos)
         }
 
         // ── Cast ──────────────────────────────────────────────────────────
@@ -397,13 +418,13 @@ pub(crate) fn walk_expression<'ctx>(
             expr: inner,
             target_type,
         } => {
-            let val = walk_expression(inner, gen, mode)?;
-            let target_llvm = target_type.to_llvm(gen.context)?;
+            let val = walk_expression(inner, cg, mode)?;
+            let target_llvm = target_type.to_llvm(cg.context)?;
             match mode {
                 EmitMode::Runtime => {
                     let e = RuntimeEmitter {
-                        builder: &gen.builder,
-                        context: gen.context,
+                        builder: &cg.builder,
+                        context: cg.context,
                     };
                     emit_cast_dispatch(
                         &e,
@@ -416,7 +437,7 @@ pub(crate) fn walk_expression<'ctx>(
                 }
                 EmitMode::Constant => {
                     let e = ConstantEmitter {
-                        context: gen.context,
+                        context: cg.context,
                     };
                     emit_cast_dispatch(
                         &e,
@@ -431,20 +452,19 @@ pub(crate) fn walk_expression<'ctx>(
         }
 
         // ── Alloc (both modes — context determines stack vs global) ───────
-        ExprKind::Alloc { alloc_type, count } => gen.generate_alloc(alloc_type, count),
+        ExprKind::Alloc { alloc_type, count } => cg.generate_alloc(alloc_type, count),
 
         // ── Logical / bitwise NOT ─────────────────────────────────────────
         ExprKind::UnaryNot(inner) => {
-            let val = walk_expression(inner, gen, mode)?.into_int_value();
+            let val = walk_expression(inner, cg, mode)?.into_int_value();
+            // Logical NOT yields an i1 boolean; callers extend if they need a
+            // wider integer.
             match mode {
                 EmitMode::Runtime => {
                     let zero = val.get_type().const_zero();
-                    let cmp =
-                        gen.builder
-                            .build_int_compare(IntPredicate::EQ, val, zero, "nottmp")?;
-                    Ok(gen
+                    Ok(cg
                         .builder
-                        .build_int_z_extend(cmp, gen.context.i32_type(), "nottmp_ext")?
+                        .build_int_compare(IntPredicate::EQ, val, zero, "nottmp")?
                         .into())
                 }
                 EmitMode::Constant => {
@@ -454,9 +474,9 @@ pub(crate) fn walk_expression<'ctx>(
                             inner.pos,
                         )
                     })?;
-                    Ok(gen
+                    Ok(cg
                         .context
-                        .i32_type()
+                        .bool_type()
                         .const_int(u64::from(n == 0), false)
                         .into())
                 }
@@ -464,9 +484,9 @@ pub(crate) fn walk_expression<'ctx>(
         }
 
         ExprKind::BitwiseNot(inner) => {
-            let val = walk_expression(inner, gen, mode)?.into_int_value();
+            let val = walk_expression(inner, cg, mode)?.into_int_value();
             match mode {
-                EmitMode::Runtime => Ok(gen.builder.build_not(val, "bnottmp")?.into()),
+                EmitMode::Runtime => Ok(cg.builder.build_not(val, "bnottmp")?.into()),
                 EmitMode::Constant => Ok(val.const_not().into()),
             }
         }
@@ -500,30 +520,29 @@ impl<'ctx> CodeGenerator<'ctx> {
         target: Option<&LangType>,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         // Fast path: literal assigned to a scalar target — emit at target type with overflow check.
-        if let Some(target_ty) = target {
-            if target_ty.pointer_depth == 0 && !target_ty.is_array() {
-                if let ExprKind::Literal(
-                    lit @ (LiteralValue::Integer(_) | LiteralValue::Float(_)),
-                ) = &expr.kind
-                {
-                    return self.generate_literal_typed(lit, target_ty, expr.pos);
-                }
-            }
+        if let Some(target_ty) = target
+            && target_ty.pointer_depth == 0
+            && !target_ty.is_array()
+            && let ExprKind::Literal(lit @ (LiteralValue::Integer(_) | LiteralValue::Float(_))) =
+                &expr.kind
+        {
+            return self.generate_literal_typed(lit, target_ty, expr.pos);
         }
 
         let val = self.generate_expression(expr)?;
 
         // Auto-widen to target if types differ.
-        if let Some(target_ty) = target {
-            if target_ty.pointer_depth == 0 && !target_ty.is_array() {
-                let target_llvm = target_ty.to_llvm(self.context)?;
-                if val.get_type() != target_llvm {
-                    let e = RuntimeEmitter {
-                        builder: &self.builder,
-                        context: self.context,
-                    };
-                    return e.emit_cast(val, target_llvm, &expr.expr_type, target_ty, expr.pos);
-                }
+        if let Some(target_ty) = target
+            && target_ty.pointer_depth == 0
+            && !target_ty.is_array()
+        {
+            let target_llvm = target_ty.to_llvm(self.context)?;
+            if val.get_type() != target_llvm {
+                let e = RuntimeEmitter {
+                    builder: &self.builder,
+                    context: self.context,
+                };
+                return e.emit_cast(val, target_llvm, &expr.expr_type, target_ty, expr.pos);
             }
         }
 
@@ -592,6 +611,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                     )),
                 }
             }
+            LiteralValue::Bool(b) => match ty.to_llvm(self.context)? {
+                BasicTypeEnum::IntType(int_ty) => {
+                    Ok(int_ty.const_int(u64::from(*b), false).into())
+                }
+                _ => Err(CodegenError::TypeError(
+                    "boolean literal must have integer type".to_string(),
+                    pos,
+                )),
+            },
             LiteralValue::String(index) => {
                 let string_name = format!(".str.{index}");
                 let ptr = self
@@ -647,7 +675,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             let zero = self.context.i64_type().const_int(0, false);
             let index = self.context.i64_type().const_int(i as u64, false);
             let elem_ptr = unsafe {
-                self.builder.build_gep(
+                self.builder.build_in_bounds_gep(
                     array_llvm_type,
                     array_ptr,
                     &[zero, index],
@@ -664,7 +692,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             let zero = self.context.i64_type().const_int(0, false);
             let index = self.context.i64_type().const_int(i as u64, false);
             let elem_ptr = unsafe {
-                self.builder.build_gep(
+                self.builder.build_in_bounds_gep(
                     array_llvm_type,
                     array_ptr,
                     &[zero, index],

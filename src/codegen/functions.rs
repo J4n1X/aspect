@@ -9,25 +9,25 @@ use crate::parser::{Expression, Function, LangType};
 /// RAII guard that sets `current_function` / `current_function_return_type`
 /// on creation and clears them on drop.
 pub(crate) struct FunctionScope<'a, 'ctx> {
-    gen: &'a mut CodeGenerator<'ctx>,
+    cg: &'a mut CodeGenerator<'ctx>,
 }
 
 impl<'a, 'ctx> FunctionScope<'a, 'ctx> {
     fn new(
-        gen: &'a mut CodeGenerator<'ctx>,
+        cg: &'a mut CodeGenerator<'ctx>,
         func: FunctionValue<'ctx>,
         return_type: LangType,
     ) -> Self {
-        gen.current_function = Some(func);
-        gen.current_function_return_type = Some(return_type);
-        Self { gen }
+        cg.current_function = Some(func);
+        cg.current_function_return_type = Some(return_type);
+        Self { cg }
     }
 }
 
 impl Drop for FunctionScope<'_, '_> {
     fn drop(&mut self) {
-        self.gen.current_function = None;
-        self.gen.current_function_return_type = None;
+        self.cg.current_function = None;
+        self.cg.current_function_return_type = None;
     }
 }
 
@@ -109,26 +109,26 @@ impl<'ctx> CodeGenerator<'ctx> {
         })?;
 
         let mut scope = FunctionScope::new(self, function, func.proto.return_type);
-        let gen = &mut scope.gen;
+        let cg = &mut scope.cg;
 
         // Create entry block
-        let entry_block = gen.context.append_basic_block(function, "entry");
-        gen.builder.position_at_end(entry_block);
+        let entry_block = cg.context.append_basic_block(function, "entry");
+        cg.builder.position_at_end(entry_block);
 
         // Enter function scope
-        gen.enter_scope();
+        cg.enter_scope();
 
         // Allocate space for parameters and store them (in the entry block)
         for (i, (param_type, param_name)) in func.proto.params.iter().enumerate() {
             let param_value = function
                 .get_nth_param(u32::try_from(i).expect("Parameter index out of bounds"))
                 .unwrap();
-            let param_llvm_type = param_type.to_llvm(gen.context)?;
+            let param_llvm_type = param_type.to_llvm(cg.context)?;
 
-            let alloca = gen.builder.build_alloca(param_llvm_type, param_name)?;
-            gen.builder.build_store(alloca, param_value)?;
+            let alloca = cg.builder.build_alloca(param_llvm_type, param_name)?;
+            cg.builder.build_store(alloca, param_value)?;
 
-            gen.add_variable(
+            cg.add_variable(
                 param_name.clone(),
                 alloca,
                 param_llvm_type,
@@ -139,20 +139,20 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Generate function body (variables are allocated at their declaration site)
         for stmt in &func.body {
-            gen.generate_statement(stmt)?;
+            cg.generate_statement(stmt)?;
         }
 
         // If function doesn't have an explicit return, add one
-        if !gen.block_has_terminator() {
+        if !cg.block_has_terminator() {
             if func.proto.return_type.is_void() {
-                gen.builder.build_return(None)?;
+                cg.builder.build_return(None)?;
             } else {
-                let zero = gen.get_zero_value(&func.proto.return_type)?;
-                gen.builder.build_return(Some(&zero))?;
+                let zero = cg.get_zero_value(&func.proto.return_type)?;
+                cg.builder.build_return(Some(&zero))?;
             }
         }
 
-        gen.exit_scope();
+        cg.exit_scope();
         // FunctionScope::drop() clears current_function + current_function_return_type
 
         Ok(())

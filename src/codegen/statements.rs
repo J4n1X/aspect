@@ -127,32 +127,32 @@ impl<'ctx> CodeGenerator<'ctx> {
         //                   the alloca/load entirely.
         // For non-const vars: use the constant as the stored value but don't cache it,
         //                     since the variable may be reassigned later.
-        if let Some(init_expr) = initializer {
-            if let Some(folded) = self.try_fold_constant_expression(init_expr) {
-                let target_llvm = var_type.to_llvm(self.context)?;
-                let coerced = if folded.get_type() == target_llvm {
-                    folded
-                } else {
-                    ConstantEmitter {
-                        context: self.context,
-                    }
-                    .emit_cast(
-                        folded,
-                        target_llvm,
-                        &init_expr.expr_type,
-                        var_type,
-                        init_expr.pos,
-                    )?
-                };
-                self.builder.build_store(alloca, coerced)?;
-                let cv = if var_type.is_const {
-                    Some(coerced)
-                } else {
-                    None
-                };
-                self.add_variable(name.to_string(), alloca, llvm_type, *var_type, cv);
-                return Ok(());
-            }
+        if let Some(init_expr) = initializer
+            && let Some(folded) = self.try_fold_constant_expression(init_expr)
+        {
+            let target_llvm = var_type.to_llvm(self.context)?;
+            let coerced = if folded.get_type() == target_llvm {
+                folded
+            } else {
+                ConstantEmitter {
+                    context: self.context,
+                }
+                .emit_cast(
+                    folded,
+                    target_llvm,
+                    &init_expr.expr_type,
+                    var_type,
+                    init_expr.pos,
+                )?
+            };
+            self.builder.build_store(alloca, coerced)?;
+            let cv = if var_type.is_const {
+                Some(coerced)
+            } else {
+                None
+            };
+            self.add_variable(name.to_string(), alloca, llvm_type, *var_type, cv);
+            return Ok(());
         }
 
         self.add_variable(name.to_string(), alloca, llvm_type, *var_type, None);

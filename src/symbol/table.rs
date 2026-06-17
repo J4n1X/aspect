@@ -1,12 +1,29 @@
 use crate::lexer::{LangType, Position};
+use crate::scope::ScopeStack;
 use std::collections::HashMap;
+use thiserror::Error;
+
+/// Errors produced when mutating the symbol table.
+///
+/// These carry no source position — the caller knows the offending site and
+/// attaches it when converting to a `ParserError`.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum SymbolError {
+    #[error("variable '{0}' is already declared in this scope")]
+    DuplicateVariable(String),
+
+    #[error("function '{0}' already has a body")]
+    FunctionAlreadyDefined(String),
+
+    #[error("definition of function '{0}' does not match its declaration")]
+    SignatureMismatch(String),
+}
 
 /// Symbol information
 #[derive(Debug, Clone, PartialEq)]
 pub struct Symbol {
     pub name: String,
     pub symbol_type: LangType,
-    pub scope_level: usize,
     pub pos: Position,
 }
 
@@ -27,12 +44,10 @@ pub struct FunctionSymbol {
 /// Symbol table for managing variables and functions
 #[derive(Debug)]
 pub struct SymbolTable {
-    /// Variable scopes - each scope is a `HashMap` of name -> Symbol
-    var_scopes: Vec<HashMap<String, VarSymbol>>,
+    /// Lexical scopes mapping variable names to their symbols.
+    var_scopes: ScopeStack<VarSymbol>,
     /// Function table - global scope only
     functions: HashMap<String, FunctionSymbol>,
-    /// Current scope level
-    current_scope: usize,
 }
 
 impl Default for SymbolTable {
@@ -45,71 +60,58 @@ impl SymbolTable {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            var_scopes: vec![HashMap::new()],
+            var_scopes: ScopeStack::new(),
             functions: HashMap::new(),
-            current_scope: 0,
         }
     }
 
     /// Enter a new scope
     pub fn enter_scope(&mut self) {
-        self.current_scope += 1;
-        self.var_scopes.push(HashMap::new());
+        self.var_scopes.enter();
     }
 
     /// Exit the current scope and clean up variables
     pub fn exit_scope(&mut self) {
-        if self.current_scope > 0 {
-            self.var_scopes.pop();
-            self.current_scope -= 1;
-        }
+        self.var_scopes.exit();
     }
 
     /// Add a variable to the current scope
     /// # Errors
-    /// If the variable already exists in the current scope
+    /// Returns [`SymbolError::DuplicateVariable`] if a variable of the same name
+    /// already exists in the current scope.
     pub fn add_variable(
         &mut self,
         name: String,
         symbol_type: LangType,
         pos: Position,
-    ) -> Result<(), String> {
+    ) -> Result<(), SymbolError> {
+        if self.var_scopes.contains_in_current(&name) {
+            return Err(SymbolError::DuplicateVariable(name));
+        }
         let symbol = VarSymbol {
             name: name.clone(),
             symbol_type,
-            scope_level: self.current_scope,
             pos,
         };
-
-        if let Some(current_scope) = self.var_scopes.last_mut() {
-            if current_scope.contains_key(&name) {
-                return Err(format!("Variable '{name}' already declared in this scope"));
-            }
-            current_scope.insert(name, symbol);
-            Ok(())
-        } else {
-            Err("No current scope".to_string())
-        }
+        self.var_scopes.insert(name, symbol);
+        Ok(())
     }
 
     /// Look up a variable in all scopes (from innermost to outermost)
     #[must_use]
     pub fn lookup_variable(&self, name: &str) -> Option<&VarSymbol> {
-        for scope in self.var_scopes.iter().rev() {
-            if let Some(symbol) = scope.get(name) {
-                return Some(symbol);
-            }
-        }
-        None
+        self.var_scopes.lookup(name)
     }
 
     /// Add or update a function
     /// # Errors
-    /// If there is a conflicting definition
-    pub fn add_function(&mut self, func: FunctionSymbol) -> Result<(), String> {
+    /// Returns [`SymbolError::FunctionAlreadyDefined`] if two definitions supply
+    /// a body, or [`SymbolError::SignatureMismatch`] if a definition disagrees
+    /// with an earlier declaration.
+    pub fn add_function(&mut self, func: FunctionSymbol) -> Result<(), SymbolError> {
         match self.functions.get(&func.name) {
             Some(existing) if existing.has_body && func.has_body => {
-                return Err(format!("Function '{}' already has a body", func.name));
+                return Err(SymbolError::FunctionAlreadyDefined(func.name));
             }
             Some(existing)
                 if !existing.has_body
@@ -117,10 +119,7 @@ impl SymbolTable {
                     && (existing.params != func.params
                         || existing.return_type != func.return_type) =>
             {
-                return Err(format!(
-                    "Function definition doesn't match declaration for '{}'",
-                    func.name
-                ));
+                return Err(SymbolError::SignatureMismatch(func.name));
             }
             _ => {}
         }
@@ -133,17 +132,5 @@ impl SymbolTable {
     #[must_use]
     pub fn lookup_function(&self, name: &str) -> Option<&FunctionSymbol> {
         self.functions.get(name)
-    }
-
-    /// Get current scope level
-    #[must_use]
-    pub fn current_scope_level(&self) -> usize {
-        self.current_scope
-    }
-
-    /// Get all functions (for final program assembly)
-    #[must_use]
-    pub fn get_all_functions(&self) -> Vec<&FunctionSymbol> {
-        self.functions.values().collect()
     }
 }

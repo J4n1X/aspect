@@ -17,7 +17,7 @@ fn parse_and_typecheck(source_path: &str) -> Result<Program, String> {
     let tokens = tokenize(source).map_err(|e| format!("Tokenization failed: {e}"))?;
 
     let mut parser = Parser::new(tokens).with_source_file(source_path.to_string());
-    let program = parser.parse_program().map_err(|errors| {
+    let mut program = parser.parse_program().map_err(|errors| {
         errors
             .iter()
             .map(|e| parser.format_error(e))
@@ -26,7 +26,7 @@ fn parse_and_typecheck(source_path: &str) -> Result<Program, String> {
     })?;
 
     let mut typechecker = TypeChecker::new().with_source_file(source_path.to_string());
-    typechecker.check_program(&program).map_err(|errors| {
+    typechecker.check_program(&mut program).map_err(|errors| {
         errors
             .iter()
             .map(|e| typechecker.format_error(e))
@@ -83,7 +83,7 @@ fn compile_and_run_with_args(source_path: &str, args: &[String]) -> Result<i32, 
         .map_err(|e| format!("Code generation failed: {e}"))?;
 
     // Run the optimizer over it to catch any codegen issues that would cause optimization to fail
-    codegen.optimize(2, true);
+    codegen.optimize(2, true).map_err(|e| format!("Optimization failed: {e}"))?;
     
     let mut argv: Vec<&str> = Vec::with_capacity(args.len() + 1);
     argv.push(source_path);

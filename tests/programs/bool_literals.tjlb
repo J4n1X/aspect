@@ -1,0 +1,11 @@
+# expected: 8
+# Boolean literals `true` and `false`.
+fn main(u32 argc, u8 **argv) -> i32 {
+    bool t = true
+    bool f = false
+    i32 r = 0
+    if t { r = r + 5 }       # taken
+    if f { r = r + 100 }     # not taken
+    if !f { r = r + 3 }      # taken
+    return r                 # 5 + 3 = 8
+}

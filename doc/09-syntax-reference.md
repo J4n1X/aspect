@@ -94,6 +94,7 @@ Reserved keywords (not usable as identifiers):
 fn  extern  const  type  struct
 while  if  else  elif  for  switch
 break  continue  as  return
+true  false
 ```
 
 ### Types as tokens
@@ -107,6 +108,7 @@ type-token ::= const? base-type array-size? pointer-depth
 base-type   ::= 'i' digit+      # signed integer (i8 i16 i32 i64 ...)
               | 'u' digit+      # unsigned integer (u8 u16 u32 u64 u0=void)
               | 'f' digit+      # floating-point (f32 f64)
+              | 'bool'          # boolean (0 or 1)
 
 array-size  ::= '[' decimal-int ']'   # preallocated array, e.g. u8[256]
 
@@ -128,6 +130,13 @@ Valid types:
 | `f32` | 32-bit floating point | 4 bytes |
 | `f64` | 64-bit floating point | 8 bytes |
 | `u0` | Void (no value) | — |
+| `bool` | Boolean (0 or 1) | 1 byte (i8 storage, i1 value) |
+
+Comparisons (`<`, `==`, …) and the logical operators (`&&`, `\|\|`, `!`) produce
+`bool`. A `bool` coerces to any integer (0 or 1); the reverse needs an explicit
+`!= 0` test. A `bool` is written with the `true`/`false` literals (or the integer
+literals `0`/`1`). Loads of `bool` variables are tagged `!range !{i8 0, i8 2}` in
+the emitted IR.
 
 `const` marks a value as constant and must immediately precede the base
 type. Any inline whitespace between `const` and the type is consumed by

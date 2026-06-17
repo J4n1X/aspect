@@ -6,6 +6,7 @@ pub enum LiteralValue {
     Integer(i64),
     Float(f64),
     String(usize), // Index into string literals table
+    Bool(bool),
 }
 
 /// Binary operators
@@ -30,21 +31,9 @@ pub enum BinaryOp {
     LogicalOr,
 }
 
-impl BinaryOp {
-    #[must_use]
-    pub fn precedence(&self) -> i32 {
-        match self {
-            BinaryOp::LogicalOr => 0,
-            BinaryOp::LogicalAnd => 1,
-            BinaryOp::LeftShift | BinaryOp::RightShift => 2,
-            BinaryOp::Or => 3,
-            BinaryOp::And => 4,
-            BinaryOp::Xor => 5,
-            BinaryOp::Add | BinaryOp::Sub => 10,
-            BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => 20,
-        }
-    }
-}
+// Operator precedence lives solely in the parser's `INFIX_OPS` table
+// (`src/parser/expressions.rs`); it is the single source of truth for binding
+// strength and includes comparison operators, which `BinaryOp` does not model.
 
 /// Comparison operators
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -1,0 +1,17 @@
+# expected: 45
+# Narrow-width arithmetic and comparisons.
+#
+# `i` and `sum` are u8, so `sum + i`, `i + 1`, and `i < 10` should all be
+# emitted as i8 operations rather than widening to i32 and truncating back.
+# The bidirectional checker stamps the literal operands (`1`, `10`) as u8.
+# This test guards that the result is identical to wider-width arithmetic:
+# sum = 0+1+2+...+9 = 45.
+fn main(u32 argc, u8 **argv) -> i32 {
+    u8 i = 0
+    u8 sum = 0
+    while i < 10 {
+        sum = sum + i
+        i = i + 1
+    }
+    return sum as i32
+}

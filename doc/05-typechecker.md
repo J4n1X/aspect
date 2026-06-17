@@ -1,8 +1,14 @@
 # Type Checker
 
 The type checker (`src/typechecker/`) performs semantic validation after parsing.
-It uses a **single-pass** approach: errors are emitted immediately as statements
-and expressions are walked.
+It uses a **single-pass, bidirectional** approach: errors are emitted immediately
+as statements and expressions are walked, and a target type is pushed *into* an
+expression whenever the surrounding context supplies one.
+
+The checker takes the AST by **mutable** reference and **stamps the resolved
+`expr_type`** onto literal and arithmetic nodes as it goes, so codegen reads the
+final type directly instead of re-deriving it. See
+[Bidirectional Checking](#bidirectional-checking) below.
 
 ## Files
 
@@ -19,8 +25,9 @@ pub struct TypeChecker {
     functions: HashMap<String, FunctionSig>,  // Known function signatures
     scopes: Vec<HashMap<String, LangType>>,   // Variable type scopes (stack)
     globals: HashMap<String, LangType>,       // Global variable types
+    current_function: Option<String>,         // Current function being checked
     source_file: String,                      // Source file path for diagnostics
-    current_function: Option<String>,          // Current function being checked
+    errors: Vec<TypeCheckError>,              // Accumulated errors
 }
 ```
 
@@ -35,8 +42,8 @@ TypeChecker::new()
 // Set source file for diagnostics (returns self for chaining)
 TypeChecker::new().with_source_file(path: String)
 
-// Run the checker; returns all errors at once
-checker.check_program(&program) -> Result<(), Vec<TypeCheckError>>
+// Run the checker; mutates the AST (stamps expr_type) and returns all errors at once
+checker.check_program(&mut program) -> Result<(), Vec<TypeCheckError>>
 
 // Format an error with source-file prefix
 checker.format_error(&error) -> String
@@ -55,8 +62,54 @@ checker.format_error(&error) -> String
 Walks each function body in a single pass:
 - Creates scopes for blocks, if/else branches, while bodies, for loops
 - Adds parameters to scope
-- For each statement, calls `check_statement()`; for each expression, calls `check_expression()`
+- For each statement, calls `check_statement()`; each expression is visited in
+  one of the two modes described below (`synth_expression` or `check_expression`)
 - Errors are pushed into a `Vec<TypeCheckError>` and all returned at the end
+
+## Bidirectional Checking
+
+Every expression is visited in exactly one of two modes:
+
+| Mode | Signature | Used when |
+|------|-----------|-----------|
+| **Synthesis** | `synth_expression(&mut Expression) -> LangType` | nothing constrains the type: conditions (`if`/`while`/`for`), the callee/index, cast and dereference operands, expression statements |
+| **Checking** | `check_expression(&mut Expression, target: &LangType)` | the context supplies a target: declaration initialisers, assignment RHS, `return` value, function-call arguments, list-initialiser elements |
+
+Checking mode **pushes the target down** into a child whenever the child's type
+*is* the parent's type, and stamps `expr_type` on the way:
+
+| `ExprKind` | check(target) behaviour |
+|------------|-------------------------|
+| `Literal(Integer)` | if `literal_int_fits(n, target)` → stamp `expr_type = target`; else `TypeMismatch` at the literal |
+| `Literal(Float)` | if `literal_float_compatible(target)` → stamp `expr_type = target`; else `TypeMismatch` |
+| `Literal(String)` | type is fixed; assert coercible to `target` |
+| `Binary` (numeric target) | check **both** operands against `target`; stamp result `= target` |
+| `BitwiseNot` | check operand against `target`; stamp result `= target` |
+| `Reference` | check inner against `target` with `pointer_depth - 1` |
+| `ListInitializer` | decay `target` to its element type; check every element against it |
+| `Comparison`, `UnaryNot`, `Cast`, `FunctionCall`, `Variable`, `Alloc`, `Dereference`, `Binary` (pointer target) | synthesise, then assert the result is coercible to `target` |
+
+**Propagation rule of thumb**: propagate the target into a child when the
+operator preserves the type (arithmetic, bitwise-not, reference, list-init
+elements). Do *not* propagate when the operator changes the type (comparison,
+unary-not, cast, function call).
+
+Because literals are stamped at their final width during checking, a constant
+like `u8 x = 1 + 2` arrives at codegen already typed `u8` — codegen emits `i8`
+arithmetic directly instead of computing in `i32` and truncating.
+
+### Narrow-width comparisons
+
+Comparisons run in synthesis mode (their result is always `bool`, never the
+operands' type), so the target-propagation above does not apply. But a single
+local refinement still pays off: when one operand is an integer literal that
+*fits* the other operand's concrete integer type, the literal adopts that type
+(`narrow_literal_to_sibling`). So `u8 i; ... i < 10` compares at `i8` instead of
+zero-extending `i` to `i32` to match the literal's default width. This is safe
+because the literal fits the sibling's exact type, so the boolean result is
+unchanged — only the emitted comparison width differs. It is *not* applied to
+arithmetic operands in synthesis position, where changing the width would change
+the computed value (e.g. an index `arr[i + 1]`).
 
 ## Type Helpers (`types.rs`)
 

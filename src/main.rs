@@ -226,13 +226,13 @@ fn compile_file(
     // Parse
     let mut parser = Parser::new(tokens).with_source_file(path.display().to_string());
     let parse_result = parser.parse_program();
-    let program = parse_result.map_err(|errors| {
+    let mut program = parse_result.map_err(|errors| {
         let msgs: Vec<String> = errors.iter().map(|e| parser.format_error(e)).collect();
         anyhow::anyhow!("{}", msgs.join("\n"))
     })?;
 
     let mut typechecker = TypeChecker::new().with_source_file(path.display().to_string());
-    typechecker.check_program(&program).map_err(|errors| {
+    typechecker.check_program(&mut program).map_err(|errors| {
         let mut err_msg = String::new();
         for error in &errors {
             let _ = writeln!(err_msg, "{}", typechecker.format_error(error));
@@ -320,14 +320,14 @@ fn interpret_file(path: &PathBuf, opt_level: u8, program_args: &[String]) -> Res
     // Parse
     let mut parser = Parser::new(tokens).with_source_file(path.display().to_string());
     let parse_result = parser.parse_program();
-    let program = parse_result.map_err(|errors| {
+    let mut program = parse_result.map_err(|errors| {
         let msgs: Vec<String> = errors.iter().map(|e| parser.format_error(e)).collect();
         anyhow::anyhow!("{}", msgs.join("\n"))
     })?;
 
     // Type check
     let mut typechecker = TypeChecker::new().with_source_file(path.display().to_string());
-    typechecker.check_program(&program).map_err(|errors| {
+    typechecker.check_program(&mut program).map_err(|errors| {
         let mut err_msg = String::new();
         for error in &errors {
             let _ = writeln!(err_msg, "{}", typechecker.format_error(error));

@@ -737,6 +737,24 @@ Consumers: the CLI `interpret` subcommand (`src/main.rs`) and the integration
 test harness (`tests/integration_tests.rs`) both call `jit_execute_main`,
 prepending the source path as `argv[0]` per C convention.
 
+## LLVM Optimization Hints
+
+Codegen attaches a few attributes/metadata that encode TJLB's semantics so the
+optimizer can act on them:
+
+| Hint | Where | Meaning |
+|------|-------|---------|
+| `nsw` on `add`/`sub`/`mul` | `value_emitter.rs` (`emit_int_binary`, signed only) | Signed overflow is **undefined** in TJLB. Unsigned arithmetic stays plain (defined wrapping). |
+| `inbounds` on `getelementptr` | `expressions.rs` (indexing + pointer add/sub) | Pointer arithmetic must stay within the pointed-to allocation; out-of-bounds is UB. |
+| `!range !{i8 0, i8 2}` on `bool` loads | `expressions.rs` (variable load) | A `bool` is stored as i8 but only ever 0 or 1, so the optimizer can fold branches/selects that test it. |
+
+`bool` is dual-represented (Clang-style): its **value** form is `i1` (produced
+directly by `icmp`, `&&`/`||` selects, and `!`), while its **storage** form is
+`i8`. Stores zero-extend i1→i8; conditions read the value via `value_to_bool`,
+which takes the raw i1 with no extra compare. `nounwind` was considered but
+**not** applied — TJLB functions can call externs whose unwinding behaviour we
+don't control.
+
 ## Critical Gotchas
 
 1. **Entry-block alloca hoisting**: All allocas must be in the entry block for `mem2reg`.

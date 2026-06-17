@@ -117,13 +117,28 @@ impl<'ctx> ValueEmitter<'ctx> for RuntimeEmitter<'_, 'ctx> {
         _pos: Position,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         let res = match op {
+            // Signed arithmetic carries `nsw`: signed overflow is undefined in
+            // TJLB, which lets LLVM assume `a + 1 > a` etc. Unsigned arithmetic
+            // is defined to wrap, so it stays plain.
+            BinaryOp::Add if is_signed => self
+                .builder
+                .build_int_nsw_add(lhs, rhs, "add")
+                .map(Into::into)?,
             BinaryOp::Add => self
                 .builder
                 .build_int_add(lhs, rhs, "add")
                 .map(Into::into)?,
+            BinaryOp::Sub if is_signed => self
+                .builder
+                .build_int_nsw_sub(lhs, rhs, "sub")
+                .map(Into::into)?,
             BinaryOp::Sub => self
                 .builder
                 .build_int_sub(lhs, rhs, "sub")
+                .map(Into::into)?,
+            BinaryOp::Mul if is_signed => self
+                .builder
+                .build_int_nsw_mul(lhs, rhs, "mul")
                 .map(Into::into)?,
             BinaryOp::Mul => self
                 .builder
@@ -173,17 +188,11 @@ impl<'ctx> ValueEmitter<'ctx> for RuntimeEmitter<'_, 'ctx> {
                     rhs.get_type().const_zero(),
                     "land_r",
                 )?;
+                // Result is an i1 boolean; callers zero-extend if a wider type
+                // is needed (e.g. storing into an integer variable).
                 let i1_false = self.context.bool_type().const_int(0, false);
-                let result = self
-                    .builder
-                    .build_select(is_zero, i1_false, right_nonzero, "land")?;
                 self.builder
-                    .build_int_z_extend(
-                        result.into_int_value(),
-                        self.context.i32_type(),
-                        "land_ext",
-                    )?
-                    .into()
+                    .build_select(is_zero, i1_false, right_nonzero, "land")?
             }
             BinaryOp::LogicalOr => {
                 let is_nonzero = self.builder.build_int_compare(
@@ -199,16 +208,8 @@ impl<'ctx> ValueEmitter<'ctx> for RuntimeEmitter<'_, 'ctx> {
                     "lor_r",
                 )?;
                 let i1_true = self.context.bool_type().const_int(1, false);
-                let result =
-                    self.builder
-                        .build_select(is_nonzero, i1_true, right_nonzero, "lor")?;
                 self.builder
-                    .build_int_z_extend(
-                        result.into_int_value(),
-                        self.context.i32_type(),
-                        "lor_ext",
-                    )?
-                    .into()
+                    .build_select(is_nonzero, i1_true, right_nonzero, "lor")?
             }
         };
         Ok(res)

@@ -19,6 +19,8 @@ pub enum Keyword {
     Continue,
     As,
     Return,
+    True,
+    False,
 }
 
 impl fmt::Display for Keyword {
@@ -39,6 +41,8 @@ impl fmt::Display for Keyword {
             Keyword::Continue => "continue",
             Keyword::As => "as",
             Keyword::Return => "return",
+            Keyword::True => "true",
+            Keyword::False => "false",
         };
         write!(f, "{s}")
     }
@@ -63,6 +67,8 @@ impl Keyword {
             "continue" => Some(Keyword::Continue),
             "as" => Some(Keyword::As),
             "return" => Some(Keyword::Return),
+            "true" => Some(Keyword::True),
+            "false" => Some(Keyword::False),
             _ => None,
         }
     }
@@ -146,6 +152,7 @@ pub enum TypeBase {
     UInt,   // Unsigned integer
     SFloat, // Floating point
     Void,   // Void type (u0)
+    Bool,   // Boolean (i1 value, i8 storage with !range 0..1)
 }
 
 /// Complete language type with size and modifiers
@@ -175,6 +182,11 @@ impl LangType {
     pub fn langtype_from_str(s: &str) -> Option<Self> {
         if s.len() < 2 {
             return None;
+        }
+
+        // `bool`: i1 logical value, stored as i8 (size_bits is the storage width).
+        if s == "bool" {
+            return Some(LangType::new(TypeBase::Bool, 8, 0, false));
         }
 
         let base = match s.chars().next()? {
@@ -249,12 +261,22 @@ impl LangType {
 impl fmt::Display for LangType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let const_str = if self.is_const { "const " } else { "" };
+        let asterisks = "*".repeat(self.pointer_depth as usize);
+
+        // `bool` is spelled by name rather than as a `<prefix><width>` type.
+        if self.base == TypeBase::Bool {
+            return match self.array_size {
+                Some(size) => write!(f, "{const_str}bool[{size}]{asterisks}"),
+                None => write!(f, "{const_str}bool{asterisks}"),
+            };
+        }
+
         let base_str = match self.base {
             TypeBase::SInt => "i",
             TypeBase::UInt | TypeBase::Void => "u",
             TypeBase::SFloat => "f",
+            TypeBase::Bool => unreachable!("handled above"),
         };
-        let asterisks = "*".repeat(self.pointer_depth as usize);
 
         // Handle array types
         if let Some(size) = self.array_size {
