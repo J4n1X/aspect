@@ -1,6 +1,8 @@
 # Type-Struct System — Implementation Plan
 
-Status: **in progress**. Supersedes the discussion sketch in `Struct-Concept.md`.
+Status: **in progress** — M0 (foundation + unification), M1 (aliases), M2 (POD structs), and
+M2b (struct by-value ABI) complete and verified. Next: M3 (methods + `this`), then M4
+(encapsulation + `const fn`). Supersedes the discussion sketch in `Struct-Concept.md`.
 
 This plan implements *aliases* and *type-structs* ("type-structs" is the internal/diagnostic
 name; the surface keyword is `type`). It is grounded in a line-level survey of the five
@@ -277,7 +279,8 @@ and guard struct types out of `emit_cast` paths.
 
 ## 5. Milestones (each compiles + tests green before the next)
 
-- **M0 — Foundation + symbol-table unification.** `TypeBase::Struct(u32)` + `Display` arm; the
+- **M0 — Foundation + symbol-table unification. ✅ DONE (IR byte-identical, all tests green).**
+  `TypeBase::Struct(u32)` + `Display` arm; the
   unified `ModuleSymbols` table (`src/symbol/module.rs`, owns functions + struct registry + aliases)
   + `symbol/mod.rs` wiring; `symbols` field on `Program` + the one literal; move function registration
   out of the parser's `SymbolTable` (now variables-only) into `self.module`; **delete the
@@ -286,12 +289,29 @@ and guard struct types out of `emit_cast` paths.
   divergent copy); numeric-helper guards for `TypeBase::Struct`. Codegen's function path is unchanged
   (its `function_lang_params` is a borrow-local index, see §1). No struct/alias syntax yet — the
   table holds only functions, so all existing IR/tests stay byte-identical.
-- **M1 — Aliases.** `Keyword::Alias`; prescan; `parse_type` identifier resolution; `parse_type_alias`;
-  alias table. Test `alias`/use of an alias to a primitive. (Introduces the `parse_type` extension
-  that structs also need.)
-- **M2 — POD structs.** `type Name { [public] T field }`; `FieldAccess`/`StructLiteral`/`FieldAssign`;
-  registration pass, `lang_type_to_llvm`, `emit_address`, sret/byval, var-decl struct branch.
-  Tests: construct, read, mutate, pass-by-pointer, return-by-value (sret).
+- **M1 — Aliases. ✅ DONE (corpus IR byte-identical; `tests/programs/aliases.tjlb` +
+  `failures/parser_undefined_type.tjlb`).** `Keyword::Alias`; name-collection prescan; `parse_type`
+  identifier resolution + `apply_type_modifiers` (pointer `*` on named types); `parse_type_alias`;
+  alias table; statement dispatcher recognizes named-type locals (`Parser::starts_named_var_decl`);
+  global vars of named type; top-level `alias` branch + `synchronize` resync. Introduced the
+  `parse_type` identifier resolution that structs also need.
+- **M2 — POD structs (pointer-based). ✅ DONE (corpus IR byte-identical; `tests/programs/structs.tjlb`,
+  `struct_copy.tjlb` + 3 failure tests + 3 checker unit tests).** `type Name { [public] T field }`;
+  `ExprKind::FieldAccess`/`StructLiteral`, `StatementKind::FieldAssign`; `Keyword::Public`; the
+  `Dot` postfix + struct-literal detection in `parse_primary`; `src/codegen/structs.rs` with the
+  registration pass (`opaque_struct_type` + `set_body`), `lang_type_to_llvm`, `struct_field`, and
+  the `emit_address` lvalue keystone (Variable / Dereference / FieldAccess, with auto-deref of
+  single-level pointer-to-struct); struct branch in `generate_var_decl`; `&s.field`; struct values
+  as first-class aggregates (insertvalue literals, load/store copy). Field access works on struct
+  values **and** pointer-to-struct, so structs pass to functions by pointer (`fn f(Point* p)`).
+- **M2b — Struct by-value ABI (sret/byval). ✅ DONE (corpus IR byte-identical;
+  `tests/programs/struct_byvalue.tjlb`, `struct_rvalue_field.tjlb`).** Struct *value* returns lower
+  to a hidden `sret(%S)` out-pointer (callee stores through it, returns void; caller allocas a slot,
+  passes it, loads the result); struct *value* params lower to `byval(%S)` (caller spills the value
+  to a temp and passes its address; callee uses the incoming pointer as the variable's storage).
+  Added `function_return_types` + `current_sret` to `CodeGenerator`, a unified `build_abi_call`, and
+  rvalue-struct field access (materialise to a temp slot). Per-target by-value *across the C/extern
+  boundary* (System V/Win64 register classification) remains the separate future TODO.
 - **M3 — Methods + `this`.** static vs instance (presence of `this`), mangling to free functions,
   `obj.m()`/`Type.m()` desugaring, autoref on value receivers, method registry + checking.
 - **M4 — Encapsulation + `const fn`.** enforce `public` access control across the boundary; `const

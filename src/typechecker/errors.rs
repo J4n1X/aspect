@@ -91,6 +91,23 @@ pub enum TypeCheckError {
         found: usize,
         position: Position,
     },
+
+    #[error("Type '{found}' is not a type-struct and has no fields at {position}")]
+    NotAStruct { found: LangType, position: Position },
+
+    #[error("Type-struct '{type_name}' has no field '{field}' at {position}")]
+    UnknownField {
+        field: String,
+        type_name: String,
+        position: Position,
+    },
+
+    #[error("Struct literal for '{type_name}' is missing field(s): {missing} at {position}")]
+    MissingStructFields {
+        type_name: String,
+        missing: String,
+        position: Position,
+    },
 }
 
 impl TypeCheckError {
@@ -107,7 +124,10 @@ impl TypeCheckError {
             | Self::AssignmentTypeMismatch { position, .. }
             | Self::InvalidCast { position, .. }
             | Self::AssignmentToConst { position, .. }
-            | Self::ListInitLengthMismatch { position, .. } => Some(*position),
+            | Self::ListInitLengthMismatch { position, .. }
+            | Self::NotAStruct { position, .. }
+            | Self::UnknownField { position, .. }
+            | Self::MissingStructFields { position, .. } => Some(*position),
             Self::UndefinedVariable(_, pos)
             | Self::UndefinedFunction(_, pos)
             | Self::InvalidDereference(_, pos)

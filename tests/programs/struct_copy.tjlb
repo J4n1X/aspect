@@ -1,0 +1,13 @@
+# expected: 7
+# A struct value copies by value (load + store of the whole aggregate).
+type Pair {
+    public i32 a
+    public i32 b
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Pair p = Pair { a = 3, b = 4 }
+    Pair q = p               # whole-struct copy
+    p.a = 100                # mutating the original must not affect the copy
+    return q.a + q.b         # 3 + 4 = 7
+}

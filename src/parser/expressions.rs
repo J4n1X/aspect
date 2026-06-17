@@ -188,6 +188,8 @@ impl Parser {
                 TokenKind::CloseBrace => return,
                 TokenKind::Keyword(
                     Keyword::Fn
+                    | Keyword::Type
+                    | Keyword::Alias
                     | Keyword::If
                     | Keyword::While
                     | Keyword::For
@@ -528,6 +530,10 @@ impl Parser {
                     self.advance();
                     self.parse_array_access(&expr)?
                 }
+                TokenKind::Dot => {
+                    self.advance();
+                    self.parse_field_access(expr)?
+                }
                 _ => break,
             };
         }
@@ -642,6 +648,13 @@ impl Parser {
             TokenKind::Identifier(name) => {
                 let name = name.clone();
                 self.advance();
+                // `KnownType { ... }` is a struct literal; otherwise a variable
+                // reference. A bare `{` elsewhere always stays a block.
+                if let Some(id) = self.module.struct_id(&name)
+                    && self.check(&TokenKind::OpenBrace)
+                {
+                    return self.parse_struct_literal(id, pos);
+                }
                 Ok(self.variable_reference(name, pos))
             }
             // Boolean literals
@@ -712,17 +725,83 @@ impl Parser {
 
     /// Parse a type (including array types like u32[4])
     pub(crate) fn parse_type(&mut self) -> Result<LangType, ParserError> {
+        let pos = self.peek().pos;
         let kind = self.peek().kind.clone();
         match kind {
             TokenKind::LangType(lang_type) => {
                 self.advance();
                 Ok(lang_type)
             }
+            // Named types: aliases and type-structs. The lexer leaves these as
+            // bare identifiers (it cannot know the declared type names), so we
+            // resolve them against the module table and attach any `*` pointer
+            // modifiers here (built-in types arrive pre-folded from the lexer).
+            TokenKind::Identifier(name) => {
+                self.advance();
+                let base = if let Some(ty) = self.module.resolve_alias(&name) {
+                    ty
+                } else if let Some(id) = self.module.struct_id(&name) {
+                    LangType::new(TypeBase::Struct(id), 0, 0, false)
+                } else {
+                    return Err(ParserError::UndefinedType(name, pos));
+                };
+                Ok(self.apply_type_modifiers(base))
+            }
             _ => Err(ParserError::ExpectedToken(
                 "type".to_string(),
                 format!("{}", self.peek().kind),
                 self.peek().pos,
             )),
+        }
+    }
+
+    /// Consume trailing pointer (`*`) modifiers on a named type and apply them.
+    ///
+    /// Built-in types arrive from the lexer with `*`/`[N]` already folded in;
+    /// named types (aliases / type-structs) lex as a bare identifier, so the
+    /// parser attaches pointer modifiers here. Stacks on top of any pointer
+    /// depth the resolved type already carries (e.g. `alias P u8*` then `P*`
+    /// yields `pointer_depth == 2`).
+    fn apply_type_modifiers(&mut self, ty: LangType) -> LangType {
+        let mut depth = ty.pointer_depth;
+        while self.check(&TokenKind::Asterisk) {
+            self.advance();
+            depth += 1;
+        }
+        ty.with_pointer_depth(depth)
+    }
+
+    /// True when the upcoming tokens begin a *named-type* local declaration:
+    /// `<TypeName> [*...] <ident>` where `<TypeName>` is a known alias or
+    /// type-struct. Used by the statement dispatcher to tell declarations apart
+    /// from assignments / expression statements that merely start with an
+    /// identifier. Type names are never values, so `Type *x` is unambiguously a
+    /// pointer declaration (not a multiplication).
+    pub(crate) fn starts_named_var_decl(&self) -> bool {
+        let TokenKind::Identifier(name) = &self.peek().kind else {
+            return false;
+        };
+        let known =
+            self.module.resolve_alias(name).is_some() || self.module.struct_id(name).is_some();
+        if known {
+            // Known type: skip pointer modifiers, then require the variable name.
+            let mut i = self.current + 1;
+            while matches!(self.tokens.get(i).map(|t| &t.kind), Some(TokenKind::Asterisk)) {
+                i += 1;
+            }
+            matches!(
+                self.tokens.get(i).map(|t| &t.kind),
+                Some(TokenKind::Identifier(_))
+            )
+        } else {
+            // An unknown identifier directly followed by another identifier is
+            // only ever a declaration with an undeclared/misspelled type — route
+            // it so `parse_type` reports a precise "undefined type". (`a * b` is
+            // a multiplication, not a decl, thanks to the operator between them.)
+            matches!(
+                self.tokens.get(self.current + 1).map(|t| &t.kind),
+                Some(TokenKind::Identifier(_))
+            )
         }
     }
 
@@ -793,6 +872,11 @@ impl Parser {
         let mut functions = Vec::new();
         let mut global_vars = Vec::new();
 
+        // Pre-register all type-struct names so they resolve regardless of
+        // declaration order (self/mutual reference). Aliases resolve at their
+        // definition site (define-before-use).
+        self.prescan_type_names();
+
         skip_nl!();
 
         while !self.is_at_end() {
@@ -801,7 +885,28 @@ impl Parser {
             if self.check_keyword(&Keyword::Fn) {
                 let func = self.parse_function(is_extern)?;
                 functions.push(func);
-            } else if matches!(self.peek().kind, TokenKind::LangType(_)) {
+            } else if self.check_keyword(&Keyword::Alias) {
+                if is_extern {
+                    return Err(ParserError::UnexpectedToken(
+                        "extern can only be used with functions".to_string(),
+                        self.peek().pos,
+                    ));
+                }
+                self.parse_type_alias()?;
+            } else if self.check_keyword(&Keyword::Type) {
+                if is_extern {
+                    return Err(ParserError::UnexpectedToken(
+                        "extern can only be used with functions".to_string(),
+                        self.peek().pos,
+                    ));
+                }
+                self.parse_struct_def()?;
+            } else if matches!(
+                self.peek().kind,
+                TokenKind::LangType(_) | TokenKind::Identifier(_)
+            ) {
+                // A leading built-in type or a named type (alias / type-struct)
+                // begins a global variable declaration.
                 if is_extern {
                     return Err(ParserError::UnexpectedToken(
                         "extern can only be used with functions".to_string(),
@@ -826,6 +931,166 @@ impl Parser {
             string_literals: self.string_literals.iter().cloned().collect(),
             symbols: std::mem::take(&mut self.module),
         })
+    }
+
+    /// Pre-register every `type <Name>` struct name with a reserved id before
+    /// the main parse, so named types resolve regardless of declaration order
+    /// (and self/mutually-referential structs work). Does not consume tokens.
+    fn prescan_type_names(&mut self) {
+        let names: Vec<String> = self
+            .tokens
+            .windows(2)
+            .filter_map(|w| match (&w[0].kind, &w[1].kind) {
+                (TokenKind::Keyword(Keyword::Type), TokenKind::Identifier(name)) => {
+                    Some(name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        for name in names {
+            self.module.intern_struct(&name);
+        }
+    }
+
+    /// Parse a top-level type alias: `alias NewName TargetType`.
+    ///
+    /// Aliases are pure compile-time name bindings — they produce no AST node,
+    /// only an entry in the module symbol table consulted by `parse_type`.
+    #[parse_rule]
+    fn parse_type_alias(&mut self) -> Result<(), ParserError> {
+        let pos = pos!();
+        kw!(Alias);
+        let name = ident!();
+        if self.module.resolve_alias(&name).is_some() || self.module.struct_id(&name).is_some() {
+            return Err(ParserError::DuplicateType(name, pos));
+        }
+        let target = self.parse_type()?;
+        self.module.define_alias(name, target);
+        term!();
+        Ok(())
+    }
+
+    /// Parse a top-level type-struct definition:
+    /// `type Name { [public] Type field <term> ... }`.
+    ///
+    /// The struct's id was reserved during the name-collection prescan; this
+    /// fills in its fields. Fields are private by default; `public` exposes one.
+    #[parse_rule]
+    fn parse_struct_def(&mut self) -> Result<(), ParserError> {
+        use crate::symbol::module::{FieldInfo, Visibility};
+
+        let pos = pos!();
+        kw!(Type);
+        let name = ident!();
+        let id = self
+            .module
+            .struct_id(&name)
+            .expect("type-struct name reserved during prescan");
+
+        // A non-empty field set means this name was already defined.
+        if !self.module.struct_info(id).fields.is_empty() {
+            return Err(ParserError::DuplicateType(name, pos));
+        }
+
+        token!(OpenBrace);
+        let mut fields = Vec::new();
+        loop {
+            skip_nl!();
+            if self.check(&TokenKind::CloseBrace) || self.is_at_end() {
+                break;
+            }
+            let vis = if kw_if!(Public) {
+                Visibility::Public
+            } else {
+                Visibility::Private
+            };
+            let field_type = lang_type!();
+            let field_name = ident!();
+            fields.push(FieldInfo {
+                name: field_name,
+                ty: field_type,
+                vis,
+            });
+            // Optional terminator between fields.
+            self.match_token(&[TokenKind::Semicolon, TokenKind::Newline]);
+        }
+        token!(CloseBrace);
+
+        self.module.set_fields(id, fields);
+        Ok(())
+    }
+
+    /// Parse a field access `.field` after a base expression (the `.` was
+    /// already consumed). Stamps a best-effort field type; the type checker
+    /// re-stamps authoritatively (the struct may be defined after this use).
+    fn parse_field_access(&mut self, base: Expression) -> Result<Expression, ParserError> {
+        let pos = base.pos;
+        let field_name = match &self.peek().kind {
+            TokenKind::Identifier(n) => {
+                let n = n.clone();
+                self.advance();
+                n
+            }
+            _ => {
+                return Err(ParserError::ExpectedToken(
+                    "field name".to_string(),
+                    format!("{}", self.peek().kind),
+                    self.peek().pos,
+                ));
+            }
+        };
+
+        let field_type = match base.expr_type.base {
+            TypeBase::Struct(id) => self
+                .module
+                .field(id, &field_name)
+                .map_or_else(|| LangType::new(TypeBase::Void, 0, 0, false), |(_, f)| f.ty),
+            _ => LangType::new(TypeBase::Void, 0, 0, false),
+        };
+
+        Ok(Expression::new(
+            ExprKind::FieldAccess {
+                base: Box::new(base),
+                field: field_name,
+            },
+            field_type,
+            pos,
+        ))
+    }
+
+    /// Parse a struct literal body after the type name: `{ field = expr, ... }`.
+    /// The opening brace has not yet been consumed.
+    #[parse_rule]
+    fn parse_struct_literal(
+        &mut self,
+        struct_id: u32,
+        pos: Position,
+    ) -> Result<Expression, ParserError> {
+        token!(OpenBrace);
+        let mut fields = Vec::new();
+        loop {
+            skip_nl!();
+            if self.check(&TokenKind::CloseBrace) || self.is_at_end() {
+                break;
+            }
+            let field_name = ident!();
+            self.expect(&TokenKind::Assign, "=")?;
+            let value = self.parse_expression()?;
+            fields.push((field_name, value));
+            skip_nl!();
+            if !self.match_token(&[TokenKind::Comma]) {
+                break;
+            }
+        }
+        skip_nl!();
+        token!(CloseBrace);
+
+        let expr_type = LangType::new(TypeBase::Struct(struct_id), 0, 0, false);
+        Ok(Expression::new(
+            ExprKind::StructLiteral { struct_id, fields },
+            expr_type,
+            pos,
+        ))
     }
 
     /// Parse a function definition

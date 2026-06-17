@@ -91,7 +91,7 @@ digit      ::= [0-9]
 Reserved keywords (not usable as identifiers):
 
 ```
-fn  extern  const  type  struct
+fn  extern  const  type  struct  alias  public
 while  if  else  elif  for  switch
 break  continue  as  return
 true  false
@@ -223,18 +223,25 @@ program ::= (newline* top-decl newline*)*
 top-decl ::= extern-fn-decl
            | fn-decl
            | global-var-decl
+           | alias-decl
+           | struct-decl
 
 extern-fn-decl ::= 'extern' 'fn' ident '(' param-list ')' return-ann term
 
 fn-decl ::= 'fn' ident '(' param-list ')' return-ann? newline* block
 
-global-var-decl ::= type-token ident ('=' expr)? term
+global-var-decl ::= type ident ('=' expr)? term
+
+alias-decl ::= 'alias' ident type term    # compile-time typedef
+
+struct-decl ::= 'type' ident '{' newline* (struct-field (term newline*)?)* '}'
+struct-field ::= 'public'? type ident    # fields are private unless `public`
 
 param-list ::= /* empty */
              | param (',' param)*
-param      ::= type-token ident
+param      ::= type ident
 
-return-ann ::= '->' type-token
+return-ann ::= '->' type
 
 term       ::= ';' | '\n'       # statement terminator
 ```
@@ -242,11 +249,39 @@ term       ::= ';' | '\n'       # statement terminator
 ### Types
 
 ```
-type  ::= type-token   # (scanned as a single lexer token — see above)
+type  ::= type-token                 # built-in: scanned as one lexer token (see above)
+        | ident ('*')*               # named type: an alias or type-struct, with
+                                     # parser-applied pointer modifiers
 ```
 
-Type tokens carry base type, optional `const`, optional array size, and
-pointer depth, all determined at lex time.
+Built-in type tokens carry base type, optional `const`, optional array size, and
+pointer depth, all determined at lex time. A **named type** is an identifier that
+resolves to a declared `alias` or `type` (type-struct); the lexer leaves it as a
+bare identifier and the parser resolves it against the module symbol table,
+attaching any trailing `*` pointer modifiers. An identifier that resolves to no
+declared type is an "undefined type" error.
+
+An `alias` is fully transparent: `alias myint i32` makes `myint` an exact stand-in
+for `i32` everywhere (variables, parameters, return types), with no distinct type
+identity in the type checker or generated IR. Aliases must be declared before use.
+
+A **type-struct** (`type Name { ... }`) is a named aggregate. Fields are **private
+by default**; prefix a field with `public` to expose it. Type-struct names may be
+referenced before their definition (a name-collection prescan reserves them), so
+self- and mutually-referential structs work (via pointer fields). Construct a value
+with a **named struct literal** `Name { field = expr, ... }`, which must name *every*
+field (no partial init / defaulting). Read or write a field with `base.field`; the
+base may be a struct value or a single-level pointer-to-struct (which auto-derefs).
+Structs may be passed by pointer (`fn f(Point* p)`) **or by value** (`fn f(Point p)`):
+by-value parameters use `byval` and by-value returns use a hidden `sret` out-pointer.
+(By-value structs across the `extern`/C boundary await per-target ABI work; tjlb-to-tjlb
+calls work today.)
+
+```
+struct-literal ::= ident '{' newline* (field-init (',' newline*)?)* '}'   # `ident` must name a type-struct
+field-init     ::= ident '=' expr
+field-access   ::= postfix '.' ident                                      # read; also a valid assignment target
+```
 
 ### Statements
 

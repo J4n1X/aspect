@@ -1,0 +1,21 @@
+# expected: 42
+# Type aliases (`alias New Target`): compile-time typedefs, fully transparent
+# to the type system. Aliases may target primitives or pointer types, and are
+# usable for variables, parameters, and return types.
+alias myint i32
+alias byte u8
+alias intptr i32*
+
+fn triple(myint n) -> myint {
+    return n * 3
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    myint x = 12
+    byte b = 6
+    intptr p = &x              # alias to a pointer type
+    myint via_ptr = *p         # 12
+    myint t = triple(via_ptr)  # 36
+    i32 r = t + b              # 36 + 6 = 42
+    return r
+}

@@ -1,0 +1,11 @@
+# expected: "no field", "z"
+# Accessing a field that the type-struct does not declare is a type error.
+type Point {
+    public i32 x
+    public i32 y
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Point p = Point { x = 1, y = 2 }
+    return p.z
+}

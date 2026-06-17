@@ -1,0 +1,20 @@
+# expected: 42
+# Struct by-value across function boundaries: `make` returns a Point by value
+# (sret), `sum` takes one by value (byval).
+type Point {
+    public i32 x
+    public i32 y
+}
+
+fn make(i32 a, i32 b) -> Point {
+    return Point { x = a, y = b }     # value return via sret
+}
+
+fn sum(Point p) -> i32 {              # value param via byval
+    return p.x + p.y
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Point p = make(30, 12)            # consume an sret return
+    return sum(p)                     # pass by value: 30 + 12 = 42
+}

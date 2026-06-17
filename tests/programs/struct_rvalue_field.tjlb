@@ -1,0 +1,15 @@
+# expected: 30
+# Field access on an rvalue struct (a function-return temporary) — the value is
+# materialised into a temporary slot so its field can be read.
+type Point {
+    public i32 x
+    public i32 y
+}
+
+fn make(i32 a, i32 b) -> Point {
+    return Point { x = a, y = b }
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return make(30, 12).x
+}

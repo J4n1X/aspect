@@ -1,0 +1,19 @@
+# expected: 42
+# POD type-structs: definition, named literals, field read/write on a value
+# and through a pointer (auto-deref), and passing a struct by pointer.
+type Point {
+    public i32 x
+    public i32 y
+}
+
+fn sum_point(Point* p) -> i32 {
+    return p.x + p.y         # field read through a pointer (auto-deref)
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Point p = Point { x = 20, y = 5 }
+    p.y = 12                 # field write on a struct value
+    Point* pp = &p
+    pp.x = 30                # field write through a pointer (auto-deref)
+    return sum_point(&p)     # 30 + 12 = 42
+}

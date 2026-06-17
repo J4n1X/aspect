@@ -1,0 +1,11 @@
+# expected: "missing field", "y"
+# A struct literal must name every field — no partial init / defaulting.
+type Point {
+    public i32 x
+    public i32 y
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Point p = Point { x = 1 }
+    return p.x
+}

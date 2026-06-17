@@ -25,6 +25,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             StatementKind::DerefAssign { target, value } => {
                 self.generate_deref_assign(target, value)
             }
+            StatementKind::FieldAssign { target, value } => {
+                self.generate_field_assign(target, value)
+            }
             StatementKind::Return(expr) => self.generate_return(expr.as_ref()),
             StatementKind::If {
                 condition,
@@ -89,7 +92,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let llvm_type = if var_type.is_array() {
             var_type.to_llvm_array(self.context)?.into()
         } else {
-            var_type.to_llvm(self.context)?
+            // `lang_type_to_llvm` resolves type-struct values through the cache;
+            // it falls back to `to_llvm` for scalars/pointers.
+            self.lang_type_to_llvm(var_type)?
         };
 
         // Allocate in the entry block for mem2reg compatibility
@@ -208,10 +213,38 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// Assign to a struct field: `base.field = value`.
+    pub(crate) fn generate_field_assign(
+        &mut self,
+        target: &Expression,
+        value: &Expression,
+    ) -> Result<(), CodegenError> {
+        let (field_ptr, field_ty) = self.emit_address(target)?;
+        let value_llvm = self.generate_coerced_value(value, Some(&field_ty))?;
+        self.builder.build_store(field_ptr, value_llvm)?;
+        Ok(())
+    }
+
     pub(crate) fn generate_return(
         &mut self,
         expr: Option<&Expression>,
     ) -> Result<(), CodegenError> {
+        // Struct-by-value return: store through the hidden sret out-pointer and
+        // return void.
+        if let Some(sret_ptr) = self.current_sret {
+            let expr = expr.ok_or_else(|| {
+                CodegenError::InvalidOperation(
+                    "struct-returning function must return a value".to_string(),
+                    crate::lexer::Position::new(0, 0),
+                )
+            })?;
+            let ret_type = self.current_function_return_type;
+            let value = self.generate_coerced_value(expr, ret_type.as_ref())?;
+            self.builder.build_store(sret_ptr, value)?;
+            self.builder.build_return(None)?;
+            return Ok(());
+        }
+
         if let Some(expr) = expr {
             let ret_type = self.current_function_return_type;
             let value = self.generate_coerced_value(expr, ret_type.as_ref())?;

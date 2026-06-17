@@ -78,6 +78,18 @@ pub enum ExprKind {
         count: Box<Expression>,
     },
     ListInitializer(Vec<Expression>),
+    /// Field access `base.field`. `base` is a type-struct value or a
+    /// (single-level) pointer-to-struct, which auto-dereferences.
+    FieldAccess {
+        base: Box<Expression>,
+        field: String,
+    },
+    /// Named struct literal `Name { field = expr, ... }`. The struct is
+    /// identified by its interned id; `fields` are in source order.
+    StructLiteral {
+        struct_id: u32,
+        fields: Vec<(String, Expression)>,
+    },
 }
 
 /// Expression with type information
@@ -131,6 +143,10 @@ pub enum StatementKind {
     },
     DerefAssign {
         target: Expression, // Must be a dereference expression
+        value: Expression,
+    },
+    FieldAssign {
+        target: Expression, // Must be a field-access expression
         value: Expression,
     },
     Break,

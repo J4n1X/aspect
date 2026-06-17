@@ -367,6 +367,16 @@ pub(crate) fn walk_expression<'ctx>(
                 }
             },
             ExprKind::Dereference(inner2) => walk_expression(inner2, cg, mode),
+            ExprKind::FieldAccess { .. } => {
+                if mode == EmitMode::Constant {
+                    return Err(CodegenError::InvalidOperation(
+                        "address-of field not supported in constant expressions".to_string(),
+                        inner.pos,
+                    ));
+                }
+                let (ptr, _) = cg.emit_address(inner)?;
+                Ok(ptr.into())
+            }
             _ => Err(CodegenError::InvalidOperation(
                 "Cannot take address of non-lvalue".to_string(),
                 inner.pos,
@@ -496,6 +506,61 @@ pub(crate) fn walk_expression<'ctx>(
             "list initializer is only valid in a variable declaration".to_string(),
             expr.pos,
         )),
+
+        // ── Field access `base.field` (runtime only) ──────────────────────
+        ExprKind::FieldAccess { .. } => {
+            if mode == EmitMode::Constant {
+                return Err(CodegenError::InvalidOperation(
+                    "field access not supported in constant expressions".to_string(),
+                    expr.pos,
+                ));
+            }
+            let (field_ptr, field_ty) = cg.emit_address(expr)?;
+            // Arrays decay to a pointer (matching the variable-load rule);
+            // scalars and nested struct values are loaded.
+            if field_ty.is_array() {
+                return Ok(field_ptr.into());
+            }
+            let field_llvm = cg.lang_type_to_llvm(&field_ty)?;
+            Ok(cg.builder.build_load(field_llvm, field_ptr, "field")?)
+        }
+
+        // ── Struct literal `Name { f = v, ... }` (runtime only) ───────────
+        ExprKind::StructLiteral { struct_id, fields } => {
+            if mode == EmitMode::Constant {
+                return Err(CodegenError::InvalidOperation(
+                    "struct literal not supported in constant expressions".to_string(),
+                    expr.pos,
+                ));
+            }
+            let struct_ty = *cg.struct_types.get(struct_id).ok_or_else(|| {
+                CodegenError::TypeError(
+                    format!("unregistered type-struct id {struct_id}"),
+                    expr.pos,
+                )
+            })?;
+            // Build the aggregate value field-by-field via insertvalue.
+            let mut agg = struct_ty.get_undef();
+            for (fname, fexpr) in fields {
+                let (idx, field_ty) = cg.struct_field(*struct_id, fname).ok_or_else(|| {
+                    CodegenError::TypeError(
+                        format!("unknown field '{fname}' on type-struct id {struct_id}"),
+                        expr.pos,
+                    )
+                })?;
+                let fval = cg.generate_coerced_value(fexpr, Some(&field_ty))?;
+                agg = cg
+                    .builder
+                    .build_insert_value(
+                        agg,
+                        fval,
+                        u32::try_from(idx).expect("field index out of range"),
+                        "structlit",
+                    )?
+                    .into_struct_value();
+            }
+            Ok(agg.into())
+        }
     }
 }
 
@@ -531,10 +596,12 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let val = self.generate_expression(expr)?;
 
-        // Auto-widen to target if types differ.
+        // Auto-widen to target if types differ. Struct values are aggregates —
+        // they are never scalar-cast; the value is stored/copied as-is.
         if let Some(target_ty) = target
             && target_ty.pointer_depth == 0
             && !target_ty.is_array()
+            && !matches!(target_ty.base, TypeBase::Struct(_))
         {
             let target_llvm = target_ty.to_llvm(self.context)?;
             if val.get_type() != target_llvm {

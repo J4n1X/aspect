@@ -1,10 +1,23 @@
-use inkwell::types::BasicType;
+use inkwell::attributes::{Attribute, AttributeLoc};
+use inkwell::types::{AnyType, BasicMetadataTypeEnum, BasicType};
 use inkwell::values::{BasicValueEnum, FunctionValue};
+use inkwell::AddressSpace;
 
 use crate::codegen::generator::CodeGenerator;
+use crate::codegen::structs::is_struct_value;
 use crate::codegen::{CodegenError, LangTypeExt};
-use crate::lexer::Position;
+use crate::lexer::{Position, TypeBase};
 use crate::parser::{Expression, Function, LangType};
+
+/// Prepared LLVM call arguments plus the optional `sret` result slot
+/// (its pointer and struct type) that the caller must load after the call.
+type PreparedCallArgs<'ctx> = (
+    Vec<inkwell::values::BasicMetadataValueEnum<'ctx>>,
+    Option<(
+        inkwell::values::PointerValue<'ctx>,
+        inkwell::types::BasicTypeEnum<'ctx>,
+    )>,
+);
 
 /// RAII guard that sets `current_function` / `current_function_return_type`
 /// on creation and clears them on drop.
@@ -32,24 +45,61 @@ impl Drop for FunctionScope<'_, '_> {
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
-    fn generate_call_args(
+    /// Build the LLVM argument list for a call, applying the struct ABI:
+    /// a hidden `sret` slot pointer is prepended for struct-returning callees,
+    /// and struct *value* arguments are spilled to a temp and passed by pointer
+    /// (`byval`). Returns the prepared args plus the sret slot (if any).
+    fn build_call_args(
         &mut self,
         name: &str,
         args: &[Expression],
-    ) -> Result<Vec<inkwell::values::BasicMetadataValueEnum<'ctx>>, CodegenError> {
+    ) -> Result<PreparedCallArgs<'ctx>, CodegenError> {
         let param_types = self
             .function_lang_params
             .get(name)
             .cloned()
             .unwrap_or_default();
+        let ret_ty = self.function_return_types.get(name).copied();
 
-        let mut arg_values = Vec::with_capacity(args.len());
+        let mut arg_values = Vec::with_capacity(args.len() + 1);
+
+        // sret: caller allocates the result slot and passes it as arg 0.
+        let sret_slot = if let Some(rt) = ret_ty.filter(is_struct_value) {
+            let struct_ty = self.lang_type_to_llvm(&rt)?;
+            let slot = self.builder.build_alloca(struct_ty, "sret.tmp")?;
+            arg_values.push(slot.into());
+            Some((slot, struct_ty))
+        } else {
+            None
+        };
+
         for (i, arg) in args.iter().enumerate() {
             let target_ty = param_types.get(i);
-            let val = self.generate_coerced_value(arg, target_ty)?;
-            arg_values.push(val.into());
+            if let Some(t) = target_ty.filter(|t| is_struct_value(t)) {
+                // byval: materialise the value into a temp and pass its address.
+                let val = self.generate_coerced_value(arg, Some(t))?;
+                let struct_ty = self.lang_type_to_llvm(t)?;
+                let tmp = self.builder.build_alloca(struct_ty, "byval.tmp")?;
+                self.builder.build_store(tmp, val)?;
+                arg_values.push(tmp.into());
+            } else {
+                let val = self.generate_coerced_value(arg, target_ty)?;
+                arg_values.push(val.into());
+            }
         }
-        Ok(arg_values)
+        Ok((arg_values, sret_slot))
+    }
+
+    /// `sret(%Struct)` / `byval(%Struct)` type attribute for a struct value type.
+    fn struct_abi_attribute(&self, kind: &str, ty: &LangType) -> Attribute {
+        let TypeBase::Struct(id) = ty.base else {
+            unreachable!("struct_abi_attribute called on non-struct type");
+        };
+        let struct_ty = self.struct_types[&id];
+        self.context.create_type_attribute(
+            Attribute::get_named_enum_kind_id(kind),
+            struct_ty.as_any_type_enum(),
+        )
     }
 
     /// Declare a function (without body)
@@ -60,45 +110,55 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Collect parameter LangTypes for call-site coercion
         let param_lang_types: Vec<LangType> = func.proto.params.iter().map(|(ty, _)| *ty).collect();
 
-        // Convert parameter types to LLVM
-        let param_types: Result<Vec<_>, _> = func
-            .proto
-            .params
-            .iter()
-            .map(|(ty, _)| ty.to_llvm(self.context))
-            .collect();
-        let param_types = param_types?;
+        let ret_ty = func.proto.return_type;
+        let ret_is_struct = is_struct_value(&ret_ty);
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
 
-        // Convert return type
-        let return_type = if func.proto.return_type.is_void() {
-            None
+        // Build the LLVM parameter list. A struct-by-value return prepends a
+        // hidden `sret` pointer; struct-by-value params are lowered to `byval`
+        // pointers.
+        let mut llvm_params: Vec<BasicMetadataTypeEnum<'ctx>> = Vec::new();
+        if ret_is_struct {
+            llvm_params.push(ptr_ty.into());
+        }
+        for (ty, _) in &func.proto.params {
+            if is_struct_value(ty) {
+                llvm_params.push(ptr_ty.into());
+            } else {
+                llvm_params.push(ty.to_llvm(self.context)?.into());
+            }
+        }
+
+        // Return type: `void` for struct (sret) or void returns.
+        let fn_type = if ret_is_struct || ret_ty.is_void() {
+            self.context.void_type().fn_type(&llvm_params, false)
         } else {
-            Some(func.proto.return_type.to_llvm(self.context)?)
+            ret_ty.to_llvm(self.context)?.fn_type(&llvm_params, false)
         };
 
-        // Create function type
-        let fn_type = if let Some(ret_ty) = return_type {
-            let param_types: Vec<_> = param_types.iter().map(|ty| (*ty).into()).collect();
-            ret_ty.fn_type(&param_types, false)
-        } else {
-            let param_types: Vec<_> = param_types.iter().map(|ty| (*ty).into()).collect();
-            self.context.void_type().fn_type(&param_types, false)
-        };
-
-        // Add function to module
         let function = self.module.add_function(&func.proto.name, fn_type, None);
 
-        // Set parameter names
-        for (i, (_, param_name)) in func.proto.params.iter().enumerate() {
-            function
-                .get_nth_param(u32::try_from(i).expect("Parameter index out of bounds"))
-                .unwrap()
-                .set_name(param_name);
+        // Attach sret / byval type attributes and name the real parameters.
+        let offset = u32::from(ret_is_struct);
+        if ret_is_struct {
+            let attr = self.struct_abi_attribute("sret", &ret_ty);
+            function.add_attribute(AttributeLoc::Param(0), attr);
+        }
+        for (i, (ty, param_name)) in func.proto.params.iter().enumerate() {
+            let idx = u32::try_from(i).expect("Parameter index out of bounds") + offset;
+            let param = function.get_nth_param(idx).unwrap();
+            param.set_name(param_name);
+            if is_struct_value(ty) {
+                let attr = self.struct_abi_attribute("byval", ty);
+                function.add_attribute(AttributeLoc::Param(idx), attr);
+            }
         }
 
         self.functions.insert(func.proto.name.clone(), function);
         self.function_lang_params
             .insert(func.proto.name.clone(), param_lang_types);
+        self.function_return_types
+            .insert(func.proto.name.clone(), ret_ty);
         Ok(function)
     }
 
@@ -118,23 +178,43 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Enter function scope
         cg.enter_scope();
 
+        // Capture the hidden sret out-pointer (param 0) for struct returns.
+        let ret_is_struct = is_struct_value(&func.proto.return_type);
+        cg.current_sret = if ret_is_struct {
+            Some(function.get_nth_param(0).unwrap().into_pointer_value())
+        } else {
+            None
+        };
+        let offset = u32::from(ret_is_struct);
+
         // Allocate space for parameters and store them (in the entry block)
         for (i, (param_type, param_name)) in func.proto.params.iter().enumerate() {
-            let param_value = function
-                .get_nth_param(u32::try_from(i).expect("Parameter index out of bounds"))
-                .unwrap();
-            let param_llvm_type = param_type.to_llvm(cg.context)?;
+            let idx = u32::try_from(i).expect("Parameter index out of bounds") + offset;
+            let param_value = function.get_nth_param(idx).unwrap();
 
-            let alloca = cg.builder.build_alloca(param_llvm_type, param_name)?;
-            cg.builder.build_store(alloca, param_value)?;
-
-            cg.add_variable(
-                param_name.clone(),
-                alloca,
-                param_llvm_type,
-                *param_type,
-                None,
-            );
+            if is_struct_value(param_type) {
+                // `byval`: the incoming pointer already addresses a caller-made
+                // copy — use it directly as the variable's storage, no re-copy.
+                let struct_ty = cg.lang_type_to_llvm(param_type)?;
+                cg.add_variable(
+                    param_name.clone(),
+                    param_value.into_pointer_value(),
+                    struct_ty,
+                    *param_type,
+                    None,
+                );
+            } else {
+                let param_llvm_type = param_type.to_llvm(cg.context)?;
+                let alloca = cg.builder.build_alloca(param_llvm_type, param_name)?;
+                cg.builder.build_store(alloca, param_value)?;
+                cg.add_variable(
+                    param_name.clone(),
+                    alloca,
+                    param_llvm_type,
+                    *param_type,
+                    None,
+                );
+            }
         }
 
         // Generate function body (variables are allocated at their declaration site)
@@ -144,7 +224,13 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // If function doesn't have an explicit return, add one
         if !cg.block_has_terminator() {
-            if func.proto.return_type.is_void() {
+            if ret_is_struct {
+                // Store a zeroed struct through the sret pointer, return void.
+                let struct_ty = cg.lang_type_to_llvm(&func.proto.return_type)?;
+                let sret_ptr = cg.current_sret.expect("sret pointer set for struct return");
+                cg.builder.build_store(sret_ptr, struct_ty.const_zero())?;
+                cg.builder.build_return(None)?;
+            } else if func.proto.return_type.is_void() {
                 cg.builder.build_return(None)?;
             } else {
                 let zero = cg.get_zero_value(&func.proto.return_type)?;
@@ -152,10 +238,35 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
+        cg.current_sret = None;
         cg.exit_scope();
         // FunctionScope::drop() clears current_function + current_function_return_type
 
         Ok(())
+    }
+
+    /// Emit a call, applying the struct ABI. Returns the result value
+    /// (for sret returns, the struct loaded from the caller's slot), or `None`
+    /// for a void call.
+    fn build_abi_call(
+        &mut self,
+        name: &str,
+        args: &[Expression],
+        pos: Position,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        let function = *self
+            .functions
+            .get(name)
+            .ok_or_else(|| CodegenError::UndefinedFunction(name.to_string(), pos))?;
+
+        let (arg_values, sret_slot) = self.build_call_args(name, args)?;
+        let call_result = self.builder.build_call(function, &arg_values, "call")?;
+
+        if let Some((slot, struct_ty)) = sret_slot {
+            // The real result was written through the sret pointer; load it.
+            return Ok(Some(self.builder.build_load(struct_ty, slot, "sret.load")?));
+        }
+        Ok(call_result.try_as_basic_value().basic())
     }
 
     /// Generate a function call as an expression (must return a non-void value).
@@ -165,17 +276,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         args: &[Expression],
         pos: Position,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-        let function = *self
-            .functions
-            .get(name)
-            .ok_or_else(|| CodegenError::UndefinedFunction(name.to_string(), pos))?;
-
-        let arg_values = self.generate_call_args(name, args)?;
-
-        let call_result = self.builder.build_call(function, &arg_values, "call")?;
-        call_result
-            .try_as_basic_value()
-            .basic()
+        self.build_abi_call(name, args, pos)?
             .ok_or_else(|| CodegenError::MissingReturn(name.to_string(), pos))
     }
 
@@ -186,14 +287,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         args: &[Expression],
         pos: Position,
     ) -> Result<(), CodegenError> {
-        let function = *self
-            .functions
-            .get(name)
-            .ok_or_else(|| CodegenError::UndefinedFunction(name.to_string(), pos))?;
-
-        let arg_values = self.generate_call_args(name, args)?;
-
-        self.builder.build_call(function, &arg_values, "call")?;
+        self.build_abi_call(name, args, pos)?;
         Ok(())
     }
 }

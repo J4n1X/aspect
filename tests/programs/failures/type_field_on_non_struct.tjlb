@@ -1,0 +1,6 @@
+# expected: "not a type-struct"
+# Field access is only valid on a type-struct (or pointer to one).
+fn main(u32 argc, u8 **argv) -> i32 {
+    i32 n = 5
+    return n.x
+}

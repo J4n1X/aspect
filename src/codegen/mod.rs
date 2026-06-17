@@ -5,6 +5,7 @@ pub mod generator;
 pub mod globals;
 pub mod scope;
 pub mod statements;
+pub mod structs;
 pub mod types;
 pub mod value_emitter;
 

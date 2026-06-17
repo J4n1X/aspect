@@ -39,6 +39,11 @@ const STATEMENT_TABLE: &[(StatementPred, StatementHandler)] = &[
         |p| matches!(p.peek().kind, TokenKind::LangType(_)),
         Parser::parse_var_decl_or_assignment,
     ),
+    // Named-type local declarations: `myint x`, `Point* p`, ...
+    (
+        Parser::starts_named_var_decl,
+        Parser::parse_var_decl_or_assignment,
+    ),
 ];
 
 impl Parser {
@@ -315,6 +320,14 @@ impl Parser {
             } else if matches!(expr.kind, ExprKind::Dereference(_)) {
                 Ok(Statement::new(
                     StatementKind::DerefAssign {
+                        target: expr,
+                        value,
+                    },
+                    pos,
+                ))
+            } else if matches!(expr.kind, ExprKind::FieldAccess { .. }) {
+                Ok(Statement::new(
+                    StatementKind::FieldAssign {
                         target: expr,
                         value,
                     },

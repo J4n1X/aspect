@@ -214,6 +214,22 @@ impl TypeChecker {
                 self.check_expression(value, &target_type);
             }
 
+            StatementKind::FieldAssign { target, value } => {
+                let target_type = self.synth_expression(target);
+                if target_type.is_const {
+                    let name = if let ExprKind::FieldAccess { field, .. } = &target.kind {
+                        field.clone()
+                    } else {
+                        "field".to_string()
+                    };
+                    self.errors.push(TypeCheckError::AssignmentToConst {
+                        name,
+                        position: target.pos,
+                    });
+                }
+                self.check_expression(value, &target_type);
+            }
+
             StatementKind::Return(opt_expr) => {
                 if let Some(func_name) = self.current_function.clone()
                     && let Some(sig) = self.symbols.lookup_function(&func_name).cloned()
@@ -474,6 +490,102 @@ impl TypeChecker {
                 }
                 default_type
             }
+
+            ExprKind::FieldAccess { base, field } => {
+                let base_type = self.synth_expression(base);
+                let field = field.clone();
+                let field_type = self.resolve_field(&base_type, &field, pos);
+                expr.expr_type = field_type;
+                field_type
+            }
+
+            ExprKind::StructLiteral { struct_id, fields } => {
+                let struct_id = *struct_id;
+                // Snapshot declared fields to avoid holding a `self.symbols`
+                // borrow across the per-field `check_expression` calls.
+                let declared: Vec<(String, LangType)> = self
+                    .symbols
+                    .struct_info(struct_id)
+                    .fields
+                    .iter()
+                    .map(|f| (f.name.clone(), f.ty))
+                    .collect();
+                let type_name = self.symbols.struct_info(struct_id).name.clone();
+
+                let mut named: Vec<String> = Vec::with_capacity(fields.len());
+                for (fname, fexpr) in fields.iter_mut() {
+                    named.push(fname.clone());
+                    if let Some((_, fty)) = declared.iter().find(|(n, _)| n == fname) {
+                        let fty = *fty;
+                        self.check_expression(fexpr, &fty);
+                    } else {
+                        self.errors.push(TypeCheckError::UnknownField {
+                            field: fname.clone(),
+                            type_name: type_name.clone(),
+                            position: pos,
+                        });
+                        self.synth_expression(fexpr);
+                    }
+                }
+
+                let missing: Vec<&str> = declared
+                    .iter()
+                    .map(|(n, _)| n.as_str())
+                    .filter(|n| !named.iter().any(|m| m == n))
+                    .collect();
+                if !missing.is_empty() {
+                    self.errors.push(TypeCheckError::MissingStructFields {
+                        type_name,
+                        missing: missing.join(", "),
+                        position: pos,
+                    });
+                }
+
+                let struct_ty = LangType::new(TypeBase::Struct(struct_id), 0, 0, false);
+                expr.expr_type = struct_ty;
+                struct_ty
+            }
+        }
+    }
+
+    /// Resolve a field access on a base type, emitting an error and returning a
+    /// `void` placeholder when the base is not a type-struct or the field is
+    /// unknown. A single-level pointer-to-struct auto-dereferences.
+    fn resolve_field(
+        &mut self,
+        base_type: &LangType,
+        field: &str,
+        pos: crate::lexer::Position,
+    ) -> LangType {
+        if let TypeBase::Struct(id) = base_type.base
+            && base_type.pointer_depth <= 1
+        {
+            if let Some((_, finfo)) = self.symbols.field(id, field) {
+                return finfo.ty;
+            }
+            let type_name = self.type_name(base_type);
+            self.errors.push(TypeCheckError::UnknownField {
+                field: field.to_string(),
+                type_name,
+                position: pos,
+            });
+            return LangType::new(TypeBase::Void, 0, 0, false);
+        }
+        self.errors.push(TypeCheckError::NotAStruct {
+            found: *base_type,
+            position: pos,
+        });
+        LangType::new(TypeBase::Void, 0, 0, false)
+    }
+
+    /// Human-readable name for a type, resolving type-struct ids to their
+    /// declared names (which `LangType`'s `Display` cannot reach).
+    fn type_name(&self, ty: &LangType) -> String {
+        if let TypeBase::Struct(id) = ty.base {
+            let stars = "*".repeat(ty.pointer_depth as usize);
+            format!("{}{}", self.symbols.struct_info(id).name, stars)
+        } else {
+            format!("{ty}")
         }
     }
 
@@ -933,5 +1045,45 @@ mod tests {
         let bad_pos = elems[2].pos;
         let errs = res.expect_err("expected element overflow error");
         assert!(has_type_mismatch(&errs, bad_pos), "error should sit on the `300` element: {errs:?}");
+    }
+
+    // 13. Field access stamps the declared field type onto the AST.
+    #[test]
+    fn struct_field_access_stamps_field_type() {
+        let src = "type P { public i32 x public u8 y }\n\
+                   fn main() -> i32 {\n    P p = P { x = 1, y = 2 }\n    \
+                   u8 v = p.y\n    return 0\n}\n";
+        let (program, res) = check(src);
+        assert!(res.is_ok(), "expected ok, got {res:?}");
+        // var init #1 is `p.y` — its field type is u8.
+        assert_ty(nth_var_init(&program, "main", 1).expr_type, TypeBase::UInt, 8, 0);
+    }
+
+    // 14. Accessing an undeclared field is an error.
+    #[test]
+    fn struct_unknown_field_errors() {
+        let src = "type P { public i32 x }\n\
+                   fn main() -> i32 {\n    P p = P { x = 1 }\n    return p.z\n}\n";
+        let (_program, res) = check(src);
+        let errs = res.expect_err("expected unknown-field error");
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, TypeCheckError::UnknownField { .. })),
+            "got {errs:?}"
+        );
+    }
+
+    // 15. A struct literal must name every field.
+    #[test]
+    fn struct_missing_field_errors() {
+        let src = "type P { public i32 x public i32 y }\n\
+                   fn main() -> i32 {\n    P p = P { x = 1 }\n    return p.x\n}\n";
+        let (_program, res) = check(src);
+        let errs = res.expect_err("expected missing-field error");
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, TypeCheckError::MissingStructFields { .. })),
+            "got {errs:?}"
+        );
     }
 }

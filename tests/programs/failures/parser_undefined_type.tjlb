@@ -1,0 +1,7 @@
+# expected: "undefined type", "Counter"
+# Using a type name that was never declared (no matching `alias` or `type`)
+# is a compile error.
+fn main(u32 argc, u8 **argv) -> i32 {
+    Counter c = 0
+    return 0
+}

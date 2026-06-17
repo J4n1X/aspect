@@ -26,6 +26,22 @@ pub struct CodeGenerator<'ctx> {
     /// Parameter LangTypes per function name — needed for arg coercion at call sites.
     pub(crate) function_lang_params: HashMap<String, Vec<LangType>>,
 
+    /// Return LangType per function name — needed at call sites to detect
+    /// struct-by-value (`sret`) returns.
+    pub(crate) function_return_types: HashMap<String, LangType>,
+
+    /// While generating a struct-returning function, the hidden `sret`
+    /// out-pointer that `return` stores through. `None` for scalar/void returns.
+    pub(crate) current_sret: Option<inkwell::values::PointerValue<'ctx>>,
+
+    /// Named LLVM struct type per type-struct id (built in the registration pass).
+    pub(crate) struct_types: HashMap<u32, inkwell::types::StructType<'ctx>>,
+
+    /// Ordered field layout per type-struct id: `(field name, field type)` in
+    /// declaration/GEP-index order. A codegen-local index into the shared
+    /// registry (the walker is not threaded the `Program`).
+    pub(crate) struct_fields: HashMap<u32, Vec<(String, LangType)>>,
+
     pub(crate) scope: ScopeStack<'ctx>,
 
     pub(crate) current_function: Option<FunctionValue<'ctx>>,
@@ -78,6 +94,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             target_machine,
             functions: HashMap::new(),
             function_lang_params: HashMap::new(),
+            function_return_types: HashMap::new(),
+            current_sret: None,
+            struct_types: HashMap::new(),
+            struct_fields: HashMap::new(),
             scope: ScopeStack::new(),
             current_function: None,
             current_function_return_type: None,
@@ -95,6 +115,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         for (i, s) in program.string_literals.iter().enumerate() {
             self.generate_string_literal(i, s);
         }
+
+        // Register type-struct LLVM types before anything references them.
+        self.register_structs(program)
+            .context("failed to register type-struct layouts")?;
 
         // First pass: Declare all functions (for forward references)
         for func in &program.functions {
