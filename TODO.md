@@ -3,7 +3,8 @@
 | Feature                       | Description                                                                                 | Priority |
 |-------------------------------|---------------------------------------------------------------------------------------------|----------|
 | Function Pointers             | Come up with a syntax and implement function pointers                                       | MEDIUM   |
-| Structures                    | Implement structs                                                                           | MEDIUM   |
+| Type-Structs (aliases+structs)| `alias`/`type` system: `TypeBase::Struct(u32)` + unified `ModuleSymbols`. See `doc/plans/Struct-System.md` | MEDIUM   |
+| Struct by-value ABI           | SysV/Win64 aggregate classification so structs can cross the `extern`/C boundary by value (small-struct-in-registers, sret>16 on SysV; ≤8B-in-register vs by-ref on Win64). Until then `extern` by-value struct params/returns are rejected. | LOW |
 | Noalias handling              | This could also improve optimizations, by reducing the amount of moves and memory.          | LOW      |
 | Implement Bash Completion     | This can be done for free with clap-complete. File stored to ~/.bash_completion.d/          | LOW      |
 

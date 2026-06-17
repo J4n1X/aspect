@@ -106,6 +106,14 @@ pub fn literal_float_compatible(to: &LangType) -> bool {
 /// Check if an explicit `as` cast from `from` to `to` is valid.
 #[must_use]
 pub fn cast_valid(from: &LangType, to: &LangType) -> bool {
+    // Type-struct *values* are aggregates and cannot be bit-reinterpreted by a
+    // cast; only the identical struct type "casts" to itself. Pointer-to-struct
+    // casts (e.g. `Point* as u64`) fall through to the pointer rules below.
+    if (matches!(from.base, TypeBase::Struct(_)) && from.pointer_depth == 0)
+        || (matches!(to.base, TypeBase::Struct(_)) && to.pointer_depth == 0)
+    {
+        return from == to;
+    }
     if from.pointer_depth > 0 || to.pointer_depth > 0 {
         // ptr ↔ integer: valid when the integer side is SInt or UInt
         if (from.pointer_depth > 0 && to.pointer_depth == 0)

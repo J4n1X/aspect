@@ -153,6 +153,11 @@ pub enum TypeBase {
     SFloat, // Floating point
     Void,   // Void type (u0)
     Bool,   // Boolean (i1 value, i8 storage with !range 0..1)
+    /// A type-struct, identified by an interned id into the program's
+    /// `ModuleSymbols` struct registry. The id (not the name) is stored so that
+    /// `LangType` stays `Copy`/`Eq`. Layout/fields are resolved against the
+    /// registry; this variant carries no inline data beyond the id.
+    Struct(u32),
 }
 
 /// Complete language type with size and modifiers
@@ -271,11 +276,20 @@ impl fmt::Display for LangType {
             };
         }
 
+        // Type-structs print by interned id here (`Display` cannot reach the
+        // registry). Registry-aware diagnostics print the real name instead.
+        if let TypeBase::Struct(id) = self.base {
+            return match self.array_size {
+                Some(size) => write!(f, "{const_str}struct#{id}[{size}]{asterisks}"),
+                None => write!(f, "{const_str}struct#{id}{asterisks}"),
+            };
+        }
+
         let base_str = match self.base {
             TypeBase::SInt => "i",
             TypeBase::UInt | TypeBase::Void => "u",
             TypeBase::SFloat => "f",
-            TypeBase::Bool => unreachable!("handled above"),
+            TypeBase::Bool | TypeBase::Struct(_) => unreachable!("handled above"),
         };
 
         // Handle array types

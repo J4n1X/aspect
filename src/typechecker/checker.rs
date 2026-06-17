@@ -6,14 +6,8 @@ use crate::parser::{
     BinaryOp, ExprKind, Expression, Function, GlobalVar, LiteralValue, Program, Statement,
     StatementKind,
 };
+use crate::symbol::module::ModuleSymbols;
 use std::collections::HashMap;
-
-/// Function signature for type checking
-#[derive(Debug, Clone)]
-struct FunctionSig {
-    params: Vec<LangType>,
-    return_type: LangType,
-}
 
 /// Single-pass type checker for the TJLB language.
 ///
@@ -33,7 +27,10 @@ struct FunctionSig {
 ///
 /// Use `with_source_file` to include the filename in formatted error messages.
 pub struct TypeChecker {
-    functions: HashMap<String, FunctionSig>,
+    /// The program's shared symbol table, taken from `Program` for the duration
+    /// of `check_program` and restored on exit (so any registry refinement the
+    /// checker performs is preserved, without a divergent copy).
+    symbols: ModuleSymbols,
     scopes: ScopeStack<LangType>,
     globals: HashMap<String, LangType>,
     current_function: Option<String>,
@@ -46,7 +43,7 @@ impl TypeChecker {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            functions: HashMap::new(),
+            symbols: ModuleSymbols::new(),
             scopes: ScopeStack::new(),
             globals: HashMap::new(),
             current_function: None,
@@ -85,6 +82,10 @@ impl TypeChecker {
     /// # Errors
     /// Returns `Err(Vec<TypeCheckError>)` listing every type error found.
     pub fn check_program(&mut self, program: &mut Program) -> Result<(), Vec<TypeCheckError>> {
+        // Take the shared symbol table for the duration of checking; restore it
+        // before returning so codegen sees it (plus any refinement we make).
+        self.symbols = std::mem::take(&mut program.symbols);
+
         self.register_declarations(program);
 
         for global in &mut program.global_vars {
@@ -97,6 +98,8 @@ impl TypeChecker {
             }
         }
 
+        program.symbols = std::mem::take(&mut self.symbols);
+
         if self.errors.is_empty() {
             Ok(())
         } else {
@@ -107,17 +110,10 @@ impl TypeChecker {
     // ── Declaration registration ─────────────────────────────────────────────
 
     fn register_declarations(&mut self, program: &Program) {
+        // Function signatures already live in `self.symbols` (built by the
+        // parser); only globals need a checker-local index for fast lookup.
         for global in &program.global_vars {
             self.globals.insert(global.name.clone(), global.var_type);
-        }
-        for func in &program.functions {
-            self.functions.insert(
-                func.proto.name.clone(),
-                FunctionSig {
-                    params: func.proto.params.iter().map(|(t, _)| *t).collect(),
-                    return_type: func.proto.return_type,
-                },
-            );
         }
     }
 
@@ -220,7 +216,7 @@ impl TypeChecker {
 
             StatementKind::Return(opt_expr) => {
                 if let Some(func_name) = self.current_function.clone()
-                    && let Some(sig) = self.functions.get(&func_name).cloned()
+                    && let Some(sig) = self.symbols.lookup_function(&func_name).cloned()
                 {
                     match opt_expr {
                         Some(expr) => {
@@ -491,7 +487,7 @@ impl TypeChecker {
         args: &mut [Expression],
         pos: crate::lexer::Position,
     ) {
-        if let Some(sig) = self.functions.get(name).cloned() {
+        if let Some(sig) = self.symbols.lookup_function(name).cloned() {
             if sig.params.len() != args.len() {
                 self.errors.push(TypeCheckError::ArgumentCountMismatch {
                     name: name.to_string(),
@@ -504,8 +500,8 @@ impl TypeChecker {
                     self.synth_expression(arg);
                 }
             } else {
-                for (param, arg_expr) in sig.params.iter().zip(args.iter_mut()) {
-                    self.check_expression(arg_expr, param);
+                for ((param_ty, _), arg_expr) in sig.params.iter().zip(args.iter_mut()) {
+                    self.check_expression(arg_expr, param_ty);
                 }
             }
         } else {

@@ -1,6 +1,5 @@
 use crate::lexer::{LangType, Position};
 use crate::scope::ScopeStack;
-use std::collections::HashMap;
 use thiserror::Error;
 
 /// Errors produced when mutating the symbol table.
@@ -30,7 +29,11 @@ pub struct Symbol {
 /// Variable symbol
 pub type VarSymbol = Symbol;
 
-/// Function symbol
+/// Function symbol.
+///
+/// Stored in [`crate::symbol::module::ModuleSymbols`] (the cross-phase table).
+/// Kept here alongside [`SymbolError`] because the parser builds these while it
+/// parses; the symbol *table* below only manages variable scopes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionSymbol {
     pub name: String,
@@ -41,13 +44,16 @@ pub struct FunctionSymbol {
     pub pos: Position,
 }
 
-/// Symbol table for managing variables and functions
+/// Transient, parse-time table of variable scopes.
+///
+/// Functions, type-structs, and aliases live in
+/// [`crate::symbol::module::ModuleSymbols`] (which rides on the `Program`).
+/// This table holds only the lexical variable scopes the parser needs while
+/// parsing function bodies, and is discarded once parsing completes.
 #[derive(Debug)]
 pub struct SymbolTable {
     /// Lexical scopes mapping variable names to their symbols.
     var_scopes: ScopeStack<VarSymbol>,
-    /// Function table - global scope only
-    functions: HashMap<String, FunctionSymbol>,
 }
 
 impl Default for SymbolTable {
@@ -61,7 +67,6 @@ impl SymbolTable {
     pub fn new() -> Self {
         Self {
             var_scopes: ScopeStack::new(),
-            functions: HashMap::new(),
         }
     }
 
@@ -101,36 +106,5 @@ impl SymbolTable {
     #[must_use]
     pub fn lookup_variable(&self, name: &str) -> Option<&VarSymbol> {
         self.var_scopes.lookup(name)
-    }
-
-    /// Add or update a function
-    /// # Errors
-    /// Returns [`SymbolError::FunctionAlreadyDefined`] if two definitions supply
-    /// a body, or [`SymbolError::SignatureMismatch`] if a definition disagrees
-    /// with an earlier declaration.
-    pub fn add_function(&mut self, func: FunctionSymbol) -> Result<(), SymbolError> {
-        match self.functions.get(&func.name) {
-            Some(existing) if existing.has_body && func.has_body => {
-                return Err(SymbolError::FunctionAlreadyDefined(func.name));
-            }
-            Some(existing)
-                if !existing.has_body
-                    && func.has_body
-                    && (existing.params != func.params
-                        || existing.return_type != func.return_type) =>
-            {
-                return Err(SymbolError::SignatureMismatch(func.name));
-            }
-            _ => {}
-        }
-
-        self.functions.insert(func.name.clone(), func);
-        Ok(())
-    }
-
-    /// Look up a function
-    #[must_use]
-    pub fn lookup_function(&self, name: &str) -> Option<&FunctionSymbol> {
-        self.functions.get(name)
     }
 }

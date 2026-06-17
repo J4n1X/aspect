@@ -24,7 +24,7 @@ type SizedString {
   # A function that is "static" and does not access internal fields is detected by a lack of a "this"
   fn from_cstring(u8 *str) -> SizedString {
     u64 len = strlen(str)
-    u8 *data = malloc(len-1)
+    u8 *data = malloc(len)
     memcpy(data, str, len);
     # The initializer list works here because we're in the context of the type. It wouldn't work elsewhere because we cannot name the fields, as they are hidden.
     return SizedString {

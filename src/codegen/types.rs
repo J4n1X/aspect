@@ -105,6 +105,15 @@ impl LangTypeExt for LangType {
                     crate::lexer::Position::new(0, 0),
                 ))
             }
+            // Struct *values* are lowered via `CodeGenerator::lang_type_to_llvm`,
+            // which consults the cached named `StructType`; this trait method has
+            // no access to that cache. Pointer-to-struct decays to `ptr` above.
+            TypeBase::Struct(id) => {
+                return Err(CodegenError::TypeError(
+                    format!("struct#{id} value must be lowered via lang_type_to_llvm"),
+                    crate::lexer::Position::new(0, 0),
+                ))
+            }
         })
     }
 
@@ -150,6 +159,12 @@ impl LangTypeExt for LangType {
             TypeBase::Void => {
                 return Err(CodegenError::TypeError(
                     "Void type cannot be used as a value type".to_string(),
+                    crate::lexer::Position::new(0, 0),
+                ))
+            }
+            TypeBase::Struct(id) => {
+                return Err(CodegenError::TypeError(
+                    format!("struct#{id} element must be lowered via lang_type_to_llvm"),
                     crate::lexer::Position::new(0, 0),
                 ))
             }

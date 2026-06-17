@@ -183,4 +183,7 @@ pub struct Program {
     pub functions: Vec<Function>,
     pub global_vars: Vec<GlobalVar>,
     pub string_literals: Vec<String>,
+    /// Cross-phase global symbol table (functions, type-structs, aliases),
+    /// built by the parser and consumed by the type checker and code generator.
+    pub symbols: crate::symbol::module::ModuleSymbols,
 }

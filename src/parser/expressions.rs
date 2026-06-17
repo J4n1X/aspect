@@ -5,6 +5,7 @@ use crate::parser::{
     BinaryOp, ComparisonOp, ExprKind, Expression, LiteralValue, ParserError, Statement,
     StatementKind,
 };
+use crate::symbol::module::ModuleSymbols;
 use crate::symbol::table::SymbolTable;
 use tjlb_macros::parse_rule;
 
@@ -135,7 +136,11 @@ const INFIX_OPS: &[InfixEntry] = &[
 pub struct Parser {
     tokens: Vec<Token>,
     pub(crate) current: usize,
+    /// Transient per-function variable scopes (discarded after parsing).
     symbol_table: SymbolTable,
+    /// Cross-phase global symbols (functions, type-structs, aliases); moved into
+    /// the `Program` at the end of `parse_program`.
+    module: ModuleSymbols,
     pub(crate) string_literals: IndexSet<String>,
     pub(crate) context_stack: Vec<&'static str>,
     pub(crate) errors: Vec<ParserError>,
@@ -149,6 +154,7 @@ impl Parser {
             tokens,
             current: 0,
             symbol_table: SymbolTable::new(),
+            module: ModuleSymbols::new(),
             string_literals: IndexSet::new(),
             context_stack: Vec::new(),
             errors: Vec::new(),
@@ -541,9 +547,9 @@ impl Parser {
             }
         };
 
-        // Look up function in symbol table
+        // Look up function in the module symbol table
         let func_symbol = self
-            .symbol_table
+            .module
             .lookup_function(&func_name)
             .ok_or_else(|| ParserError::UndefinedFunction(func_name.clone(), pos))?;
 
@@ -818,6 +824,7 @@ impl Parser {
             functions,
             global_vars,
             string_literals: self.string_literals.iter().cloned().collect(),
+            symbols: std::mem::take(&mut self.module),
         })
     }
 
@@ -859,7 +866,7 @@ impl Parser {
             pos,
         };
 
-        self.symbol_table_mut()
+        self.module
             .add_function(FunctionSymbol {
                 name: name.clone(),
                 params: params.clone(),
