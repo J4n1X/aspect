@@ -1,21 +1,43 @@
 use thiserror::Error;
 
-/// Position in source file
+/// Position in a source file.
+///
+/// `file_id` indexes into the program's `source_files` registry, populated
+/// during preprocessing. Synthetic positions (e.g. codegen-side errors that
+/// have no real source location) default to id 0 — the entry file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Position {
     pub line: usize,
     pub column: usize,
+    pub file_id: u32,
 }
 
 impl Position {
+    /// Construct a position with the default `file_id` of 0 — the entry file
+    /// for compiled programs, or "unattributed" for synthetic positions.
     #[must_use]
     pub fn new(line: usize, column: usize) -> Self {
-        Self { line, column }
+        Self {
+            line,
+            column,
+            file_id: 0,
+        }
+    }
+
+    /// Construct a position with an explicit `file_id`, used by the lexer
+    /// when tokenising included files.
+    #[must_use]
+    pub fn with_file(line: usize, column: usize, file_id: u32) -> Self {
+        Self {
+            line,
+            column,
+            file_id,
+        }
     }
 
     #[must_use]
     pub fn start() -> Self {
-        Self { line: 1, column: 1 }
+        Self::new(1, 1)
     }
 }
 
@@ -45,4 +67,7 @@ pub enum LexerError {
 
     #[error("Unexpected end of input")]
     UnexpectedEof,
+
+    #[error("Include error: {0}")]
+    IncludeError(String),
 }

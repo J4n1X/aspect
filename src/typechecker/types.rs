@@ -114,6 +114,17 @@ pub fn cast_valid(from: &LangType, to: &LangType) -> bool {
     {
         return from == to;
     }
+    // Function pointers are pointer-shaped values. Allow casts to/from any
+    // other pointer-like type or an integer (so `0 as fn(...) -> R` builds a
+    // null function pointer, and integer ↔ FnPtr round-trips work).
+    let from_is_fnptr = matches!(from.base, TypeBase::FnPtr(_)) && from.pointer_depth == 0;
+    let to_is_fnptr = matches!(to.base, TypeBase::FnPtr(_)) && to.pointer_depth == 0;
+    if from_is_fnptr || to_is_fnptr {
+        let other = if from_is_fnptr { to } else { from };
+        return matches!(other.base, TypeBase::FnPtr(_))
+            || other.pointer_depth > 0
+            || (matches!(other.base, TypeBase::SInt | TypeBase::UInt) && other.pointer_depth == 0);
+    }
     if from.pointer_depth > 0 || to.pointer_depth > 0 {
         // ptr ↔ integer: valid when the integer side is SInt or UInt
         if (from.pointer_depth > 0 && to.pointer_depth == 0)

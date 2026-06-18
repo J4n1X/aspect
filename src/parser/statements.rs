@@ -44,6 +44,16 @@ const STATEMENT_TABLE: &[(StatementPred, StatementHandler)] = &[
         Parser::starts_named_var_decl,
         Parser::parse_var_decl_or_assignment,
     ),
+    // Function-pointer local declarations: `fn(i32) -> i32 op = &double`.
+    (
+        Parser::starts_fnptr_var_decl,
+        Parser::parse_var_decl_or_assignment,
+    ),
+    // Parenthesised-type local declarations: `(fn(i32) -> i32)[3] table = ...`.
+    (
+        Parser::starts_grouped_var_decl,
+        Parser::parse_var_decl_or_assignment,
+    ),
 ];
 
 impl Parser {

@@ -96,6 +96,7 @@ pub enum TokenKind {
     Dot,          // .
     Arrow,        // ->
     Question,     // ?
+    Dollar,       // $ — preprocessor directive sigil (e.g. `$include "foo.tjlb"`)
 
     // Arithmetic operators
     Plus,     // +
@@ -164,6 +165,12 @@ pub enum TypeBase {
     /// `LangType` stays `Copy`/`Eq`. Layout/fields are resolved against the
     /// registry; this variant carries no inline data beyond the id.
     Struct(u32),
+    /// A function pointer, identified by an interned id into the program's
+    /// `ModuleSymbols` function-signature registry. `fn(args) -> R` *is* the
+    /// pointer (machine functions are always called through an address). The
+    /// id keeps `LangType` `Copy`; the signature is resolved against the
+    /// registry.
+    FnPtr(u32),
 }
 
 /// Complete language type with size and modifiers
@@ -291,11 +298,23 @@ impl fmt::Display for LangType {
             };
         }
 
+        // Function pointers print by interned id; the registry-aware diagnostic
+        // expands to `fn(T, T) -> R`. `fn(...) -> R` is itself a pointer, so
+        // trailing `*` here means pointer-to-fn-ptr.
+        if let TypeBase::FnPtr(id) = self.base {
+            return match self.array_size {
+                Some(size) => write!(f, "{const_str}fn#{id}[{size}]{asterisks}"),
+                None => write!(f, "{const_str}fn#{id}{asterisks}"),
+            };
+        }
+
         let base_str = match self.base {
             TypeBase::SInt => "i",
             TypeBase::UInt | TypeBase::Void => "u",
             TypeBase::SFloat => "f",
-            TypeBase::Bool | TypeBase::Struct(_) => unreachable!("handled above"),
+            TypeBase::Bool | TypeBase::Struct(_) | TypeBase::FnPtr(_) => {
+                unreachable!("handled above")
+            }
         };
 
         // Handle array types
@@ -347,6 +366,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Dot => write!(f, "."),
             TokenKind::Arrow => write!(f, "->"),
             TokenKind::Question => write!(f, "?"),
+            TokenKind::Dollar => write!(f, "$"),
             TokenKind::Plus => write!(f, "+"),
             TokenKind::Minus => write!(f, "-"),
             TokenKind::Asterisk => write!(f, "*"),

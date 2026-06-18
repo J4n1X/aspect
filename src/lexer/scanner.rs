@@ -5,16 +5,29 @@ pub struct Scanner {
     current: usize,
     line: usize,
     column: usize,
+    /// File registry id stamped onto every emitted token's position. The
+    /// preprocessor uses this to thread per-file provenance through to the
+    /// parser/typechecker so multi-file error messages can name the right
+    /// file. Defaults to 0 — the entry file — for the bare `tokenize` API.
+    file_id: u32,
 }
 
 impl Scanner {
     #[must_use]
     pub fn new(input: String) -> Self {
+        Self::with_file_id(input, 0)
+    }
+
+    /// Construct a scanner that stamps every token's position with `file_id`.
+    /// Used by the preprocessor when lexing an included file.
+    #[must_use]
+    pub fn with_file_id(input: String, file_id: u32) -> Self {
         Self {
             input: input.chars().collect(),
             current: 0,
             line: 1,
             column: 1,
+            file_id,
         }
     }
 
@@ -49,7 +62,7 @@ impl Scanner {
     }
 
     fn current_position(&self) -> Position {
-        Position::new(self.line, self.column)
+        Position::with_file(self.line, self.column, self.file_id)
     }
 
     fn is_at_end(&self) -> bool {
@@ -152,6 +165,7 @@ impl Scanner {
             ',' => TokenKind::Comma,
             '.' => TokenKind::Dot,
             '?' => TokenKind::Question,
+            '$' => TokenKind::Dollar,
             '~' => TokenKind::Tilde,
 
             // Newline (statement terminator)
@@ -539,10 +553,23 @@ impl Scanner {
     }
 }
 
-/// Tokenize the input string into a vector of tokens
+/// Tokenize the input string into a vector of tokens.
+/// Token positions carry `file_id == 0` — the entry file / "unattributed".
+///
 /// # Errors
 /// Returns `LexerError` if an invalid token is encountered
 pub fn tokenize(input: String) -> Result<Vec<Token>, LexerError> {
     let mut scanner = Scanner::new(input);
+    scanner.scan_all()
+}
+
+/// Tokenize the input string, stamping every token's position with `file_id`.
+/// Used by the preprocessor when lexing an included file so the parser can
+/// attribute later errors to the *containing* file, not the entry file.
+///
+/// # Errors
+/// Returns `LexerError` if an invalid token is encountered
+pub fn tokenize_with_file_id(input: String, file_id: u32) -> Result<Vec<Token>, LexerError> {
+    let mut scanner = Scanner::with_file_id(input, file_id);
     scanner.scan_all()
 }

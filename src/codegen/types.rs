@@ -114,6 +114,9 @@ impl LangTypeExt for LangType {
                     crate::lexer::Position::new(0, 0),
                 ))
             }
+            // `fn(...) -> R` *is* a pointer — opaque `ptr` in LLVM. The
+            // signature is needed only at call sites (resolved via the FnPtr id).
+            TypeBase::FnPtr(_) => ctx.ptr_type(AddressSpace::default()).into(),
         })
     }
 
@@ -132,6 +135,12 @@ impl LangTypeExt for LangType {
         &self,
         ctx: &'ctx Context,
     ) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+        // The element strips only the array dimension; pointer depth is part
+        // of the element type. `(i32*)[3]` must allocate `[3 x ptr]`, not
+        // `[3 x i32]` — anything else stack-corrupts on the literal store.
+        if self.pointer_depth > 0 {
+            return Ok(ctx.ptr_type(AddressSpace::default()).into());
+        }
         Ok(match self.base {
             TypeBase::Bool => ctx.i8_type().into(),
             TypeBase::SInt | TypeBase::UInt => match self.size_bits {
@@ -168,6 +177,9 @@ impl LangTypeExt for LangType {
                     crate::lexer::Position::new(0, 0),
                 ))
             }
+            // A function-pointer array element is `ptr` (opaque), same as
+            // `to_llvm` above — see the comment there.
+            TypeBase::FnPtr(_) => ctx.ptr_type(AddressSpace::default()).into(),
         })
     }
 

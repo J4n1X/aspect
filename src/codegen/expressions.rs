@@ -576,6 +576,29 @@ pub(crate) fn walk_expression<'ctx>(
             }
             Ok(agg.into())
         }
+
+        // ── Function reference: bare function name as a value. Function
+        // addresses are LLVM-level constants (resolved at link time), so the
+        // same emission works in both Runtime and Constant modes.
+        ExprKind::FunctionRef(name) => {
+            let function = cg
+                .functions
+                .get(name)
+                .copied()
+                .ok_or_else(|| CodegenError::UndefinedFunction(name.clone(), expr.pos))?;
+            Ok(function.as_global_value().as_pointer_value().into())
+        }
+
+        // ── Indirect call through a function-pointer value (runtime only).
+        ExprKind::IndirectCall { callee, args } => {
+            if mode == EmitMode::Constant {
+                return Err(CodegenError::InvalidOperation(
+                    "indirect call not supported in constant expressions".to_string(),
+                    expr.pos,
+                ));
+            }
+            cg.generate_indirect_call(callee, args, expr.pos)
+        }
     }
 }
 

@@ -1,22 +1,19 @@
-use std::fs;
 use std::path::Path;
 
 use inkwell::context::Context;
 use tjlb_macros::generate_tests;
 use tjlb_rust::codegen::CodeGenerator;
-use tjlb_rust::lexer::tokenize;
+use tjlb_rust::preprocessor::tokenize_file;
 use tjlb_rust::parser::{Parser, Program};
 use tjlb_rust::typechecker::TypeChecker;
 
 /// Read, tokenize, parse, and type-check the source file. Returns the typed
 /// AST ready for codegen, or a stage-tagged error string.
 fn parse_and_typecheck(source_path: &str) -> Result<Program, String> {
-    let source =
-        fs::read_to_string(source_path).map_err(|e| format!("Failed to read source file: {e}"))?;
+    let pp = tokenize_file(Path::new(source_path))
+        .map_err(|e| format!("Tokenization failed: {e}"))?;
 
-    let tokens = tokenize(source).map_err(|e| format!("Tokenization failed: {e}"))?;
-
-    let mut parser = Parser::new(tokens).with_source_file(source_path.to_string());
+    let mut parser = Parser::new(pp.tokens).with_source_files(pp.files);
     let mut program = parser.parse_program().map_err(|errors| {
         errors
             .iter()
@@ -25,7 +22,7 @@ fn parse_and_typecheck(source_path: &str) -> Result<Program, String> {
             .join("\n")
     })?;
 
-    let mut typechecker = TypeChecker::new().with_source_file(source_path.to_string());
+    let mut typechecker = TypeChecker::new();
     typechecker.check_program(&mut program).map_err(|errors| {
         errors
             .iter()

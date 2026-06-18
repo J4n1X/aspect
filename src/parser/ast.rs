@@ -90,6 +90,18 @@ pub enum ExprKind {
         struct_id: u32,
         fields: Vec<(String, Expression)>,
     },
+    /// A reference to a named function, as a value (function pointer).
+    /// Produced for a bare function name `foo` and for `&foo` (the parser
+    /// collapses the address-of). Carries the function's name; the FnPtr
+    /// type is stamped on `expr_type`.
+    FunctionRef(String),
+    /// An indirect call through a function-pointer value: `callee(args)`.
+    /// Distinct from `FunctionCall` (a direct call by name) because codegen
+    /// must look up the signature via the FnPtr id and emit `build_indirect_call`.
+    IndirectCall {
+        callee: Box<Expression>,
+        args: Vec<Expression>,
+    },
 }
 
 /// Expression with type information
@@ -202,4 +214,8 @@ pub struct Program {
     /// Cross-phase global symbol table (functions, type-structs, aliases),
     /// built by the parser and consumed by the type checker and code generator.
     pub symbols: crate::symbol::module::ModuleSymbols,
+    /// Source-file registry indexed by `Position::file_id` — entry file at id 0,
+    /// each `$include`-pulled file after that. Empty for synthetic programs
+    /// (e.g. checker unit tests that don't go through the preprocessor).
+    pub source_files: Vec<std::path::PathBuf>,
 }

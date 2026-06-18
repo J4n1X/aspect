@@ -89,16 +89,21 @@ impl<'ctx> CodeGenerator<'ctx> {
         let elem_llvm_type = elem_lang_type.to_llvm(self.context)?;
         let array_size = var_type.array_size.unwrap_or(0) as usize;
 
-        // Generate constant values for provided elements (must all be literals)
+        // Generate constant values for provided elements. Permitted forms:
+        // - literals,
+        // - function references (`&func` or bare `func`) — function addresses
+        //   are LLVM-level constants, fine for a global initializer.
         let mut const_vals: Vec<BasicValueEnum<'ctx>> = Vec::with_capacity(array_size);
         for elem in elements {
             match &elem.kind {
-                ExprKind::Literal(_) => {
+                ExprKind::Literal(_) | ExprKind::FunctionRef(_) => {
                     const_vals.push(walk_expression(elem, self, EmitMode::Constant)?);
                 }
                 _ => {
                     return Err(CodegenError::InvalidOperation(
-                        "constant array initializer elements must be literals".to_string(),
+                        "constant array initializer elements must be literals \
+                         or function references"
+                            .to_string(),
                         elem.pos,
                     ))
                 }

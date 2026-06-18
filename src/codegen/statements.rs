@@ -74,11 +74,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         &mut self,
         expr: &Expression,
     ) -> Result<(), CodegenError> {
-        if let ExprKind::FunctionCall { name, args } = &expr.kind {
-            self.generate_function_call_statement(name, args, expr.pos)
-        } else {
-            self.generate_expression(expr)?;
-            Ok(())
+        match &expr.kind {
+            ExprKind::FunctionCall { name, args } => {
+                self.generate_function_call_statement(name, args, expr.pos)
+            }
+            ExprKind::IndirectCall { callee, args } => {
+                // Statement form accepts a void return; the expression form
+                // would have errored on MissingReturn instead.
+                self.generate_indirect_call_statement(callee, args, expr.pos)
+            }
+            _ => {
+                self.generate_expression(expr)?;
+                Ok(())
+            }
         }
     }
 

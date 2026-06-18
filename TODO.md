@@ -2,8 +2,6 @@
 
 | Feature                       | Description                                                                                 | Priority |
 |-------------------------------|---------------------------------------------------------------------------------------------|----------|
-| Function Pointers             | Come up with a syntax and implement function pointers                                       | MEDIUM   |
-| Type-Structs (aliases+structs)| `alias`/`type` system: `TypeBase::Struct(u32)` + unified `ModuleSymbols`. See `doc/plans/Struct-System.md` | MEDIUM   |
 | Struct by-value ABI           | SysV/Win64 aggregate classification so structs can cross the `extern`/C boundary by value (small-struct-in-registers, sret>16 on SysV; ≤8B-in-register vs by-ref on Win64). Until then `extern` by-value struct params/returns are rejected. | LOW |
 | Noalias handling              | This could also improve optimizations, by reducing the amount of moves and memory.          | LOW      |
 | Implement Bash Completion     | This can be done for free with clap-complete. File stored to ~/.bash_completion.d/          | LOW      |
@@ -27,3 +25,7 @@
 | Visitor System For Kinds      | Resolved by design: `ExprKind`/`StatementKind` dispatch sites are exhaustive `match`es, so the compiler already flags every site when a variant is added. A uniform visitor was rejected as net-negative (passes are too divergent). | MEDIUM   |
 | Define overflow behavior      | Signed overflow is UB → signed `add`/`sub`/`mul` carry `nsw`; unsigned stays wrapping. (`src/codegen/value_emitter.rs`) | LOW      |
 | Introduce boolean             | `bool` type: i1 value, i8 storage; comparisons/`&&`/`\|\|`/`!` yield it; loads tagged `!range !{i8 0, i8 2}`. Also added `inbounds` on indexing/pointer GEPs. | LOW      |
+| Type-Structs (aliases+structs)| `alias`/`type` system: `TypeBase::Struct(u32)` + unified `ModuleSymbols`. Methods (`fn name(this, ...)` instance / `Type.name(...)` static / `const fn` const-receiver), encapsulation (`public` opt-in, hidden default), struct by-value via sret/byval. See `doc/plans/Struct-System.md`. | MEDIUM |
+| Function pointers             | `fn(args) -> R` as a type; `&func` / bare `func` produces a function-pointer value; indirect call through any expression of fn-ptr type via `build_indirect_call`. Composes with type-struct fields (vtables) and arrays via parens-grouped types `(fn(...) -> R)[N]`. | MEDIUM |
+| Parens-grouped types          | `(T)[N]` / `(T)*` — explicit grouping that stops the lexer's greedy `T[N]`/`T*` folding. Unlocks "array of fn-pointers", "array of pointers", "pointer to fn-pointer". | LOW |
+| Preprocessor (`$include`)     | `$include "path"` splices another source file's tokens in (recursive, include-once on canonical path, resolved relative to the directive's file). Lives in `src/preprocessor/`; new directives slot in as sibling modules. See `doc/09-syntax-reference.md` § Preprocessor. | MEDIUM |

@@ -2,10 +2,9 @@ use anyhow::{Context, Result};
 use clap::{Parser as ClapParser, Subcommand, ValueEnum};
 use inkwell::context::Context as LLVMContext;
 use std::fmt::Write;
-use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tjlb_rust::codegen::CodeGenerator;
-use tjlb_rust::lexer::tokenize;
+use tjlb_rust::preprocessor::tokenize_file;
 use tjlb_rust::parser::Parser;
 use tjlb_rust::typechecker::TypeChecker;
 
@@ -115,41 +114,36 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn lex_file(path: &PathBuf) -> Result<()> {
-    let input = fs::read_to_string(path)
-        .with_context(|| format!("failed to read file '{}'", path.display()))?;
-
-    let tokens =
-        tokenize(input).with_context(|| format!("failed to tokenize '{}'", path.display()))?;
+fn lex_file(path: &Path) -> Result<()> {
+    let pp = tokenize_file(path)
+        .with_context(|| format!("failed to tokenize '{}'", path.display()))?;
 
     println!("Tokens:");
     println!("-------");
-    for token in &tokens {
+    for token in &pp.tokens {
+        let file = pp
+            .files
+            .get(token.pos.file_id as usize)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| path.display().to_string());
         println!(
             "{}:{}:{} {:?} {}",
-            path.display(),
-            token.pos.line,
-            token.pos.column,
-            token.kind,
-            token.lexeme
+            file, token.pos.line, token.pos.column, token.kind, token.lexeme
         );
     }
 
-    println!("\nTotal tokens: {}", tokens.len());
+    println!("\nTotal tokens: {}", pp.tokens.len());
 
     Ok(())
 }
 
-fn parse_file(path: &PathBuf) -> Result<()> {
-    let input = fs::read_to_string(path)
-        .with_context(|| format!("failed to read file '{}'", path.display()))?;
-
-    // Tokenize
-    let tokens =
-        tokenize(input).with_context(|| format!("failed to tokenize '{}'", path.display()))?;
+fn parse_file(path: &Path) -> Result<()> {
+    // Tokenize (expanding any `$include` directives).
+    let pp = tokenize_file(path)
+        .with_context(|| format!("failed to tokenize '{}'", path.display()))?;
 
     // Parse
-    let mut parser = Parser::new(tokens).with_source_file(path.display().to_string());
+    let mut parser = Parser::new(pp.tokens).with_source_files(pp.files);
     let parse_result = parser.parse_program();
     let program = parse_result.map_err(|errors| {
         let msgs: Vec<String> = errors.iter().map(|e| parser.format_error(e)).collect();
@@ -209,29 +203,26 @@ fn parse_file(path: &PathBuf) -> Result<()> {
 }
 
 fn compile_file(
-    path: &PathBuf,
+    path: &Path,
     emit: EmitTarget,
     output: Option<&std::path::Path>,
     print: bool,
     opt_level: u8,
     verify_each: bool,
 ) -> Result<()> {
-    let input = fs::read_to_string(path)
-        .with_context(|| format!("failed to read file '{}'", path.display()))?;
-
-    // Tokenize
-    let tokens =
-        tokenize(input).with_context(|| format!("failed to tokenize '{}'", path.display()))?;
+    // Tokenize (expanding any `$include` directives).
+    let pp = tokenize_file(path)
+        .with_context(|| format!("failed to tokenize '{}'", path.display()))?;
 
     // Parse
-    let mut parser = Parser::new(tokens).with_source_file(path.display().to_string());
+    let mut parser = Parser::new(pp.tokens).with_source_files(pp.files);
     let parse_result = parser.parse_program();
     let mut program = parse_result.map_err(|errors| {
         let msgs: Vec<String> = errors.iter().map(|e| parser.format_error(e)).collect();
         anyhow::anyhow!("{}", msgs.join("\n"))
     })?;
 
-    let mut typechecker = TypeChecker::new().with_source_file(path.display().to_string());
+    let mut typechecker = TypeChecker::new();
     typechecker.check_program(&mut program).map_err(|errors| {
         let mut err_msg = String::new();
         for error in &errors {
@@ -309,16 +300,13 @@ fn compile_file(
     Ok(())
 }
 
-fn interpret_file(path: &PathBuf, opt_level: u8, program_args: &[String]) -> Result<()> {
-    let input = fs::read_to_string(path)
-        .with_context(|| format!("failed to read file '{}'", path.display()))?;
-
-    // Tokenize
-    let tokens =
-        tokenize(input).with_context(|| format!("failed to tokenize '{}'", path.display()))?;
+fn interpret_file(path: &Path, opt_level: u8, program_args: &[String]) -> Result<()> {
+    // Tokenize (expanding any `$include` directives).
+    let pp = tokenize_file(path)
+        .with_context(|| format!("failed to tokenize '{}'", path.display()))?;
 
     // Parse
-    let mut parser = Parser::new(tokens).with_source_file(path.display().to_string());
+    let mut parser = Parser::new(pp.tokens).with_source_files(pp.files);
     let parse_result = parser.parse_program();
     let mut program = parse_result.map_err(|errors| {
         let msgs: Vec<String> = errors.iter().map(|e| parser.format_error(e)).collect();
@@ -326,7 +314,7 @@ fn interpret_file(path: &PathBuf, opt_level: u8, program_args: &[String]) -> Res
     })?;
 
     // Type check
-    let mut typechecker = TypeChecker::new().with_source_file(path.display().to_string());
+    let mut typechecker = TypeChecker::new();
     typechecker.check_program(&mut program).map_err(|errors| {
         let mut err_msg = String::new();
         for error in &errors {

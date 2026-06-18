@@ -34,7 +34,9 @@ pub struct TypeChecker {
     scopes: ScopeStack<LangType>,
     globals: HashMap<String, LangType>,
     current_function: Option<String>,
-    source_file: String,
+    /// File registry inherited from the parsed `Program` so error messages
+    /// can name the file the error actually came from.
+    source_files: Vec<std::path::PathBuf>,
     errors: Vec<TypeCheckError>,
 }
 
@@ -47,29 +49,31 @@ impl TypeChecker {
             scopes: ScopeStack::new(),
             globals: HashMap::new(),
             current_function: None,
-            source_file: String::new(),
+            source_files: Vec::new(),
             errors: Vec::new(),
         }
     }
 
-    /// Set the source file path for diagnostic messages.
+    /// Set a single-entry source-file registry. Convenience for the simple
+    /// single-file case; multi-file consumers should let `check_program`
+    /// pull the registry from `Program::source_files` directly.
     #[must_use]
     pub fn with_source_file(mut self, path: impl Into<String>) -> Self {
-        self.source_file = path.into();
+        self.source_files = vec![std::path::PathBuf::from(path.into())];
         self
     }
 
-    /// Format a single error with the source file prepended.
-    ///
-    /// Output format: `"path/to/file.tjlb:line:col: <error message>"`
+    /// Format a single error with the originating source file prepended.
+    /// Looks up the file via the error's `pos.file_id` so errors inside an
+    /// `$include`d file are attributed to that file, not the entry one.
     #[must_use]
     pub fn format_error(&self, err: &TypeCheckError) -> String {
-        if self.source_file.is_empty() {
+        let Some(pos) = err.position() else {
             return format!("{err}");
-        }
-        match err.position() {
-            Some(pos) => format!("{}:{}:{}: {}", self.source_file, pos.line, pos.column, err),
-            None => format!("{}: {}", self.source_file, err),
+        };
+        match self.source_files.get(pos.file_id as usize) {
+            Some(path) => format!("{}:{}:{}: {}", path.display(), pos.line, pos.column, err),
+            None => format!("{err}"),
         }
     }
 
@@ -85,6 +89,12 @@ impl TypeChecker {
         // Take the shared symbol table for the duration of checking; restore it
         // before returning so codegen sees it (plus any refinement we make).
         self.symbols = std::mem::take(&mut program.symbols);
+        // Inherit the parser's file registry — unless caller pre-set one via
+        // `with_source_file` (single-file convenience) — so error messages
+        // can name the originating file for each `Position`.
+        if self.source_files.is_empty() {
+            self.source_files = program.source_files.clone();
+        }
 
         self.register_declarations(program);
 
@@ -554,6 +564,54 @@ impl TypeChecker {
                 let struct_ty = LangType::new(TypeBase::Struct(struct_id), 0, 0, false);
                 expr.expr_type = struct_ty;
                 struct_ty
+            }
+
+            // A bare function name (or `&func` collapsed) — the parser stamped
+            // the FnPtr type from the registry. Nothing to check; just hand it
+            // back. An unknown function name would have stayed `Variable` with
+            // a `void` stamp, so it never reaches this arm.
+            ExprKind::FunctionRef(_) => default_type,
+
+            // Indirect call through a function-pointer value: synth the callee,
+            // validate it's a `FnPtr`, then `check` each arg against the
+            // declared parameter type (mirrors `check_call`'s pattern).
+            ExprKind::IndirectCall { callee, args } => {
+                let callee_type = self.synth_expression(callee);
+                let sig_params: Option<Vec<LangType>> = match callee_type.base {
+                    TypeBase::FnPtr(id) if callee_type.pointer_depth == 0 => {
+                        Some(self.symbols.fnptr_sig(id).params.clone())
+                    }
+                    _ => {
+                        self.errors.push(TypeCheckError::TypeMismatch {
+                            expected: LangType::new(TypeBase::Void, 0, 0, false),
+                            found: callee_type,
+                            position: pos,
+                        });
+                        None
+                    }
+                };
+                if let Some(params) = sig_params {
+                    if params.len() != args.len() {
+                        self.errors.push(TypeCheckError::ArgumentCountMismatch {
+                            name: "<indirect call>".to_string(),
+                            expected: params.len(),
+                            found: args.len(),
+                            position: pos,
+                        });
+                        for arg in args.iter_mut() {
+                            self.synth_expression(arg);
+                        }
+                    } else {
+                        for (pty, arg) in params.iter().zip(args.iter_mut()) {
+                            self.check_expression(arg, pty);
+                        }
+                    }
+                } else {
+                    for arg in args.iter_mut() {
+                        self.synth_expression(arg);
+                    }
+                }
+                default_type
             }
         }
     }

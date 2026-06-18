@@ -1,0 +1,16 @@
+# expected: 42
+# An array of function pointers, picked at runtime by index. The fn-ptr type
+# is parenthesised so the trailing `[N]` modifier attaches to the *array of
+# fn-ptrs*, not (greedily) to the return type — `fn(...) -> T[N]` would
+# otherwise mean "fn returning T[N]".
+fn dbl(i32 x) -> i32 { return x * 2 }
+fn trp(i32 x) -> i32 { return x * 3 }
+fn add5(i32 x) -> i32 { return x + 5 }
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    (fn(i32) -> i32)[3] table = {&dbl, &trp, &add5}
+    i32 a = table[0](10)      # 20
+    i32 b = table[1](7)       # 21
+    i32 c = table[2](-4)      # 1
+    return a + b + c          # 42
+}

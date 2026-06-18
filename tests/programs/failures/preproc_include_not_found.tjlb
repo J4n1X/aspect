@@ -1,0 +1,9 @@
+# expected: "include", "no_such_file"
+# A `$include` whose target doesn't exist on disk surfaces an
+# `IncludeError` from the preprocessor stage. Relative paths are resolved
+# against the directory of the file containing the directive.
+$include "no_such_file_for_preprocessor_test.tjlb"
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

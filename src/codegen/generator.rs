@@ -42,6 +42,11 @@ pub struct CodeGenerator<'ctx> {
     /// registry (the walker is not threaded the `Program`).
     pub(crate) struct_fields: HashMap<u32, Vec<(String, LangType)>>,
 
+    /// Function-pointer signatures by id (indexed by `TypeBase::FnPtr(u32)`).
+    /// Cloned from `program.symbols.fnptr_sigs` during `generate`, since
+    /// `walk_expression` doesn't carry the `Program` reference.
+    pub(crate) fnptr_sigs: Vec<crate::symbol::module::FnPtrSig>,
+
     pub(crate) scope: ScopeStack<'ctx>,
 
     pub(crate) current_function: Option<FunctionValue<'ctx>>,
@@ -98,6 +103,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             current_sret: None,
             struct_types: HashMap::new(),
             struct_fields: HashMap::new(),
+            fnptr_sigs: Vec::new(),
             scope: ScopeStack::new(),
             current_function: None,
             current_function_return_type: None,
@@ -119,6 +125,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Register type-struct LLVM types before anything references them.
         self.register_structs(program)
             .context("failed to register type-struct layouts")?;
+
+        // Seed the codegen-local FnPtr signature cache from the shared registry.
+        self.fnptr_sigs = program.symbols.all_fnptr_sigs().to_vec();
 
         // First pass: Declare all functions (for forward references)
         for func in &program.functions {
@@ -207,7 +216,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| {
                 CodegenError::InvalidOperation(
                     format!("Failed to run optimization passes: {e}"),
-                    crate::lexer::Position { line: 0, column: 0 },
+                    crate::lexer::Position::new(0, 0),
                 )
             })
     }
@@ -243,7 +252,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         "Failed to write object file to '{}': {e}",
                         path.display()
                     ),
-                    crate::lexer::Position { line: 0, column: 0 },
+                    crate::lexer::Position::new(0, 0),
                 )
             })
     }

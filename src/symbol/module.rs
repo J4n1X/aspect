@@ -61,6 +61,14 @@ pub struct StructInfo {
     pub methods: HashMap<String, MethodSig>,
 }
 
+/// A distinct function-pointer signature (`fn(params) -> return_type`).
+/// Two FnPtr ids are equal iff their `FnPtrSig`s compare equal.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FnPtrSig {
+    pub params: Vec<LangType>,
+    pub return_type: LangType,
+}
+
 /// The program-wide table of resolved global symbols.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ModuleSymbols {
@@ -72,6 +80,9 @@ pub struct ModuleSymbols {
     structs_by_name: HashMap<String, u32>,
     /// Alias name -> the type it resolves to.
     aliases: HashMap<String, LangType>,
+    /// Function-pointer signatures, interned by structural identity.
+    /// Index into the vec == the FnPtr id stored in `TypeBase::FnPtr(u32)`.
+    fnptr_sigs: Vec<FnPtrSig>,
 }
 
 impl ModuleSymbols {
@@ -200,5 +211,37 @@ impl ModuleSymbols {
     #[must_use]
     pub fn resolve_alias(&self, name: &str) -> Option<LangType> {
         self.aliases.get(name).copied()
+    }
+
+    // ── Function-pointer signatures ──────────────────────────────────────────
+
+    /// Intern a function-pointer signature, returning a stable id. Identical
+    /// signatures return the same id (structural deduplication), so two FnPtr
+    /// types are compared by id alone — `LangType` stays `Copy`/`Eq`.
+    pub fn intern_fnptr(&mut self, params: Vec<LangType>, return_type: LangType) -> u32 {
+        let sig = FnPtrSig {
+            params,
+            return_type,
+        };
+        if let Some(idx) = self.fnptr_sigs.iter().position(|s| *s == sig) {
+            return u32::try_from(idx).expect("fnptr signature index overflows u32");
+        }
+        let id = u32::try_from(self.fnptr_sigs.len())
+            .expect("number of fn-ptr signatures exceeds u32::MAX");
+        self.fnptr_sigs.push(sig);
+        id
+    }
+
+    /// Resolve a FnPtr id back to its signature.
+    #[must_use]
+    pub fn fnptr_sig(&self, id: u32) -> &FnPtrSig {
+        &self.fnptr_sigs[id as usize]
+    }
+
+    /// All registered FnPtr signatures, indexed by id. Used by codegen to seed
+    /// its local cache (the walker is not threaded the `Program`).
+    #[must_use]
+    pub fn all_fnptr_sigs(&self) -> &[FnPtrSig] {
+        &self.fnptr_sigs
     }
 }

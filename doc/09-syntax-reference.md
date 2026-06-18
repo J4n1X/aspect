@@ -213,6 +213,28 @@ Supported escape sequences: `\n` `\r` `\t` `\\` `\"`
 
 ---
 
+## Preprocessor
+
+Before the parser runs, a small preprocessor stage walks the token stream
+and expands `$<directive>` forms. The dollar sigil was chosen because `#`
+is already taken by line comments. Currently one directive is supported:
+
+```
+$include "path"
+```
+
+The string literal names a source file whose tokens are spliced in at the
+directive's position. Paths are resolved **relative to the file containing
+the directive**, mirroring C-family preprocessors. Inclusion is recursive
+(included files may themselves `$include`), and a file's canonicalised
+path is recorded the first time it expands — subsequent references to the
+same file are silent no-ops, so mutually-referential headers don't loop
+without you writing `$ifndef` guards.
+
+Implementation note: `$include` is processed at the *token* layer, so it
+isn't syntactically restricted to the top level. The recommended placement
+is between top-level items.
+
 ## Grammar (EBNF)
 
 ### Top level
@@ -258,9 +280,22 @@ term       ::= ';' | '\n'       # statement terminator
 ### Types
 
 ```
-type  ::= type-token                 # built-in: scanned as one lexer token (see above)
-        | ident ('*')*               # named type: an alias or type-struct, with
-                                     # parser-applied pointer modifiers
+type       ::= type-atom ('[' integer ']')? ('*')*   # postfix array / pointer modifiers
+type-atom  ::= type-token                            # built-in (lexer-folded)
+             | ident                                 # named: an alias or type-struct
+             | fnptr-type                            # function-pointer type
+             | '(' type ')'                          # grouping — disambiguates `(T)[N]` etc.
+fnptr-type ::= 'fn' '(' (type (',' type)*)? ')' ('->' type)?
+```
+
+**Grouped types.** The lexer eagerly folds `T[N]` and `T*` into the preceding type token, so
+`fn(...) -> T[N]` means "fn returning `T[N]`", not "array of fn-pointers". Parens are the
+"stop folding here" marker that lets you spell the other shape. They generalise:
+
+```
+(fn(i32) -> i32)[3] table   # array of 3 fn-pointers
+(fn(i32) -> i32)*  pp       # pointer to a fn-pointer
+(i32*)[3]          arr      # array of 3 i32 pointers
 ```
 
 Built-in type tokens carry base type, optional `const`, optional array size, and
@@ -300,6 +335,21 @@ desugars the method to a free function named `T$method` and synthesises the `thi
 `*T` (or `*const T` for `const fn`). On a method call, a value receiver is auto-referenced —
 `obj.m()` lowers to `T$m(&obj, ...)` — and a pointer receiver is passed through unchanged.
 Static methods take no receiver; `T.m(...)` lowers to `T$m(...)`.
+
+**Function pointers.** A `fn(T1, T2, ...) -> R` (or `fn(...)` for a `u0`/void return) *is*
+a pointer — there is no separate non-pointer function type. A function's address is taken
+by name: `&func` and bare `func` both produce a value of `fn(...) -> R` matching the
+function's signature. Calling through a function-pointer value uses the regular call syntax
+— `ptr(args)` — and lowers to LLVM's `call` through the pointer (`build_indirect_call`).
+A function-pointer type composes with the existing array suffix using parenthesised types:
+`(fn(i32) -> i32)[3] table = {&a, &b, &c}; table[i](x)`. (An `alias` over the fn-ptr type
+is a fine stylistic alternative.)
+
+```
+fnptr-value ::= '&' ident          # explicit address-of a function name
+              | ident              # implicit fn-to-ptr decay of a known function
+indirect-call ::= postfix '(' arg-list ')'   # callee must have a fn-ptr type
+```
 
 The two call forms are **strict**: an instance method must be called as `obj.m(...)` and a
 static method as `T.m(...)`. A static-form call to an instance method (UFCS-style

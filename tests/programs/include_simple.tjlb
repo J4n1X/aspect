@@ -1,0 +1,9 @@
+# expected: 42
+# `$include` pulls in a helper file from disk. Paths are resolved relative
+# to the file that contains the directive — `include_helpers/math.tjlb`
+# sits next to this one in `tests/programs/`.
+$include "include_helpers/math.tjlb"
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return cube(3) + 15      # 27 + 15 = 42
+}

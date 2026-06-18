@@ -1,0 +1,11 @@
+# expected: "broken.tjlb", "this_var_does_not_exist"
+# Regression: an error inside an `$include`d file must name *that* file in
+# its diagnostic, not the host. The expected-fragment check requires
+# `broken.tjlb` to appear in the formatted error — proving the file_id on
+# the offending token was preserved from the included file through to
+# `format_error`'s file-registry lookup.
+$include "../include_helpers/broken.tjlb"
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return buggy(0)
+}

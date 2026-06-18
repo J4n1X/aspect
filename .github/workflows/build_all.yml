@@ -61,7 +61,7 @@ jobs:
 
       - name: Rename artifact for upload (Windows)
         if: runner.os == 'Windows'
-        run: move target\release\tjlb-parser.exe target\release\tjlc.exe
+        run: move /Y target\release\tjlb-parser.exe target\release\tjlc.exe
        
       - name: Rename artifact for upload (Linux)
         if: runner.os == 'Linux'

@@ -290,4 +290,83 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.build_abi_call(name, args, pos)?;
         Ok(())
     }
+
+    /// Emit an indirect call through a function-pointer value. Returns the
+    /// call's basic result, or `None` for a void-returning call. Shared by
+    /// the expression and statement codegen paths.
+    fn build_indirect_call_inner(
+        &mut self,
+        callee: &Expression,
+        args: &[Expression],
+        pos: Position,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        let id = match callee.expr_type.base {
+            TypeBase::FnPtr(id) if callee.expr_type.pointer_depth == 0 => id,
+            _ => {
+                return Err(CodegenError::TypeError(
+                    format!(
+                        "callee of indirect call has non-fn-ptr type '{}'",
+                        callee.expr_type
+                    ),
+                    pos,
+                ));
+            }
+        };
+        let sig = self.fnptr_sigs.get(id as usize).cloned().ok_or_else(|| {
+            CodegenError::TypeError(format!("unregistered fn-ptr signature id {id}"), pos)
+        })?;
+
+        let callee_val = self.generate_expression(callee)?;
+        let callee_ptr = callee_val.into_pointer_value();
+
+        // Reconstruct the LLVM function type from the registered signature.
+        let param_types: Result<Vec<_>, _> =
+            sig.params.iter().map(|t| self.lang_type_to_llvm(t)).collect();
+        let param_types = param_types?;
+        let param_metas: Vec<BasicMetadataTypeEnum<'ctx>> =
+            param_types.iter().map(|t| (*t).into()).collect();
+        let fn_ty = if sig.return_type.is_void() {
+            self.context.void_type().fn_type(&param_metas, false)
+        } else {
+            self.lang_type_to_llvm(&sig.return_type)?
+                .fn_type(&param_metas, false)
+        };
+
+        // Coerce each argument to the registered parameter type, just like
+        // direct calls. Struct by-value isn't yet plumbed through fn-ptrs.
+        let mut arg_values: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> =
+            Vec::with_capacity(args.len());
+        for (i, arg) in args.iter().enumerate() {
+            let target = sig.params.get(i);
+            let val = self.generate_coerced_value(arg, target)?;
+            arg_values.push(val.into());
+        }
+
+        let call = self
+            .builder
+            .build_indirect_call(fn_ty, callee_ptr, &arg_values, "indirect_call")?;
+        Ok(call.try_as_basic_value().basic())
+    }
+
+    /// Indirect call used as an expression — errors on a void return.
+    pub(crate) fn generate_indirect_call(
+        &mut self,
+        callee: &Expression,
+        args: &[Expression],
+        pos: Position,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        self.build_indirect_call_inner(callee, args, pos)?
+            .ok_or_else(|| CodegenError::MissingReturn("<indirect call>".to_string(), pos))
+    }
+
+    /// Indirect call used as a statement — void returns are accepted.
+    pub(crate) fn generate_indirect_call_statement(
+        &mut self,
+        callee: &Expression,
+        args: &[Expression],
+        pos: Position,
+    ) -> Result<(), CodegenError> {
+        self.build_indirect_call_inner(callee, args, pos)?;
+        Ok(())
+    }
 }

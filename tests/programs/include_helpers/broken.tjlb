@@ -1,0 +1,6 @@
+# A helper deliberately containing a type error, used by the
+# `failures/preproc_included_error` regression test to confirm that errors
+# inside an `$include`d file attribute to *that* file, not the host.
+fn buggy(i32 x) -> i32 {
+    return x + this_var_does_not_exist
+}

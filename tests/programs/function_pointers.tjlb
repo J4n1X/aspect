@@ -1,0 +1,18 @@
+# expected: 42
+# Function pointers — three lowerings exercised:
+#   - `&func` (explicit) and bare `func` (implicit decay) into a fn-ptr value.
+#   - fn-ptr stored in a local variable; called directly through the variable.
+#   - fn-ptr passed as a parameter; called inside the callee (indirect call).
+fn add(i32 a, i32 b) -> i32 { return a + b }
+fn sub(i32 a, i32 b) -> i32 { return a - b }
+
+fn apply(fn(i32, i32) -> i32 op, i32 x, i32 y) -> i32 {
+    return op(x, y)
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    fn(i32, i32) -> i32 f = &add
+    i32 r1 = f(30, 12)             # 42 via a local fn-ptr
+    i32 r2 = apply(sub, 60, 18)    # 42 via a parameter (implicit decay)
+    return r1 + r2 - 42            # 42 + 42 - 42 = 42
+}

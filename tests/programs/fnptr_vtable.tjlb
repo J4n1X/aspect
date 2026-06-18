@@ -1,0 +1,15 @@
+# expected: 42
+# A type-struct field of function-pointer type — the foundation for vtables,
+# event handlers, and dispatch tables. `obj.handler(x)` falls through field
+# access (no method by that name on the type) and the indirect-call path
+# emits `build_indirect_call`.
+type Button {
+    public fn(i32) -> i32 on_click
+}
+
+fn double(i32 x) -> i32 { return x * 2 }
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Button b = Button { on_click = &double }
+    return b.on_click(21)
+}

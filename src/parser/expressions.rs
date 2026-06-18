@@ -144,7 +144,10 @@ pub struct Parser {
     pub(crate) string_literals: IndexSet<String>,
     pub(crate) context_stack: Vec<&'static str>,
     pub(crate) errors: Vec<ParserError>,
-    source_file: String,
+    /// File registry indexed by `Position::file_id`. Set by the preprocessor;
+    /// moved into `Program` at the end of `parse_program` so the type checker
+    /// inherits it for its own error formatting.
+    source_files: Vec<std::path::PathBuf>,
 }
 
 impl Parser {
@@ -158,25 +161,37 @@ impl Parser {
             string_literals: IndexSet::new(),
             context_stack: Vec::new(),
             errors: Vec::new(),
-            source_file: String::new(),
+            source_files: Vec::new(),
         }
     }
 
-    /// Set the source file name used in error messages.
+    /// Set a single-entry source-file registry (the simple single-file case).
+    /// Equivalent to `with_source_files(vec![path])`.
     #[must_use]
     pub fn with_source_file(mut self, path: impl Into<String>) -> Self {
-        self.source_file = path.into();
+        self.source_files = vec![std::path::PathBuf::from(path.into())];
         self
     }
 
-    /// Format a single error prefixed with the source file and position.
+    /// Set the full source-file registry from the preprocessor — entry file
+    /// at id 0, each `$include`-pulled file at the next ids. Error formatting
+    /// uses each error's `pos.file_id` to look up the right filename here.
+    #[must_use]
+    pub fn with_source_files(mut self, files: Vec<std::path::PathBuf>) -> Self {
+        self.source_files = files;
+        self
+    }
+
+    /// Format a single error prefixed with the source file the error came
+    /// from (resolved via `pos.file_id`) and its line/column.
     #[must_use]
     pub fn format_error(&self, err: &ParserError) -> String {
-        match err.position() {
-            Some(pos) if !self.source_file.is_empty() => {
-                format!("{}:{}:{}: {}", self.source_file, pos.line, pos.column, err)
-            }
-            _ => err.to_string(),
+        let Some(pos) = err.position() else {
+            return err.to_string();
+        };
+        match self.source_files.get(pos.file_id as usize) {
+            Some(path) => format!("{}:{}:{}: {}", path.display(), pos.line, pos.column, err),
+            None => err.to_string(),
         }
     }
 
@@ -410,6 +425,13 @@ impl Parser {
                 self.advance();
                 let expr = self.parse_unary()?;
 
+                // `&func` for a function name is the function-pointer value
+                // itself — no extra indirection. Collapse to keep the AST tidy
+                // and avoid a meaningless `Reference(FunctionRef(...))` shape.
+                if matches!(expr.kind, ExprKind::FunctionRef(_)) {
+                    return Ok(expr);
+                }
+
                 // Taking address increases pointer depth
                 let mut result_type = expr.expr_type;
                 result_type.pointer_depth += 1;
@@ -545,45 +567,71 @@ impl Parser {
     fn parse_function_call(&mut self, callee: &Expression) -> Result<Expression, ParserError> {
         let pos = callee.pos;
 
-        // Extract function name
-        let func_name = match &callee.kind {
-            ExprKind::Variable(name) => name.clone(),
-            _ => {
-                return Err(ParserError::ExpectedExpression(pos));
-            }
-        };
+        // Direct call: only a `FunctionRef` (produced by `variable_reference`
+        // for known function names) lowers to a `FunctionCall` by-name.
+        if let ExprKind::FunctionRef(name) = &callee.kind {
+            let func_name = name.clone();
+            let func_symbol = self
+                .module
+                .lookup_function(&func_name)
+                .ok_or_else(|| ParserError::UndefinedFunction(func_name.clone(), pos))?;
+            let return_type = func_symbol.return_type;
 
-        // Look up function in the module symbol table
-        let func_symbol = self
-            .module
-            .lookup_function(&func_name)
-            .ok_or_else(|| ParserError::UndefinedFunction(func_name.clone(), pos))?;
-
-        let return_type = func_symbol.return_type;
-
-        // Parse arguments
-        let mut args = Vec::new();
-
-        if !self.check(&TokenKind::CloseParen) {
-            loop {
-                args.push(self.parse_expression()?);
-
-                if !self.match_token(&[TokenKind::Comma]) {
-                    break;
+            let mut args = Vec::new();
+            if !self.check(&TokenKind::CloseParen) {
+                loop {
+                    args.push(self.parse_expression()?);
+                    if !self.match_token(&[TokenKind::Comma]) {
+                        break;
+                    }
                 }
             }
+            self.expect(&TokenKind::CloseParen, ")")?;
+
+            return Ok(Expression::new(
+                ExprKind::FunctionCall {
+                    name: func_name,
+                    args,
+                },
+                return_type,
+                pos,
+            ));
         }
 
-        self.expect(&TokenKind::CloseParen, ")")?;
+        // Indirect call: any expression with a function-pointer type. The
+        // signature is in the registry; pull the return type and stamp it.
+        // Argument types are checked downstream by the type checker.
+        if let TypeBase::FnPtr(id) = callee.expr_type.base
+            && callee.expr_type.pointer_depth == 0
+        {
+            let return_type = self.module.fnptr_sig(id).return_type;
+            let mut args = Vec::new();
+            if !self.check(&TokenKind::CloseParen) {
+                loop {
+                    args.push(self.parse_expression()?);
+                    if !self.match_token(&[TokenKind::Comma]) {
+                        break;
+                    }
+                }
+            }
+            self.expect(&TokenKind::CloseParen, ")")?;
 
-        Ok(Expression::new(
-            ExprKind::FunctionCall {
-                name: func_name,
-                args,
-            },
-            return_type,
-            pos,
-        ))
+            return Ok(Expression::new(
+                ExprKind::IndirectCall {
+                    callee: Box::new(callee.clone()),
+                    args,
+                },
+                return_type,
+                pos,
+            ));
+        }
+
+        // A bare `Variable(name)` callee that's neither a function nor a
+        // fn-ptr-typed local is a typo / undeclared call.
+        if let ExprKind::Variable(name) = &callee.kind {
+            return Err(ParserError::UndefinedFunction(name.clone(), pos));
+        }
+        Err(ParserError::ExpectedExpression(pos))
     }
 
     fn parse_array_access(&mut self, array_expr: &Expression) -> Result<Expression, ParserError> {
@@ -711,16 +759,34 @@ impl Parser {
     /// symbol table (with array-to-pointer decay); unknown names get a `void`
     /// placeholder and are resolved later (e.g. function names in a call).
     fn variable_reference(&mut self, name: String, pos: Position) -> Expression {
-        let expr_type = if let Some(var_symbol) = self.symbol_table.lookup_variable(&name) {
-            if var_symbol.symbol_type.is_array() {
+        if let Some(var_symbol) = self.symbol_table.lookup_variable(&name) {
+            let expr_type = if var_symbol.symbol_type.is_array() {
                 var_symbol.symbol_type.decay_to_pointer()
             } else {
                 var_symbol.symbol_type
-            }
-        } else {
-            LangType::new(TypeBase::Void, 0, 0, false)
-        };
-        Expression::new(ExprKind::Variable(name), expr_type, pos)
+            };
+            return Expression::new(ExprKind::Variable(name), expr_type, pos);
+        }
+        // Not a variable: a known function name becomes a function-pointer
+        // value (`FunctionRef`). Capturing the signature now lets `&foo` and
+        // bare `foo` flow through type-checking and codegen uniformly.
+        let func_sig = self.module.lookup_function(&name).map(|f| {
+            (
+                f.params.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
+                f.return_type,
+            )
+        });
+        if let Some((params, return_type)) = func_sig {
+            let id = self.module.intern_fnptr(params, return_type);
+            let ty = LangType::new(TypeBase::FnPtr(id), 0, 0, false);
+            return Expression::new(ExprKind::FunctionRef(name), ty, pos);
+        }
+        // Unknown name: stamp void; the type checker raises UndefinedVariable.
+        Expression::new(
+            ExprKind::Variable(name),
+            LangType::new(TypeBase::Void, 0, 0, false),
+            pos,
+        )
     }
 
     /// Parse a type (including array types like u32[4])
@@ -747,6 +813,42 @@ impl Parser {
                 };
                 Ok(self.apply_type_modifiers(base))
             }
+            // Parenthesised type: `(T)` — purely a grouping marker. The lexer
+            // greedily folds `T[N]` and `T*` into the preceding type token, so
+            // parens are the only way to spell things like "array of pointers"
+            // (`(i32*)[3]`) or "array of fn-pointers" (`(fn(...) -> R)[N]`).
+            // The grouped type composes with the normal trailing modifiers.
+            TokenKind::OpenParen => {
+                self.advance();
+                let inner = self.parse_type()?;
+                self.expect(&TokenKind::CloseParen, ")")?;
+                Ok(self.apply_type_modifiers(inner))
+            }
+            // Function-pointer type: `fn(T1, T2, ...) -> R` (or `fn(...)` for
+            // a `void`/`u0` return). `fn` here is always followed by `(` — a
+            // function *definition* would have an identifier between them.
+            TokenKind::Keyword(Keyword::Fn) => {
+                self.advance();
+                self.expect(&TokenKind::OpenParen, "(")?;
+                let mut params: Vec<LangType> = Vec::new();
+                if !self.check(&TokenKind::CloseParen) {
+                    loop {
+                        params.push(self.parse_type()?);
+                        if !self.match_token(&[TokenKind::Comma]) {
+                            break;
+                        }
+                    }
+                }
+                self.expect(&TokenKind::CloseParen, ")")?;
+                let return_type = if self.match_token(&[TokenKind::Arrow]) {
+                    self.parse_type()?
+                } else {
+                    LangType::new(TypeBase::Void, 0, 0, false)
+                };
+                let id = self.module.intern_fnptr(params, return_type);
+                let base = LangType::new(TypeBase::FnPtr(id), 0, 0, false);
+                Ok(self.apply_type_modifiers(base))
+            }
             _ => Err(ParserError::ExpectedToken(
                 "type".to_string(),
                 format!("{}", self.peek().kind),
@@ -762,7 +864,30 @@ impl Parser {
     /// parser attaches pointer modifiers here. Stacks on top of any pointer
     /// depth the resolved type already carries (e.g. `alias P u8*` then `P*`
     /// yields `pointer_depth == 2`).
-    fn apply_type_modifiers(&mut self, ty: LangType) -> LangType {
+    fn apply_type_modifiers(&mut self, mut ty: LangType) -> LangType {
+        // Mirror the built-in lexer's order: array suffix first, then pointer
+        // depth. Restore the cursor on a malformed `[`, so a later `[i]`
+        // (index expression) isn't accidentally consumed here.
+        if ty.array_size.is_none() && self.check(&TokenKind::OpenBracket) {
+            let saved_current = self.current;
+            self.advance();
+            if let TokenKind::Integer(n) = self.peek().kind {
+                let n_val = n;
+                self.advance();
+                if self.check(&TokenKind::CloseBracket) {
+                    self.advance();
+                    if let Ok(size) = u32::try_from(n_val) {
+                        ty = ty.with_array_size(size);
+                    } else {
+                        self.current = saved_current;
+                    }
+                } else {
+                    self.current = saved_current;
+                }
+            } else {
+                self.current = saved_current;
+            }
+        }
         let mut depth = ty.pointer_depth;
         while self.check(&TokenKind::Asterisk) {
             self.advance();
@@ -784,8 +909,21 @@ impl Parser {
         let known =
             self.module.resolve_alias(name).is_some() || self.module.struct_id(name).is_some();
         if known {
-            // Known type: skip pointer modifiers, then require the variable name.
+            // Known type: skip optional `[N]` array modifier, then any pointer
+            // modifiers, then require the variable name.
             let mut i = self.current + 1;
+            if matches!(
+                self.tokens.get(i).map(|t| &t.kind),
+                Some(TokenKind::OpenBracket)
+            ) && matches!(
+                self.tokens.get(i + 1).map(|t| &t.kind),
+                Some(TokenKind::Integer(_))
+            ) && matches!(
+                self.tokens.get(i + 2).map(|t| &t.kind),
+                Some(TokenKind::CloseBracket)
+            ) {
+                i += 3;
+            }
             while matches!(self.tokens.get(i).map(|t| &t.kind), Some(TokenKind::Asterisk)) {
                 i += 1;
             }
@@ -803,6 +941,71 @@ impl Parser {
                 Some(TokenKind::Identifier(_))
             )
         }
+    }
+
+    /// True when the upcoming tokens begin a *function-pointer* variable
+    /// declaration: `fn(...)...` followed eventually by a variable name. Used
+    /// by the statement dispatcher (a function *definition* is top-level only,
+    /// so any `fn(` in statement position is a fn-ptr type).
+    pub(crate) fn starts_fnptr_var_decl(&self) -> bool {
+        matches!(self.peek().kind, TokenKind::Keyword(Keyword::Fn))
+            && matches!(
+                self.tokens.get(self.current + 1).map(|t| &t.kind),
+                Some(TokenKind::OpenParen)
+            )
+    }
+
+    /// True when the upcoming tokens begin a *parenthesised-type* variable
+    /// declaration: `(...)` (a grouped type) optionally followed by `[N]`
+    /// and/or `*` modifiers, then a variable name. Distinguishes a type
+    /// `(T)[N]* ident = ...` from a parenthesised expression statement.
+    pub(crate) fn starts_grouped_var_decl(&self) -> bool {
+        if !matches!(self.peek().kind, TokenKind::OpenParen) {
+            return false;
+        }
+        // Walk past balanced parens to find what follows the group.
+        let mut i = self.current;
+        let mut depth: u32 = 0;
+        loop {
+            let Some(t) = self.tokens.get(i) else {
+                return false;
+            };
+            match &t.kind {
+                TokenKind::OpenParen => depth += 1,
+                TokenKind::CloseParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        i += 1;
+                        break;
+                    }
+                }
+                TokenKind::Eof => return false,
+                _ => {}
+            }
+            i += 1;
+        }
+        // Optional `[N]` array modifier.
+        if matches!(
+            self.tokens.get(i).map(|t| &t.kind),
+            Some(TokenKind::OpenBracket)
+        ) && matches!(
+            self.tokens.get(i + 1).map(|t| &t.kind),
+            Some(TokenKind::Integer(_))
+        ) && matches!(
+            self.tokens.get(i + 2).map(|t| &t.kind),
+            Some(TokenKind::CloseBracket)
+        ) {
+            i += 3;
+        }
+        // Any number of pointer modifiers.
+        while matches!(self.tokens.get(i).map(|t| &t.kind), Some(TokenKind::Asterisk)) {
+            i += 1;
+        }
+        // The variable name must follow.
+        matches!(
+            self.tokens.get(i).map(|t| &t.kind),
+            Some(TokenKind::Identifier(_))
+        )
     }
 
     // NOTE: parse_alloc is kept for backward compatibility with dynamic allocations
@@ -882,7 +1085,10 @@ impl Parser {
         while !self.is_at_end() {
             let is_extern = kw_if!(Extern);
 
-            if self.check_keyword(&Keyword::Fn) {
+            // `fn ident(...)` is a function definition; `fn(...)` (no name
+            // between `fn` and `(`) is a function-pointer-typed global. The
+            // statement-table dispatch handles the local-decl variant.
+            if self.check_keyword(&Keyword::Fn) && !self.starts_fnptr_var_decl() {
                 let func = self.parse_function(is_extern)?;
                 functions.push(func);
             } else if self.check_keyword(&Keyword::Alias) {
@@ -905,9 +1111,12 @@ impl Parser {
             } else if matches!(
                 self.peek().kind,
                 TokenKind::LangType(_) | TokenKind::Identifier(_)
-            ) {
-                // A leading built-in type or a named type (alias / type-struct)
-                // begins a global variable declaration.
+            ) || self.starts_fnptr_var_decl()
+                || self.starts_grouped_var_decl()
+            {
+                // A leading built-in type, named type (alias / type-struct),
+                // function-pointer type, or parenthesised group begins a
+                // global variable declaration.
                 if is_extern {
                     return Err(ParserError::UnexpectedToken(
                         "extern can only be used with functions".to_string(),
@@ -931,6 +1140,7 @@ impl Parser {
             global_vars,
             string_literals: self.string_literals.iter().cloned().collect(),
             symbols: std::mem::take(&mut self.module),
+            source_files: self.source_files.clone(),
         })
     }
 
@@ -1193,6 +1403,32 @@ impl Parser {
         Ok(Function { proto, body })
     }
 
+    /// `true` when `name` is a method of `base`'s type (instance form) or of
+    /// the type whose name `base` resolves to (static form). Used to decide
+    /// between method-call dispatch and field-access in `parse_dot_postfix`.
+    fn identifier_is_method_of_base(&self, base: &Expression, name: &str) -> bool {
+        // Instance: base's type is a type-struct (value or pointer).
+        if let TypeBase::Struct(id) = base.expr_type.base
+            && self
+                .module
+                .struct_info(id)
+                .methods
+                .contains_key(name)
+        {
+            return true;
+        }
+        // Static: base is a bare identifier naming a known type-struct, with
+        // no local variable shadowing it.
+        if let ExprKind::Variable(var_name) = &base.kind
+            && let Some(id) = self.module.struct_id(var_name)
+            && self.symbol_table.lookup_variable(var_name).is_none()
+            && self.module.struct_info(id).methods.contains_key(name)
+        {
+            return true;
+        }
+        false
+    }
+
     /// Parse a `.ident` postfix — the `.` was already consumed. The followup
     /// distinguishes two forms:
     /// - `base.method(args)` → a method call, desugared to a `FunctionCall`
@@ -1216,8 +1452,11 @@ impl Parser {
             }
         };
 
-        // Method call: `.ident(args)`.
-        if self.check(&TokenKind::OpenParen) {
+        // Method call: `.ident(args)` — only when `ident` is actually a method
+        // of the base's type. Otherwise (e.g. `.callback(` where `callback` is
+        // a *field* of function-pointer type), drop through to field access
+        // and let the postfix loop's `OpenParen` arm emit an indirect call.
+        if self.check(&TokenKind::OpenParen) && self.identifier_is_method_of_base(&base, &name) {
             self.advance();
             let mut args = Vec::new();
             if !self.check(&TokenKind::CloseParen) {
