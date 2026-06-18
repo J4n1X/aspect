@@ -31,3 +31,19 @@ pub enum CodegenError {
     #[error("Missing return statement in function '{0}' at {1}")]
     MissingReturn(String, Position),
 }
+
+impl CodegenError {
+    /// Extract the source position from this error, if any.
+    #[must_use]
+    pub fn position(&self) -> Option<Position> {
+        match self {
+            Self::UndefinedVariable(_, pos)
+            | Self::UndefinedFunction(_, pos)
+            | Self::TypeError(_, pos)
+            | Self::InvalidOperation(_, pos)
+            | Self::UnexpectedStatement(pos)
+            | Self::MissingReturn(_, pos) => Some(*pos),
+            Self::LLVMError(_) | Self::MainNotFound | Self::InvalidMainSignature => None,
+        }
+    }
+}

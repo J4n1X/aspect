@@ -617,6 +617,11 @@ impl TypeChecker {
             // `sizeof(T)` is a compile-time `u64` constant; the parser
             // already stamped the expression type at construction.
             ExprKind::SizeOf(_) => default_type,
+
+            // `null` carries the parser-stamped `u8*` placeholder when used in
+            // a context that doesn't constrain its type (e.g. `null == p`).
+            // Pointer-to-pointer coercion handles the rest at the boundary.
+            ExprKind::Null => default_type,
         }
     }
 

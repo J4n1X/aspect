@@ -2,6 +2,10 @@
   Asks the user for their name and greets them.
   Demonstrates: extern functions, pointer arithmetic,
   arrays, string manipulation, loops, and I/O.
+
+  Intentionally NOT auto-tested — `read()` blocks on stdin and the JIT
+  test harness has no terminal attached. Run manually:
+    tjlb-parser interpret demos/ask_name.tjlb
 -#
 
 extern fn puts(u8 *str) -> u0

@@ -107,6 +107,12 @@ pub enum ExprKind {
     /// padding and target pointer width are respected). The type checker
     /// stamps the expression type as `u64`.
     SizeOf(LangType),
+    /// `null` — the untyped null pointer. Lowered to LLVM's opaque `ptr`
+    /// null constant. In `check` mode the typechecker stamps the target
+    /// pointer type onto the AST; in `synth` mode it stays as the generic
+    /// `u8*` placeholder so the same coercion rules used for any other
+    /// pointer-to-pointer comparison apply.
+    Null,
 }
 
 /// Expression with type information

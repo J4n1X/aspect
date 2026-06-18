@@ -14,6 +14,11 @@
 
   The numeric results (primes, C[0][0], 1e10*sum) must be identical between
   both versions.  Only the timing will differ.
+
+  Intentionally NOT auto-tested — does ~1-2s of real work even at -O0, so
+  putting it in the integration suite would dominate `cargo test`'s
+  wall-time. Run manually:
+    tjlb-parser interpret demos/bench.tjlb
 -#
 
 extern fn write(i32 fd, u8 *buf, u64 len) -> i64

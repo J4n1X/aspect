@@ -1,3 +1,4 @@
+# expected: 5
 #-
   types.tjlb  --  A guided tour of TJLB's numeric type system.
 
@@ -10,8 +11,13 @@
     * Typed pointer walk:  u8[N]  /  u8*
     * Floating-point:  f64
 
+  Stays deliberately self-contained — its own `strlen`, `println`,
+  number-to-string helpers — so the demo *is* the tour, not a thin
+  wrapper around std. The standard library lives under `demos/std/`
+  for the demos that want it.
+
   Compile:  tjlb-rust compile demos/types.tjlb -o types.ll
-  Run:      lli types.ll          (exit code 5)
+  Run:      lli types.ll          (exit code 5 = popcount of 0b10110101)
 -#
 
 extern fn puts(u8 *msg) -> u0

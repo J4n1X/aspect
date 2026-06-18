@@ -25,7 +25,7 @@ type VecI32 {
 
     # Empty vector with no backing buffer. Pushing onto it allocates lazily.
     fn new() -> VecI32 {
-        return VecI32 { data = 0 as i32*, length = 0, capacity = 0 }
+        return VecI32 { data = null, length = 0, capacity = 0 }
     }
 
     # Pre-allocated vector. Cheaper push amortisation when you know N up front.
@@ -42,13 +42,13 @@ type VecI32 {
 
     # Bounds-checked element access. Aborts on out-of-range.
     const fn at(this, u64 i) -> i32 {
-        if i >= this.length { abort(); }
+        if i >= this.length { abort() }
         return this.data[i]
     }
 
     # Bounds-checked element mutation.
     fn set(this, u64 i, i32 v) {
-        if i >= this.length { abort(); }
+        if i >= this.length { abort() }
         this.data[i] = v
     }
 
@@ -56,7 +56,7 @@ type VecI32 {
     # to the exact size if the ask is bigger than 2x - keeps amortised
     # push O(1) without overshooting on a one-off bulk reserve.
     fn reserve(this, u64 need_total) {
-        if need_total <= this.capacity { return; }
+        if need_total <= this.capacity { return }
         u64 new_cap = this.capacity * 2
         if new_cap < 4 { new_cap = 4 }
         if new_cap < need_total { new_cap = need_total }
@@ -74,7 +74,7 @@ type VecI32 {
 
     # Remove and return the last value. Aborts on empty.
     fn pop(this) -> i32 {
-        if this.length == 0 { abort(); }
+        if this.length == 0 { abort() }
         this.length = this.length - 1
         return this.data[this.length]
     }
@@ -85,7 +85,7 @@ type VecI32 {
         if this.capacity > 0 {
             free(this.data as u8*)
         }
-        this.data = 0 as i32*
+        this.data = null
         this.length = 0
         this.capacity = 0
     }

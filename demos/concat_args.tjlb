@@ -1,8 +1,13 @@
+# expected: 0
+# run_args: "hello", "world", "foo"
 #-
   Concatenates all command-line arguments (skipping argv[0])
-  separated by spaces, and prints the result. 
-  Mainly intended to demonstrate the capabilities of the interpreter to take arguments.
-  Run: tjlb-parser interpret demos/concat_args.tjlb -- hello world foo
+  separated by spaces, and prints the result.
+  Mainly intended to demonstrate the capabilities of the interpreter
+  to take arguments. With the `run_args:` annotation above, the test
+  harness invokes this with `argv = ["hello", "world", "foo"]`, so
+  this file regression-tests the JIT's `argc`/`argv` plumbing too.
+  Run:  tjlb-parser interpret demos/concat_args.tjlb -- hello world foo
 -#
 
 extern fn puts(u8 *str) -> u0

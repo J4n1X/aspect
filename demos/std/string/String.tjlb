@@ -51,7 +51,7 @@ type String {
     # (terminator included). Doubles, but jumps to the exact size if the
     # ask is bigger than 2x - keeps amortised append O(1).
     fn reserve(this, u64 need_total) {
-        if need_total <= this.capacity { return; }
+        if need_total <= this.capacity { return }
         u64 new_cap = this.capacity * 2
         if new_cap < need_total { new_cap = need_total }
         this.data = realloc(this.data, new_cap)

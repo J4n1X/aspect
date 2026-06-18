@@ -1,3 +1,4 @@
+# expected: 68
 #-
   stress_test.tjlb - comprehensive TJLB compiler stress test.
 

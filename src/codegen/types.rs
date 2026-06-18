@@ -373,12 +373,18 @@ pub fn int_cmp_pred(op: &ComparisonOp, is_signed: bool) -> IntPredicate {
     }
 }
 
-/// Return the ordered `FloatPredicate` for a comparison operation.
+/// Return the IEEE-754-correct `FloatPredicate` for a comparison operation.
+///
+/// `<`, `>`, `<=`, `>=`, `==` use the *ordered* predicates: any comparison
+/// involving a NaN returns false — matches C / IEEE semantics. `!=` is the
+/// exception: it uses the *unordered* `UNE` predicate so that NaN inequality
+/// (including `NaN != NaN`) is true, again matching C. Using `ONE` for `!=`
+/// would silently break NaN-detection idioms like `if x != x { ... }`.
 #[must_use]
 pub fn float_cmp_pred(op: &ComparisonOp) -> FloatPredicate {
     match op {
         ComparisonOp::Equal => FloatPredicate::OEQ,
-        ComparisonOp::NotEqual => FloatPredicate::ONE,
+        ComparisonOp::NotEqual => FloatPredicate::UNE,
         ComparisonOp::Less => FloatPredicate::OLT,
         ComparisonOp::Greater => FloatPredicate::OGT,
         ComparisonOp::LessEqual => FloatPredicate::OLE,

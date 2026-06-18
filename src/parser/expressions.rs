@@ -328,9 +328,17 @@ impl Parser {
         }
     }
 
-    /// True when the current token is a statement terminator or EOF.
+    /// True when the current token ends a statement: a `;`, a newline, an EOF,
+    /// or a closing brace. `}` counts because a bare `return` immediately
+    /// before a block close (`if cond { return }`) is unambiguously the empty
+    /// return — the brace can't be the start of an expression in that position.
+    /// `term!()` itself only consumes `;`/newline; the close-brace is left for
+    /// the enclosing block parser to claim.
     pub(crate) fn check_terminator(&self) -> bool {
-        matches!(self.peek().kind, TokenKind::Newline | TokenKind::Semicolon) || self.is_at_end()
+        matches!(
+            self.peek().kind,
+            TokenKind::Newline | TokenKind::Semicolon | TokenKind::CloseBrace
+        ) || self.is_at_end()
     }
 
     /// Parse an expression
@@ -710,6 +718,15 @@ impl Parser {
                 let value = *kw == Keyword::True;
                 self.advance();
                 Ok(Self::bool_literal(value, pos))
+            }
+            // `null` — the untyped null pointer. Stamps `u8*` as a placeholder
+            // (any single-pointer type would do — pointer-to-pointer coercion
+            // is structural by depth, not by base). The type checker upgrades
+            // the stamp to the contextual target in `check` mode.
+            TokenKind::Keyword(Keyword::Null) => {
+                self.advance();
+                let placeholder = LangType::new(TypeBase::UInt, 8, 1, false);
+                Ok(Expression::new(ExprKind::Null, placeholder, pos))
             }
             // `sizeof(T)` — compile-time byte size of a type as a `u64`.
             TokenKind::Keyword(Keyword::Sizeof) => {

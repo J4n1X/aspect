@@ -47,6 +47,12 @@ pub struct CodeGenerator<'ctx> {
     /// `walk_expression` doesn't carry the `Program` reference.
     pub(crate) fnptr_sigs: Vec<crate::symbol::module::FnPtrSig>,
 
+    /// Source-file registry, copied from `Program` at the start of
+    /// `generate`. Used by `format_error` so a codegen error's position
+    /// resolves to the file it actually came from — same mechanism as the
+    /// parser and type checker.
+    pub(crate) source_files: Vec<std::path::PathBuf>,
+
     pub(crate) scope: ScopeStack<'ctx>,
 
     pub(crate) current_function: Option<FunctionValue<'ctx>>,
@@ -104,6 +110,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             struct_types: HashMap::new(),
             struct_fields: HashMap::new(),
             fnptr_sigs: Vec::new(),
+            source_files: Vec::new(),
             scope: ScopeStack::new(),
             current_function: None,
             current_function_return_type: None,
@@ -117,39 +124,72 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// # Panics
     /// Panics if target machine creation fails, which should not happen with valid targets
     pub fn generate(&mut self, program: &Program) -> AnyhowResult<()> {
+        // Seed the file registry so any error we hit below resolves to the
+        // file it actually came from, not the entry source.
+        self.source_files = program.source_files.clone();
+
         // Generate global string literals first (they might be referenced by globals)
         for (i, s) in program.string_literals.iter().enumerate() {
             self.generate_string_literal(i, s);
         }
 
         // Register type-struct LLVM types before anything references them.
-        self.register_structs(program)
-            .context("failed to register type-struct layouts")?;
+        if let Err(e) = self.register_structs(program) {
+            anyhow::bail!("{}: failed to register type-struct layouts", self.format_error(&e));
+        }
 
         // Seed the codegen-local FnPtr signature cache from the shared registry.
         self.fnptr_sigs = program.symbols.all_fnptr_sigs().to_vec();
 
         // First pass: Declare all functions (for forward references)
         for func in &program.functions {
-            self.declare_function(func)
-                .with_context(|| format!("failed to declare function '{}'", func.proto.name))?;
+            if let Err(e) = self.declare_function(func) {
+                anyhow::bail!(
+                    "{}: failed to declare function '{}'",
+                    self.format_error(&e),
+                    func.proto.name
+                );
+            }
         }
 
         // Generate global variables
         for global in &program.global_vars {
-            self.generate_global_variable(global)
-                .with_context(|| format!("failed to generate global variable '{}'", global.name))?;
+            if let Err(e) = self.generate_global_variable(global) {
+                anyhow::bail!(
+                    "{}: failed to generate global variable '{}'",
+                    self.format_error(&e),
+                    global.name
+                );
+            }
         }
 
         // Second pass: Generate function bodies
         for func in &program.functions {
-            if !func.proto.is_extern {
-                self.generate_function(func).with_context(|| {
-                    format!("failed to generate function '{}'", func.proto.name)
-                })?;
+            if !func.proto.is_extern
+                && let Err(e) = self.generate_function(func)
+            {
+                anyhow::bail!(
+                    "{}: failed to generate function '{}'",
+                    self.format_error(&e),
+                    func.proto.name
+                );
             }
         }
         Ok(())
+    }
+
+    /// Format a codegen error with the originating source file prepended,
+    /// looking up the file via the error's `pos.file_id`. Mirrors the
+    /// parser/typechecker formatters.
+    #[must_use]
+    pub fn format_error(&self, err: &CodegenError) -> String {
+        let Some(pos) = err.position() else {
+            return err.to_string();
+        };
+        match self.source_files.get(pos.file_id as usize) {
+            Some(path) => format!("{}:{}:{}: {}", path.display(), pos.line, pos.column, err),
+            None => err.to_string(),
+        }
     }
     /// Get the LLVM module
     pub fn module(&self) -> &Module<'ctx> {

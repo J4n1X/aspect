@@ -607,6 +607,15 @@ pub(crate) fn walk_expression<'ctx>(
             let bytes = cg.sizeof_lang_type(ty, expr.pos)?;
             Ok(cg.context.i64_type().const_int(bytes, false).into())
         }
+
+        // ── `null` — opaque-ptr null constant. Works in both Runtime and
+        // Constant modes; all pointer types lower to LLVM `ptr` anyway, so
+        // one constant covers every target pointer type.
+        ExprKind::Null => Ok(cg
+            .context
+            .ptr_type(inkwell::AddressSpace::default())
+            .const_null()
+            .into()),
     }
 }
 

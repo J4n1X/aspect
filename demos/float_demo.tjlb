@@ -1,0 +1,47 @@
+# expected: 0
+#-
+  Demo of `print_f64` / `println_f64` from `std/io/print`. Also stress-
+  tests the `!=` fix: with the ordered (`one`) predicate that used to
+  back float `!=`, `nan != nan` was *false*, so `if x != x { ... }`
+  silently failed to detect NaN. We now use the unordered (`une`)
+  predicate, matching C semantics.
+
+  Returns 0 on success, non-zero on any check that fails.
+-#
+
+$include "std/io/print.tjlb"
+$include "std/c/stdlib.tjlb"     # for abort()
+
+# A quick equality check via comparison-with-tolerance, since exact `==`
+# on float results would be flaky.
+fn close(f64 a, f64 b) -> bool {
+    f64 d = a - b
+    if d < 0.0 { d = 0.0 - d }
+    return d < 0.0000001
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    println_f64(3.14159265358979)    # 3.141593
+    println_f64(-2.5)                # -2.500000
+    println_f64(0.0)                 # 0.000000
+
+    # NaN detection — the actual regression we just fixed.
+    f64 zero = 0.0
+    f64 nan = zero / zero
+    if nan != nan {
+        println("nan != nan : true (correct)")
+    } else {
+        println("nan != nan : false (BROKEN)")
+        return 1
+    }
+
+    # Tolerance check still works on normal values.
+    if close(0.1 + 0.2, 0.3) {
+        println("0.1 + 0.2 ~= 0.3 (correct)")
+    } else {
+        println("BROKEN: 0.1 + 0.2 not close to 0.3")
+        return 2
+    }
+
+    return 0
+}
