@@ -1,0 +1,14 @@
+#-
+  std/c/stdlib.tjlb — raw libc bindings for memory, process, and parsing.
+-#
+
+extern fn malloc(u64 size) -> u8*
+extern fn realloc(u8* p, u64 size) -> u8*
+extern fn free(u8* p) -> u0
+extern fn calloc(u64 nmemb, u64 size) -> u8*
+
+extern fn exit(i32 status) -> u0
+extern fn abort() -> u0
+
+extern fn atoi(u8* s) -> i32
+extern fn atol(u8* s) -> i64

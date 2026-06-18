@@ -91,7 +91,7 @@ digit      ::= [0-9]
 Reserved keywords (not usable as identifiers):
 
 ```
-fn  extern  const  type  struct  alias  public
+fn  extern  const  type  struct  alias  public  sizeof
 while  if  else  elif  for  switch
 break  continue  as  return
 true  false
@@ -453,6 +453,9 @@ primary-expr ::= integer-literal
                | string-literal
                | ident
                | '(' expr ')'
+               | sizeof-expr
+
+sizeof-expr ::= 'sizeof' '(' type ')'    # compile-time u64 byte size
 
 arg-list ::= /* empty */ | expr (',' expr)*
 ```
@@ -464,6 +467,11 @@ arg-list ::= /* empty */ | expr (',' expr)*
 - Postfix operations (calls, subscripts) chain: `arr[i][j]` and
   `f()()` are both valid.
 - Unary minus has no literal form; it is sugar for `0 - expr`.
+- `sizeof(T)` is a **compile-time** `u64` that lowers to a single
+  constant at codegen via the target data layout. Works for every
+  type (primitives, pointers, function pointers, arrays, type-structs
+  with padding, parens-grouped composites). Parens are required —
+  `sizeof T` is a syntax error.
 
 ---
 

@@ -599,6 +599,14 @@ pub(crate) fn walk_expression<'ctx>(
             }
             cg.generate_indirect_call(callee, args, expr.pos)
         }
+
+        // ── `sizeof(T)` — emit a `u64` constant from the target data layout.
+        // Works in both Runtime and Constant modes since the value is fixed
+        // at codegen time and doesn't depend on any runtime state.
+        ExprKind::SizeOf(ty) => {
+            let bytes = cg.sizeof_lang_type(ty, expr.pos)?;
+            Ok(cg.context.i64_type().const_int(bytes, false).into())
+        }
     }
 }
 

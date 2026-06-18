@@ -711,6 +711,15 @@ impl Parser {
                 self.advance();
                 Ok(Self::bool_literal(value, pos))
             }
+            // `sizeof(T)` — compile-time byte size of a type as a `u64`.
+            TokenKind::Keyword(Keyword::Sizeof) => {
+                self.advance();
+                self.expect(&TokenKind::OpenParen, "(")?;
+                let ty = self.parse_type()?;
+                self.expect(&TokenKind::CloseParen, ")")?;
+                let u64_ty = LangType::new(TypeBase::UInt, 64, 0, false);
+                Ok(Expression::new(ExprKind::SizeOf(ty), u64_ty, pos))
+            }
             // Parenthesized expression
             TokenKind::OpenParen => {
                 self.advance();

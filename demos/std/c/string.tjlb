@@ -1,0 +1,13 @@
+#-
+  std/c/string.tjlb — raw libc bindings for byte-buffer manipulation.
+  All length parameters are byte counts (not character counts).
+-#
+
+extern fn strlen(u8* s) -> u64
+extern fn strcmp(u8* a, u8* b) -> i32           # <0 / 0 / >0
+extern fn strncmp(u8* a, u8* b, u64 n) -> i32
+
+extern fn memcpy(u8* dst, u8* src, u64 n) -> u8*    # dst & src must not overlap
+extern fn memmove(u8* dst, u8* src, u64 n) -> u8*   # overlap-safe
+extern fn memset(u8* dst, i32 byte, u64 n) -> u8*
+extern fn memcmp(u8* a, u8* b, u64 n) -> i32

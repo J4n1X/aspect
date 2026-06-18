@@ -1,0 +1,41 @@
+# expected: 210
+#-
+  Phase 3 demo - exercises VecI32 end-to-end. Pushes 1..=20, pops 20 off
+  the top, sums 1..=19 (= 190) by index, then adds the popped value back
+  (190 + 20 = 210). Touches push *and* pop *and* iteration via `at`.
+-#
+
+$include "std/vec/vec_i32.tjlb"
+$include "std/io/print.tjlb"
+
+fn main(u32 argc, u8** argv) -> i32 {
+    VecI32 v = VecI32.new()
+
+    # Push 1..=20.
+    i32 i = 1
+    while i <= 20 {
+        v.push(i)
+        i = i + 1
+    }
+
+    # Pop once (removes 20). Stash for the sanity check below.
+    i32 popped = v.pop()
+
+    # Sum the remaining 19 elements by index.
+    i32 sum = 0
+    u64 k = 0
+    while k < v.len() {
+        sum = sum + v.at(k)
+        k = k + 1
+    }
+
+    print("len after pop:    ")
+    println_u64(v.len())
+    print("popped:           ")
+    println_i32(popped)
+    print("sum of remaining: ")
+    println_i32(sum)
+
+    v.destroy()
+    return sum + popped     # 190 + 20 = 210
+}

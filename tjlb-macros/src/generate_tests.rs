@@ -87,10 +87,15 @@ fn collect_tjlb_files(dir: &Path) -> Vec<PathBuf> {
 
 // ── Test name derivation ──────────────────────────────────────────────────────
 
-/// Derive a valid Rust identifier from a path relative to `tests/programs/`.
+/// Derive a valid Rust identifier from a path relative to the scan root.
+/// `prefix` is the leading segment of the test fn name (e.g. `"test"` for
+/// `tests/programs/` files, `"test_demo"` for `demos/` files).
 ///
-/// `failures/literal_overflow.tjlb` → `test_failures_literal_overflow`
-fn make_test_ident(relative: &Path) -> proc_macro2::Ident {
+/// `failures/literal_overflow.tjlb` with prefix `"test"`
+///   → `test_failures_literal_overflow`
+/// `hello.tjlb` with prefix `"test_demo"`
+///   → `test_demo_hello`
+fn make_test_ident(relative: &Path, prefix: &str) -> proc_macro2::Ident {
     let components: Vec<_> = relative.components().collect();
     let n = components.len();
     let parts: Vec<String> = components
@@ -107,7 +112,7 @@ fn make_test_ident(relative: &Path) -> proc_macro2::Ident {
             s.replace('-', "_")
         })
         .collect();
-    let name = format!("test_{}", parts.join("_"));
+    let name = format!("{}_{}", prefix, parts.join("_"));
     proc_macro2::Ident::new(&name, Span::call_site())
 }
 
@@ -115,31 +120,45 @@ fn make_test_ident(relative: &Path) -> proc_macro2::Ident {
 
 pub fn generate_tests_impl(_input: TokenStream) -> TokenStream {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
-    let base_dir = PathBuf::from(&manifest_dir).join("tests").join("programs");
 
     let mut output = TokenStream2::new();
 
-    // Collect and sort for deterministic test ordering
-    let mut paths = collect_tjlb_files(&base_dir);
-    paths.sort();
+    // Two scan roots: the integration-test corpus and the demo programs.
+    // Each gets its own test-name prefix so the namespaces never collide
+    // (e.g. `tests/programs/foo.tjlb` and `demos/foo.tjlb` produce
+    // `test_foo` and `test_demo_foo` respectively). Demo helpers in
+    // `demos/std/**/*.tjlb` lack `# expected:` and are silently skipped,
+    // just like helpers under `tests/programs/include_helpers/`.
+    let scans: [(&str, &[&str], &str); 2] = [
+        ("test", &["tests", "programs"], ""),
+        ("test_demo", &["demos"], ""),
+    ];
 
-    for abs_path in paths {
-        let Some(ann) = parse_annotation(&abs_path) else {
-            continue; // no # expected: annotation — skip
-        };
+    for (prefix, base_components, _) in &scans {
+        let mut base_dir = PathBuf::from(&manifest_dir);
+        for c in *base_components {
+            base_dir = base_dir.join(c);
+        }
+        let mut paths = collect_tjlb_files(&base_dir);
+        paths.sort();
 
-        // Path used in compile_and_run calls (relative to workspace root, forward slashes)
-        let path_str = abs_path
-            .strip_prefix(&manifest_dir)
-            .unwrap_or(&abs_path)
-            .to_string_lossy()
-            .replace('\\', "/");
+        for abs_path in paths {
+            let Some(ann) = parse_annotation(&abs_path) else {
+                continue; // no # expected: annotation — skip
+            };
 
-        // Path relative to tests/programs/ drives the test function name
-        let relative_to_base = abs_path.strip_prefix(&base_dir).unwrap_or(&abs_path);
-        let test_ident = make_test_ident(relative_to_base);
+            // Path used in compile_and_run calls (relative to workspace root, forward slashes)
+            let path_str = abs_path
+                .strip_prefix(&manifest_dir)
+                .unwrap_or(&abs_path)
+                .to_string_lossy()
+                .replace('\\', "/");
 
-        let test_fn: TokenStream2 = match ann.expected {
+            // Path relative to the scan root drives the test function name
+            let relative_to_base = abs_path.strip_prefix(&base_dir).unwrap_or(&abs_path);
+            let test_ident = make_test_ident(relative_to_base, prefix);
+
+            let test_fn: TokenStream2 = match ann.expected {
             Expected::ExitCode(code) if ann.run_args.is_empty() => quote! {
                 #[test]
                 fn #test_ident() {
@@ -170,9 +189,10 @@ pub fn generate_tests_impl(_input: TokenStream) -> TokenStream {
                     );
                 }
             },
-        };
+            };
 
-        output.extend(test_fn);
+            output.extend(test_fn);
+        }
     }
 
     output.into()

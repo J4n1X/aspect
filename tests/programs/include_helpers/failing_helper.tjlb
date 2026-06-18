@@ -1,0 +1,7 @@
+# A helper used by `failures/preproc_error_in_include.tjlb`. Contains an
+# intentional typecheck error — referencing an undefined name `BadName`.
+# The failure test asserts the error message names this file (not the host),
+# so the test only passes when per-token file attribution works.
+fn broken_helper(i32 x) -> i32 {
+    return x + BadName
+}

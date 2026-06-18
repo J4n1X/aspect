@@ -102,6 +102,11 @@ pub enum ExprKind {
         callee: Box<Expression>,
         args: Vec<Expression>,
     },
+    /// `sizeof(T)` — the compile-time size of a type in bytes. Lowered to a
+    /// `u64` constant at codegen using the target data layout (so struct
+    /// padding and target pointer width are respected). The type checker
+    /// stamps the expression type as `u64`.
+    SizeOf(LangType),
 }
 
 /// Expression with type information

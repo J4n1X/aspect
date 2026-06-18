@@ -1,0 +1,33 @@
+#-
+  std/mem/alloc.tjlb - thin wrappers around libc malloc/free.
+
+  Allocation is by *byte count*, not by typed-array count, because
+  `sizeof(T)` is now a built-in compile-time constant — `malloc(n *
+  sizeof(T))` is the right idiom and needs no further wrapping:
+
+      i32* xs = malloc(n * sizeof(i32)) as i32*
+      Point* p = malloc(sizeof(Point)) as Point*
+
+  Freeing is a single function: at the LLVM level every pointer is
+  opaque `ptr`, and tjlb already coerces a `T*` to `u8*` at any
+  call site with matching pointer depth — so one `free_ptr` accepts
+  any of them.
+-#
+
+$include "../c/stdlib.tjlb"
+
+# Raw byte allocation — `n` uninitialised bytes.
+fn alloc_bytes(u64 n) -> u8* {
+    return malloc(n)
+}
+
+# Zero-initialised byte allocation.
+fn zalloc_bytes(u64 n) -> u8* {
+    return calloc(n, 1)
+}
+
+# Release any pointer obtained from `alloc_bytes`/`malloc`/`realloc`/`calloc`.
+# Same-depth pointer coercion lets callers pass `i32*`, `Point*`, etc. directly.
+fn free_ptr(u8* p) -> u0 {
+    free(p)
+}

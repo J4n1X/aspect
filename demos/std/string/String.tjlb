@@ -1,0 +1,85 @@
+#-
+  std/string/String.tjlb - a growing, null-terminated, heap-owned string.
+  This is the showcase: private fields force external code to go through
+  static factories and methods, exercising sret returns, autoref, const
+  methods, and the encapsulation rules added in M4. The caller still owns
+  the value - `destroy()` must be invoked when done (no destructors yet).
+
+  Construction:
+    String s = String.from_cstring("hi")     # static factory (sret)
+    String s = String.empty()                 # empty buffer
+
+  Read:
+    s.len()         # u64
+    s.c_str()       # u8*, valid until the next mutating call
+
+  Mutate:
+    s.append_cstring(" world")
+    s.append_byte(33)        # '!'
+
+  Cleanup:
+    s.destroy()
+-#
+
+$include "../c/stdlib.tjlb"
+$include "../c/string.tjlb"
+
+type String {
+    u8* data        # private - null-terminated heap buffer
+    u64 length      # private - byte count excluding the terminator
+    u64 capacity    # private - allocation size (always >= length + 1)
+
+    # Construct from a C string. Copies the bytes (the source is borrowed).
+    fn from_cstring(u8* src) -> String {
+        u64 n = strlen(src)
+        u8* buf = malloc(n + 1)
+        memcpy(buf, src, n + 1)              # includes the null terminator
+        return String { data = buf, length = n, capacity = n + 1 }
+    }
+
+    # Empty string with a one-byte allocation (room for the terminator).
+    fn empty() -> String {
+        u8* buf = malloc(1)
+        buf[0] = 0
+        return String { data = buf, length = 0, capacity = 1 }
+    }
+
+    const fn len(this) -> u64 { return this.length }
+    const fn c_str(this) -> u8* { return this.data }
+
+    # Internal: ensure `data` has room for at least `need_total` bytes
+    # (terminator included). Doubles, but jumps to the exact size if the
+    # ask is bigger than 2x - keeps amortised append O(1).
+    fn reserve(this, u64 need_total) {
+        if need_total <= this.capacity { return; }
+        u64 new_cap = this.capacity * 2
+        if new_cap < need_total { new_cap = need_total }
+        this.data = realloc(this.data, new_cap)
+        this.capacity = new_cap
+    }
+
+    fn append_cstring(this, u8* src) {
+        u64 add = strlen(src)
+        this.reserve(this.length + add + 1)
+        # `&this.data[this.length]` is the address one past the current last
+        # byte - i.e. the null terminator's slot - so the copy overwrites it
+        # and lays down the new one in a single shot.
+        memcpy(&this.data[this.length], src, add + 1)
+        this.length = this.length + add
+    }
+
+    fn append_byte(this, u8 b) {
+        this.reserve(this.length + 2)
+        this.data[this.length] = b
+        this.length = this.length + 1
+        this.data[this.length] = 0           # re-terminate
+    }
+
+    # Free the backing buffer and zero the metadata. The String value
+    # itself lives on the caller's stack; this just releases what it owned.
+    fn destroy(this) {
+        free(this.data)
+        this.length = 0
+        this.capacity = 0
+    }
+}

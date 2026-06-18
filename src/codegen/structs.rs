@@ -70,6 +70,50 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map(|idx| (idx, fields[idx].1))
     }
 
+    /// Compute the compile-time byte size of a `LangType` against the
+    /// target data layout. Powers `sizeof(T)`. Recurses on array element
+    /// types and consults the cached LLVM struct type for type-structs so
+    /// padding is included.
+    pub(crate) fn sizeof_lang_type(
+        &self,
+        ty: &LangType,
+        pos: Position,
+    ) -> Result<u64, CodegenError> {
+        // Arrays: `[N x T]` => N * sizeof(T) with the element's pointer
+        // depth preserved (e.g. `(i32*)[3]` is 3 pointer-widths, not 12).
+        if let Some(n) = ty.array_size {
+            let mut element = *ty;
+            element.array_size = None;
+            let elem_size = self.sizeof_lang_type(&element, pos)?;
+            return Ok(elem_size * u64::from(n));
+        }
+        let target_data = self.target_machine.get_target_data();
+        if ty.pointer_depth > 0 {
+            return Ok(u64::from(
+                target_data.get_pointer_byte_size(None),
+            ));
+        }
+        match ty.base {
+            TypeBase::SInt | TypeBase::UInt | TypeBase::SFloat => Ok(u64::from(ty.size_bits) / 8),
+            TypeBase::Bool => Ok(1),
+            TypeBase::Void => Err(CodegenError::TypeError(
+                "sizeof(u0) is not defined".to_string(),
+                pos,
+            )),
+            TypeBase::Struct(id) => {
+                let struct_ty = self.struct_types.get(&id).ok_or_else(|| {
+                    CodegenError::TypeError(
+                        format!("unregistered type-struct id {id} in sizeof"),
+                        pos,
+                    )
+                })?;
+                Ok(target_data.get_store_size(struct_ty))
+            }
+            // A bare function-pointer value is a pointer.
+            TypeBase::FnPtr(_) => Ok(u64::from(target_data.get_pointer_byte_size(None))),
+        }
+    }
+
     /// Compute the address (and type) of an lvalue expression: a variable, a
     /// dereference, or a field access. This is the single address-producing
     /// path used by field reads, field assignment, and `&expr`.

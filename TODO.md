@@ -3,6 +3,7 @@
 | Feature                       | Description                                                                                 | Priority |
 |-------------------------------|---------------------------------------------------------------------------------------------|----------|
 | Struct by-value ABI           | SysV/Win64 aggregate classification so structs can cross the `extern`/C boundary by value (small-struct-in-registers, sret>16 on SysV; ≤8B-in-register vs by-ref on Win64). Until then `extern` by-value struct params/returns are rejected. | LOW |
+| Direct syscalls (no libc)     | Skip libc altogether and emit `syscall`/`int 0x80` directly so `interpret` / linked binaries run with no `-lc` dependency. Linux: well-documented numbers + register conventions per arch (x86-64 / aarch64 / riscv64), each `extern fn read/write/openat/close/exit_group/...` becomes a tiny inline-asm body. Windows: hard — syscall numbers are unstable across builds; would need to go via `ntdll!Nt*` thunks instead. Start Linux-only; gate Windows behind an explicit feature flag once syscall stubs land. | LOW |
 | Noalias handling              | This could also improve optimizations, by reducing the amount of moves and memory.          | LOW      |
 | Implement Bash Completion     | This can be done for free with clap-complete. File stored to ~/.bash_completion.d/          | LOW      |
 
@@ -29,3 +30,4 @@
 | Function pointers             | `fn(args) -> R` as a type; `&func` / bare `func` produces a function-pointer value; indirect call through any expression of fn-ptr type via `build_indirect_call`. Composes with type-struct fields (vtables) and arrays via parens-grouped types `(fn(...) -> R)[N]`. | MEDIUM |
 | Parens-grouped types          | `(T)[N]` / `(T)*` — explicit grouping that stops the lexer's greedy `T[N]`/`T*` folding. Unlocks "array of fn-pointers", "array of pointers", "pointer to fn-pointer". | LOW |
 | Preprocessor (`$include`)     | `$include "path"` splices another source file's tokens in (recursive, include-once on canonical path, resolved relative to the directive's file). Lives in `src/preprocessor/`; new directives slot in as sibling modules. See `doc/09-syntax-reference.md` § Preprocessor. | MEDIUM |
+| `sizeof(T)`                   | Compile-time `u64` byte size of any type (primitive, pointer, function pointer, array, type-struct with padding). Lowered to a single constant at codegen via the target data layout. Eliminates the need for `alloc_<type>_array` helpers in the stdlib — `malloc(n * sizeof(T))` is the idiom now. | LOW |

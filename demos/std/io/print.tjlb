@@ -1,0 +1,73 @@
+#-
+  std/io/print.tjlb — minimal print/println built on `putchar` + `puts`.
+  Avoids `printf` (variadic — unsupported in tjlb today). Each integer
+  printer is a tiny recursive function that writes ASCII digits and a
+  trailing newline; signed flavours handle the leading minus and avoid
+  INT_MIN overflow by detouring through a wider unsigned type.
+-#
+
+$include "../c/stdio.tjlb"
+
+# Write `s` followed by a newline.
+fn println(u8* s) -> i32 {
+    return puts(s)
+}
+
+# Write `s` with no terminator — useful for building up a line.
+fn print(u8* s) -> u0 {
+    u64 n = 0
+    while s[n] != 0 {
+        putchar(s[n] as i32)
+        n = n + 1
+    }
+}
+
+# Internal: emit the decimal digits of `n` to stdout, no newline.
+fn print_digits_u64(u64 n) -> u0 {
+    if n >= 10 { print_digits_u64(n / 10) }
+    putchar((n % 10 + 48) as i32)             # ASCII '0' = 48
+}
+
+fn print_u64(u64 n) -> u0 { print_digits_u64(n) }
+fn println_u64(u64 n) -> u0 {
+    print_digits_u64(n)
+    putchar(10)                               # '\n'
+}
+
+fn print_u32(u32 n) -> u0 { print_digits_u64(n as u64) }
+fn println_u32(u32 n) -> u0 {
+    print_digits_u64(n as u64)
+    putchar(10)
+}
+
+# Signed: handle the sign, then defer to the unsigned path. Widening to i64
+# before negation keeps INT_MIN safe (negating it in i32 would overflow).
+fn print_i32(i32 n) -> u0 {
+    if n < 0 {
+        putchar(45)                           # '-'
+        i64 m = 0 - (n as i64)
+        print_digits_u64(m as u64)
+    } else {
+        print_digits_u64(n as u64)
+    }
+}
+fn println_i32(i32 n) -> u0 {
+    print_i32(n)
+    putchar(10)
+}
+
+fn print_i64(i64 n) -> u0 {
+    if n < 0 {
+        putchar(45)
+        # `n` could be I64_MIN; flip the bits then bump by one to land at
+        # the correct unsigned magnitude without overflow.
+        u64 m = ((~n) as u64) + 1
+        print_digits_u64(m)
+    } else {
+        print_digits_u64(n as u64)
+    }
+}
+fn println_i64(i64 n) -> u0 {
+    print_i64(n)
+    putchar(10)
+}

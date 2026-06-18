@@ -613,6 +613,10 @@ impl TypeChecker {
                 }
                 default_type
             }
+
+            // `sizeof(T)` is a compile-time `u64` constant; the parser
+            // already stamped the expression type at construction.
+            ExprKind::SizeOf(_) => default_type,
         }
     }
 
