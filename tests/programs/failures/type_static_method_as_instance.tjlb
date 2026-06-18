@@ -1,0 +1,14 @@
+# expected: "static method", "make"
+# A static method (no `this`) must be called via `Type.make(...)`. Calling it
+# through an instance — `obj.make(...)` — is rejected (it would otherwise
+# silently auto-reference `obj` and produce a mismatched-arity error on the
+# mangled function).
+type Counter {
+    public i32 n
+    fn make(i32 v) -> Counter { return Counter { n = v } }
+}
+fn main(u32 argc, u8 **argv) -> i32 {
+    Counter c = Counter { n = 0 }
+    Counter c2 = c.make(7)
+    return c2.n
+}

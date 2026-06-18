@@ -1,0 +1,14 @@
+# expected: "instance method", "bump"
+# An instance method (declared with `this`) must be called via the instance
+# syntax `obj.bump(...)`. Calling it as `Type.bump(&obj, ...)` (a UFCS-style
+# explicit-receiver form) is rejected — the two syntactic forms map cleanly
+# to the two kinds of method.
+type Counter {
+    public i32 n
+    fn bump(this, i32 d) { this.n = this.n + d }
+}
+fn main(u32 argc, u8 **argv) -> i32 {
+    Counter c = Counter { n = 0 }
+    Counter.bump(&c, 1)
+    return 0
+}

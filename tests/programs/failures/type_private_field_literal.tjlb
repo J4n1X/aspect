@@ -1,0 +1,13 @@
+# expected: "private", "Secret"
+# An external struct literal that names a private field is rejected.
+# Combined with the "must name every field" rule, this makes a type-struct
+# with any private field unconstructible outside its own methods — the
+# factory pattern.
+type Secret {
+    i32 hidden
+    public i32 visible
+}
+fn main(u32 argc, u8 **argv) -> i32 {
+    Secret s = Secret { hidden = 1, visible = 2 }    # naming `hidden` errors
+    return s.visible
+}

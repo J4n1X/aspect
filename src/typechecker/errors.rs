@@ -108,6 +108,13 @@ pub enum TypeCheckError {
         missing: String,
         position: Position,
     },
+
+    #[error("Field '{field}' of type-struct '{type_name}' is private and not accessible here at {position}")]
+    InaccessibleField {
+        field: String,
+        type_name: String,
+        position: Position,
+    },
 }
 
 impl TypeCheckError {
@@ -127,7 +134,8 @@ impl TypeCheckError {
             | Self::ListInitLengthMismatch { position, .. }
             | Self::NotAStruct { position, .. }
             | Self::UnknownField { position, .. }
-            | Self::MissingStructFields { position, .. } => Some(*position),
+            | Self::MissingStructFields { position, .. }
+            | Self::InaccessibleField { position, .. } => Some(*position),
             Self::UndefinedVariable(_, pos)
             | Self::UndefinedFunction(_, pos)
             | Self::InvalidDereference(_, pos)

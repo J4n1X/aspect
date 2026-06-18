@@ -1,8 +1,10 @@
 # Type-Struct System — Implementation Plan
 
-Status: **in progress** — M0 (foundation + unification), M1 (aliases), M2 (POD structs), and
-M2b (struct by-value ABI) complete and verified. Next: M3 (methods + `this`), then M4
-(encapsulation + `const fn`). Supersedes the discussion sketch in `Struct-Concept.md`.
+Status: **complete** — all milestones (M0 foundation + symbol-table unification, M1 aliases,
+M2 POD structs, M2b struct by-value ABI, M3 methods + `this` + `const fn`, M4 encapsulation
+enforcement) implemented and verified. Remaining future work is the SysV / Win64 by-value
+aggregate ABI for crossing the C/extern boundary (tracked in TODO.md). Supersedes the
+discussion sketch in `Struct-Concept.md`.
 
 This plan implements *aliases* and *type-structs* ("type-structs" is the internal/diagnostic
 name; the surface keyword is `type`). It is grounded in a line-level survey of the five
@@ -312,10 +314,29 @@ and guard struct types out of `emit_cast` paths.
   Added `function_return_types` + `current_sret` to `CodeGenerator`, a unified `build_abi_call`, and
   rvalue-struct field access (materialise to a temp slot). Per-target by-value *across the C/extern
   boundary* (System V/Win64 register classification) remains the separate future TODO.
-- **M3 — Methods + `this`.** static vs instance (presence of `this`), mangling to free functions,
-  `obj.m()`/`Type.m()` desugaring, autoref on value receivers, method registry + checking.
-- **M4 — Encapsulation + `const fn`.** enforce `public` access control across the boundary; `const
-  fn` → `*const Struct` receiver + mutation rejection.
+- **M3 — Methods + `this`. ✅ DONE (corpus IR byte-identical; `tests/programs/methods.tjlb`,
+  `method_chain.tjlb`, `failures/type_const_fn_writes.tjlb`).** Methods inside a `type` body
+  desugar to free functions named `Type$method`. An instance method takes a bare `this` receiver
+  (no type annotation); the parser supplies it as an implicit `*Struct` first param.
+  `const fn` makes the receiver `*const Struct`, and field access propagates that const through
+  `resolve_field` so `this.field = ...` lands on the existing `AssignmentToConst` path. Method
+  calls `obj.method(args)` desugar to a `FunctionCall` with the mangled name and the receiver
+  prepended; value receivers are auto-referenced via `Reference`. Static calls `Type.method(...)`
+  use the mangled name with no receiver. The codegen Reference arm spills rvalue struct receivers
+  (e.g. `make(...).m()`) to a temp slot so the address can be taken. Also fixed a lexer bug where
+  `scan_type_after_const` consumed the trailing identifier on failure (so `const fn` lexed wrong).
+  An additional Reference check-mode rule now allows a const-pointer-to-non-const (`const T* p =
+  &t`), needed so `&mutable_struct` coerces to a const-fn's `*const Struct` receiver.
+- **M4 — Encapsulation + `const fn` enforcement. ✅ DONE
+  (`tests/programs/encapsulation.tjlb` + `failures/type_private_field_read.tjlb`,
+  `type_private_field_literal.tjlb`).** `TypeCheckError::InaccessibleField` plus
+  `is_inside_struct_methods(id)` on the checker (matches `current_function` against the mangled
+  prefix `"<TypeName>$"`). `resolve_field` and the struct-literal check each enforce visibility.
+  Together with the existing "must name every field" rule, this makes a type-struct with any
+  private field unconstructible by an external literal, forcing the factory-method pattern
+  (the locked design from §0.5). `const fn` enforcement reuses the const-propagation in
+  `resolve_field`: a `*const Struct` receiver makes `this.field` const, so any mutation lands on
+  the existing `AssignmentToConst` path.
 
 **Future (separate TODO):** System V + Windows x64 by-value aggregate ABI, so structs can cross the
 `extern`/C boundary by value (small-struct-in-registers, sret>16 on SysV; ≤8-byte-in-register vs

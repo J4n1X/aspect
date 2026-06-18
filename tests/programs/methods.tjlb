@@ -1,0 +1,25 @@
+# expected: 42
+# Type-struct methods: static (no `this`), instance (leading `this`),
+# `const fn` (non-mutating contract on `this`), and chained method calls.
+type Pair {
+    public i32 a
+    public i32 b
+
+    fn make(i32 x, i32 y) -> Pair {            # static factory (sret return)
+        return Pair { a = x, b = y }
+    }
+    const fn sum(this) -> i32 {                # const instance method
+        return this.a + this.b
+    }
+    fn bump(this, i32 delta) {                 # mutating instance method
+        this.a = this.a + delta
+        this.b = this.b + delta
+    }
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Pair p = Pair.make(10, 20)                 # static call
+    p.bump(6)                                  # instance call on a value (autoref)
+    Pair* pp = &p
+    return pp.sum()                            # instance call on a pointer  ⇒ 16+26 = 42
+}

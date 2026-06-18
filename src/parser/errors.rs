@@ -17,6 +17,9 @@ pub enum ParserError {
     #[error("Duplicate type '{0}' at {1}")]
     DuplicateType(String, Position),
 
+    #[error("{0} at {1}")]
+    MethodCallForm(String, Position),
+
     #[error("Expected '{0}' but found '{1}' at {2}")]
     ExpectedToken(String, String, Position),
 
@@ -74,6 +77,7 @@ impl ParserError {
             ParserError::DuplicateDeclaration(_, pos) => Some(*pos),
             ParserError::UndefinedType(_, pos) => Some(*pos),
             ParserError::DuplicateType(_, pos) => Some(*pos),
+            ParserError::MethodCallForm(_, pos) => Some(*pos),
             ParserError::ExpectedToken(_, _, pos) => Some(*pos),
             ParserError::TypeMismatch(_, _, pos) => Some(*pos),
             ParserError::UndefinedVariable(_, pos) => Some(*pos),

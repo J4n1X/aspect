@@ -234,8 +234,17 @@ global-var-decl ::= type ident ('=' expr)? term
 
 alias-decl ::= 'alias' ident type term    # compile-time typedef
 
-struct-decl ::= 'type' ident '{' newline* (struct-field (term newline*)?)* '}'
-struct-field ::= 'public'? type ident    # fields are private unless `public`
+struct-decl ::= 'type' ident '{'
+                  newline* (struct-field (term newline*)?)*
+                  newline* (struct-method (term newline*)?)*
+                '}'
+struct-field  ::= 'public'? type ident                     # fields are private unless `public`
+struct-method ::= 'const'? 'fn' ident '(' method-params ')' return-ann? newline* block
+method-params ::= /* empty */
+                | 'this' (',' param-list)?                 # instance method
+                | param-list                               # static method (no `this`)
+# `const fn` requires `this`; field access through it propagates const, so
+# any `this.field = ...` is rejected. Fields must come before methods.
 
 param-list ::= /* empty */
              | param (',' param)*
@@ -281,7 +290,26 @@ calls work today.)
 struct-literal ::= ident '{' newline* (field-init (',' newline*)?)* '}'   # `ident` must name a type-struct
 field-init     ::= ident '=' expr
 field-access   ::= postfix '.' ident                                      # read; also a valid assignment target
+method-call    ::= postfix '.' ident '(' arg-list ')'                     # instance — autorefs value receivers
+                 | ident   '.' ident '(' arg-list ')'                     # static — `ident` is a known type-struct
 ```
+
+**Methods.** A method inside `type T { ... }` whose first parameter is the bare identifier
+`this` (no type annotation) is an *instance* method; otherwise it is *static*. The parser
+desugars the method to a free function named `T$method` and synthesises the `this` parameter as
+`*T` (or `*const T` for `const fn`). On a method call, a value receiver is auto-referenced —
+`obj.m()` lowers to `T$m(&obj, ...)` — and a pointer receiver is passed through unchanged.
+Static methods take no receiver; `T.m(...)` lowers to `T$m(...)`.
+
+The two call forms are **strict**: an instance method must be called as `obj.m(...)` and a
+static method as `T.m(...)`. A static-form call to an instance method (UFCS-style
+`T.m(&obj, ...)`) and an instance-form call to a static method (`obj.m(...)`) are both
+rejected at parse time with a precise diagnostic.
+
+**Encapsulation.** Fields are private by default. From outside the type's own methods, a private
+field cannot be read, assigned, or named in a struct literal. Combined with the "every field must
+be named" rule, this means a type-struct with any private field is unconstructable by an external
+literal and must be created via one of its own static methods (the factory pattern).
 
 ### Statements
 

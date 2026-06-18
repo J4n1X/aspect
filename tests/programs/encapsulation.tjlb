@@ -1,0 +1,22 @@
+# expected: 42
+# Encapsulation: a type-struct with private fields is constructible only via
+# its own factory; its state is read only through const-method accessors.
+type Counter {
+    i32 count                                # private (hidden by default)
+
+    fn make(i32 start) -> Counter {
+        return Counter { count = start }     # naming `count` ok — inside the type's methods
+    }
+    const fn value(this) -> i32 {
+        return this.count                    # private read ok — inside a method
+    }
+    fn bump(this, i32 delta) {
+        this.count = this.count + delta      # private write ok — non-const, inside the type
+    }
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Counter c = Counter.make(30)
+    c.bump(12)
+    return c.value()                         # public surface: no direct field access
+}

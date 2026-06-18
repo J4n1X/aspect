@@ -1,0 +1,10 @@
+# expected: "Cannot assign to const"
+# A `const fn` method promises not to mutate the receiver; writing to a field
+# through `this` is rejected by the const-propagation rule on field access.
+type Box {
+    public i32 v
+    const fn writes(this) {
+        this.v = 99
+    }
+}
+fn main(u32 argc, u8 **argv) -> i32 { return 0 }

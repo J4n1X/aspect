@@ -427,7 +427,12 @@ impl Scanner {
     }
 
     fn scan_type_after_const(&mut self, start_pos: Position) -> Result<Token, LexerError> {
-        let type_start = self.current;
+        // Save the cursor so we can restore it if the trailing word is not a
+        // type — e.g. `const fn ...` must lex as `Keyword(Const) Keyword(Fn)`,
+        // not eat `fn` as part of a failed `const <type>`.
+        let saved_current = self.current;
+        let saved_line = self.line;
+        let saved_column = self.column;
 
         if !Self::is_alpha(self.peek().unwrap_or('\0')) {
             return Err(LexerError::UnexpectedChar(
@@ -436,6 +441,7 @@ impl Scanner {
             ));
         }
 
+        let type_start = self.current;
         while Self::is_alphanumeric(self.peek().unwrap_or('\0')) {
             self.advance();
         }
@@ -452,6 +458,11 @@ impl Scanner {
                 full_lexeme,
             ))
         } else {
+            // Not a type — restore cursor so the caller falls back to
+            // `Keyword::Const` and the next call lexes the trailing word.
+            self.current = saved_current;
+            self.line = saved_line;
+            self.column = saved_column;
             Err(LexerError::UnexpectedChar('c', start_pos))
         }
     }

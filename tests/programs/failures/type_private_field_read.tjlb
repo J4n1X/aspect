@@ -1,0 +1,11 @@
+# expected: "private", "Secret"
+# Reading a private field from outside the type's own methods is rejected.
+type Secret {
+    i32 hidden                      # private (no `public`)
+    public i32 visible
+    fn make(i32 h, i32 v) -> Secret { return Secret { hidden = h, visible = v } }
+}
+fn main(u32 argc, u8 **argv) -> i32 {
+    Secret s = Secret.make(1, 2)
+    return s.hidden                 # error: hidden is private here
+}

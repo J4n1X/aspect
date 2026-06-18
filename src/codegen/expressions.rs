@@ -377,10 +377,25 @@ pub(crate) fn walk_expression<'ctx>(
                 let (ptr, _) = cg.emit_address(inner)?;
                 Ok(ptr.into())
             }
-            _ => Err(CodegenError::InvalidOperation(
-                "Cannot take address of non-lvalue".to_string(),
-                inner.pos,
-            )),
+            _ => {
+                // An rvalue struct (e.g. a method-call receiver in
+                // `make(...).method()` or `&SomeLiteral{...}`) is materialised
+                // into a temporary slot so its address can be taken.
+                if mode == EmitMode::Runtime
+                    && inner.expr_type.pointer_depth == 0
+                    && matches!(inner.expr_type.base, TypeBase::Struct(_))
+                {
+                    let val = walk_expression(inner, cg, mode)?;
+                    let struct_ty = cg.lang_type_to_llvm(&inner.expr_type)?;
+                    let tmp = cg.builder.build_alloca(struct_ty, "ref.tmp")?;
+                    cg.builder.build_store(tmp, val)?;
+                    return Ok(tmp.into());
+                }
+                Err(CodegenError::InvalidOperation(
+                    "Cannot take address of non-lvalue".to_string(),
+                    inner.pos,
+                ))
+            }
         },
 
         // ── Dereference (runtime only) ────────────────────────────────────

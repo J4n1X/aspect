@@ -6,7 +6,7 @@ use crate::parser::{
     BinaryOp, ExprKind, Expression, Function, GlobalVar, LiteralValue, Program, Statement,
     StatementKind,
 };
-use crate::symbol::module::ModuleSymbols;
+use crate::symbol::module::{ModuleSymbols, Visibility};
 use std::collections::HashMap;
 
 /// Single-pass type checker for the TJLB language.
@@ -503,20 +503,30 @@ impl TypeChecker {
                 let struct_id = *struct_id;
                 // Snapshot declared fields to avoid holding a `self.symbols`
                 // borrow across the per-field `check_expression` calls.
-                let declared: Vec<(String, LangType)> = self
+                let declared: Vec<(String, LangType, Visibility)> = self
                     .symbols
                     .struct_info(struct_id)
                     .fields
                     .iter()
-                    .map(|f| (f.name.clone(), f.ty))
+                    .map(|f| (f.name.clone(), f.ty, f.vis))
                     .collect();
                 let type_name = self.symbols.struct_info(struct_id).name.clone();
+                let inside_methods = self.is_inside_struct_methods(struct_id);
 
                 let mut named: Vec<String> = Vec::with_capacity(fields.len());
                 for (fname, fexpr) in fields.iter_mut() {
                     named.push(fname.clone());
-                    if let Some((_, fty)) = declared.iter().find(|(n, _)| n == fname) {
+                    if let Some((_, fty, vis)) =
+                        declared.iter().find(|(n, _, _)| n == fname)
+                    {
                         let fty = *fty;
+                        if *vis == Visibility::Private && !inside_methods {
+                            self.errors.push(TypeCheckError::InaccessibleField {
+                                field: fname.clone(),
+                                type_name: type_name.clone(),
+                                position: pos,
+                            });
+                        }
                         self.check_expression(fexpr, &fty);
                     } else {
                         self.errors.push(TypeCheckError::UnknownField {
@@ -530,7 +540,7 @@ impl TypeChecker {
 
                 let missing: Vec<&str> = declared
                     .iter()
-                    .map(|(n, _)| n.as_str())
+                    .map(|(n, _, _)| n.as_str())
                     .filter(|n| !named.iter().any(|m| m == n))
                     .collect();
                 if !missing.is_empty() {
@@ -561,7 +571,25 @@ impl TypeChecker {
             && base_type.pointer_depth <= 1
         {
             if let Some((_, finfo)) = self.symbols.field(id, field) {
-                return finfo.ty;
+                let vis = finfo.vis;
+                // A const struct (or `*const Struct`) propagates const-ness
+                // to its fields, so assignment-through `this.field = ...` in a
+                // `const fn` body lands on the existing AssignmentToConst path.
+                let mut fty = finfo.ty;
+                if base_type.is_const {
+                    fty.is_const = true;
+                }
+                // Private fields are accessible only from the type's own
+                // methods (M4 encapsulation).
+                if vis == Visibility::Private && !self.is_inside_struct_methods(id) {
+                    let type_name = self.type_name(base_type);
+                    self.errors.push(TypeCheckError::InaccessibleField {
+                        field: field.to_string(),
+                        type_name,
+                        position: pos,
+                    });
+                }
+                return fty;
             }
             let type_name = self.type_name(base_type);
             self.errors.push(TypeCheckError::UnknownField {
@@ -576,6 +604,16 @@ impl TypeChecker {
             position: pos,
         });
         LangType::new(TypeBase::Void, 0, 0, false)
+    }
+
+    /// `true` when the function being checked is a method of the given
+    /// type-struct (its mangled name begins with `"<TypeName>$"`).
+    fn is_inside_struct_methods(&self, struct_id: u32) -> bool {
+        let Some(current) = self.current_function.as_deref() else {
+            return false;
+        };
+        let prefix = format!("{}$", self.symbols.struct_info(struct_id).name);
+        current.starts_with(&prefix)
     }
 
     /// Human-readable name for a type, resolving type-struct ids to their
@@ -706,10 +744,14 @@ impl TypeChecker {
             }
 
             // Reference: the inner expression's target is the pointee type.
+            // A Reference may produce a const-pointer to a non-const value
+            // (C-style `const T* p = &t`), so the inner itself need not carry
+            // the pointee's const-ness.
             ExprKind::Reference(inner) => {
                 if target.pointer_depth > 0 {
                     let mut inner_target = *target;
                     inner_target.pointer_depth -= 1;
+                    inner_target.is_const = false;
                     self.check_expression(inner, &inner_target);
                 } else {
                     self.synth_expression(inner);

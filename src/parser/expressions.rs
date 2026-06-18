@@ -532,7 +532,7 @@ impl Parser {
                 }
                 TokenKind::Dot => {
                     self.advance();
-                    self.parse_field_access(expr)?
+                    self.parse_dot_postfix(expr)?
                 }
                 _ => break,
             };
@@ -900,7 +900,8 @@ impl Parser {
                         self.peek().pos,
                     ));
                 }
-                self.parse_struct_def()?;
+                let methods = self.parse_struct_def()?;
+                functions.extend(methods);
             } else if matches!(
                 self.peek().kind,
                 TokenKind::LangType(_) | TokenKind::Identifier(_)
@@ -971,12 +972,13 @@ impl Parser {
     }
 
     /// Parse a top-level type-struct definition:
-    /// `type Name { [public] Type field <term> ... }`.
+    /// `type Name { [public] Type field <term> ...  [const?] fn method(...) {...} ... }`.
     ///
-    /// The struct's id was reserved during the name-collection prescan; this
-    /// fills in its fields. Fields are private by default; `public` exposes one.
+    /// Fields must come before methods. Methods are desugared into mangled
+    /// free functions (`Type$method`) and returned to `do_parse_program` for
+    /// inclusion in `Program::functions`.
     #[parse_rule]
-    fn parse_struct_def(&mut self) -> Result<(), ParserError> {
+    fn parse_struct_def(&mut self) -> Result<Vec<crate::parser::Function>, ParserError> {
         use crate::symbol::module::{FieldInfo, Visibility};
 
         let pos = pos!();
@@ -993,11 +995,41 @@ impl Parser {
         }
 
         token!(OpenBrace);
-        let mut fields = Vec::new();
+
+        let mut fields: Vec<FieldInfo> = Vec::new();
+        let mut methods: Vec<crate::parser::Function> = Vec::new();
+        // Fields are finalised the moment we transition to method parsing so
+        // method bodies (including `return Self { ... }`) see the layout.
+        let mut fields_set = false;
+
         loop {
             skip_nl!();
             if self.check(&TokenKind::CloseBrace) || self.is_at_end() {
                 break;
+            }
+
+            // Method start? `fn name(...)` or `const fn name(...)`.
+            let is_const_fn = self.check_keyword(&Keyword::Const);
+            if is_const_fn || self.check_keyword(&Keyword::Fn) {
+                if !fields_set {
+                    self.module.set_fields(id, std::mem::take(&mut fields));
+                    fields_set = true;
+                }
+                if is_const_fn {
+                    self.advance(); // consume `const`
+                    skip_nl!();
+                }
+                let method = self.parse_method(id, &name, is_const_fn)?;
+                methods.push(method);
+                continue;
+            }
+
+            // Field. Fields must come before any method.
+            if fields_set {
+                return Err(ParserError::UnexpectedToken(
+                    "fields must be declared before methods".to_string(),
+                    self.peek().pos,
+                ));
             }
             let vis = if kw_if!(Public) {
                 Visibility::Public
@@ -1011,21 +1043,165 @@ impl Parser {
                 ty: field_type,
                 vis,
             });
-            // Optional terminator between fields.
             self.match_token(&[TokenKind::Semicolon, TokenKind::Newline]);
         }
         token!(CloseBrace);
 
-        self.module.set_fields(id, fields);
-        Ok(())
+        // A method-less struct never triggered the transition above.
+        if !fields_set {
+            self.module.set_fields(id, fields);
+        }
+
+        Ok(methods)
     }
 
-    /// Parse a field access `.field` after a base expression (the `.` was
-    /// already consumed). Stamps a best-effort field type; the type checker
-    /// re-stamps authoritatively (the struct may be defined after this use).
-    fn parse_field_access(&mut self, base: Expression) -> Result<Expression, ParserError> {
+    /// Parse a method inside a `type` body. Methods are desugared to free
+    /// functions named `Type$method`. An instance method takes a leading bare
+    /// `this` receiver (no type annotation); the parser supplies it as an
+    /// implicit `*Struct` (or `*const Struct` for `const fn`) first parameter.
+    /// A static method omits `this`.
+    #[parse_rule]
+    fn parse_method(
+        &mut self,
+        struct_id: u32,
+        struct_name: &str,
+        is_const_fn: bool,
+    ) -> Result<crate::parser::Function, ParserError> {
+        use crate::parser::{Function, FunctionProto};
+        use crate::symbol::module::MethodSig;
+        use crate::symbol::table::FunctionSymbol;
+
+        let pos = pos!();
+        kw!(Fn);
+        let method_name = ident!();
+        token!(OpenParen);
+
+        // Optional implicit `this` receiver, then any user parameters.
+        let mut params: Vec<(LangType, String)> = Vec::new();
+        let has_this = if let TokenKind::Identifier(n) = &self.peek().kind
+            && n == "this"
+        {
+            self.advance();
+            let receiver_ty = LangType {
+                base: TypeBase::Struct(struct_id),
+                size_bits: 0,
+                pointer_depth: 1,
+                is_const: is_const_fn,
+                array_size: None,
+            };
+            params.push((receiver_ty, "this".to_string()));
+            // Optional comma before the next param.
+            self.match_token(&[TokenKind::Comma]);
+            true
+        } else {
+            false
+        };
+
+        while !self.check(&TokenKind::CloseParen) && !self.is_at_end() {
+            let param_type = self.parse_type()?;
+            let param_name = match &self.peek().kind {
+                TokenKind::Identifier(n) => {
+                    let n = n.clone();
+                    self.advance();
+                    n
+                }
+                _ => {
+                    return Err(ParserError::ExpectedToken(
+                        "parameter name".to_string(),
+                        format!("{}", self.peek().kind),
+                        self.peek().pos,
+                    ));
+                }
+            };
+            params.push((param_type, param_name));
+            if !self.match_token(&[TokenKind::Comma]) {
+                break;
+            }
+        }
+        token!(CloseParen);
+
+        if is_const_fn && !has_this {
+            return Err(ParserError::UnexpectedToken(
+                "`const fn` requires a `this` receiver".to_string(),
+                pos,
+            ));
+        }
+
+        let return_type = if self.match_token(&[TokenKind::Arrow]) {
+            lang_type!()
+        } else {
+            LangType::new(TypeBase::Void, 0, 0, false)
+        };
+
+        let mangled = format!("{struct_name}${method_name}");
+
+        let proto = FunctionProto {
+            name: mangled.clone(),
+            params: params.clone(),
+            return_type,
+            is_extern: false,
+            pos,
+        };
+
+        // Register so plain `FunctionCall { name: mangled, ... }` resolves.
+        self.module
+            .add_function(FunctionSymbol {
+                name: mangled.clone(),
+                params: params.clone(),
+                return_type,
+                is_extern: false,
+                has_body: true,
+                pos,
+            })
+            .map_err(|e| ParserError::from_symbol(e, pos))?;
+
+        // Register in the struct's method registry (params exclude `this`).
+        let visible_params: Vec<(LangType, String)> = if has_this {
+            params[1..].to_vec()
+        } else {
+            params.clone()
+        };
+        self.module.add_method(
+            struct_id,
+            method_name,
+            MethodSig {
+                mangled_name: mangled,
+                params: visible_params,
+                return_type,
+                is_static: !has_this,
+                is_const: is_const_fn,
+            },
+        );
+
+        skip_nl!();
+
+        let body = scoped!({
+            for (param_type, param_name) in &params {
+                self.symbol_table_mut()
+                    .add_variable(param_name.clone(), *param_type, pos)
+                    .map_err(|e| ParserError::from_symbol(e, pos))?;
+            }
+            match self.parse_block_statement()? {
+                Statement {
+                    kind: StatementKind::Block(stmts),
+                    ..
+                } => stmts,
+                _ => unreachable!(),
+            }
+        });
+
+        Ok(Function { proto, body })
+    }
+
+    /// Parse a `.ident` postfix — the `.` was already consumed. The followup
+    /// distinguishes two forms:
+    /// - `base.method(args)` → a method call, desugared to a `FunctionCall`
+    ///   with the mangled name `Type$method` (autorefs value receivers; static
+    ///   form `Type.method(...)` carries no receiver).
+    /// - `base.field` → a `FieldAccess`, with a best-effort field-type stamp.
+    fn parse_dot_postfix(&mut self, base: Expression) -> Result<Expression, ParserError> {
         let pos = base.pos;
-        let field_name = match &self.peek().kind {
+        let name = match &self.peek().kind {
             TokenKind::Identifier(n) => {
                 let n = n.clone();
                 self.advance();
@@ -1033,17 +1209,34 @@ impl Parser {
             }
             _ => {
                 return Err(ParserError::ExpectedToken(
-                    "field name".to_string(),
+                    "field or method name".to_string(),
                     format!("{}", self.peek().kind),
                     self.peek().pos,
                 ));
             }
         };
 
+        // Method call: `.ident(args)`.
+        if self.check(&TokenKind::OpenParen) {
+            self.advance();
+            let mut args = Vec::new();
+            if !self.check(&TokenKind::CloseParen) {
+                loop {
+                    args.push(self.parse_expression()?);
+                    if !self.match_token(&[TokenKind::Comma]) {
+                        break;
+                    }
+                }
+            }
+            self.expect(&TokenKind::CloseParen, ")")?;
+            return self.build_method_call(base, &name, args, pos);
+        }
+
+        // Field access.
         let field_type = match base.expr_type.base {
             TypeBase::Struct(id) => self
                 .module
-                .field(id, &field_name)
+                .field(id, &name)
                 .map_or_else(|| LangType::new(TypeBase::Void, 0, 0, false), |(_, f)| f.ty),
             _ => LangType::new(TypeBase::Void, 0, 0, false),
         };
@@ -1051,9 +1244,126 @@ impl Parser {
         Ok(Expression::new(
             ExprKind::FieldAccess {
                 base: Box::new(base),
-                field: field_name,
+                field: name,
             },
             field_type,
+            pos,
+        ))
+    }
+
+    /// Build a method-call expression for `obj.method(args)` or
+    /// `Type.method(args)`. Resolves the mangled name (`Type$method`), picks
+    /// instance-vs-static, and autorefs value receivers.
+    fn build_method_call(
+        &mut self,
+        base: Expression,
+        method_name: &str,
+        args: Vec<Expression>,
+        pos: Position,
+    ) -> Result<Expression, ParserError> {
+        // Static call: `TypeName.method(args)` — `base` is `Variable(TypeName)`
+        // for a known struct *and* there is no local variable shadowing it.
+        if let ExprKind::Variable(var_name) = &base.kind
+            && let Some(id) = self.module.struct_id(var_name)
+            && self.symbol_table.lookup_variable(var_name).is_none()
+        {
+            let type_name = self.module.struct_info(id).name.clone();
+            // Strict: the static-call form must resolve to a static method (one
+            // declared without `this`). An instance method declared `fn m(this,
+            // ...)` must be called as `obj.m(...)`, not `Type.m(&obj, ...)` —
+            // the two syntactic forms map cleanly to the two kinds.
+            if let Some(sig) = self.module.struct_info(id).methods.get(method_name)
+                && !sig.is_static
+            {
+                return Err(ParserError::MethodCallForm(
+                    format!(
+                        "'{type_name}.{method_name}' is an instance method; \
+                         call it as `<receiver>.{method_name}(...)`"
+                    ),
+                    pos,
+                ));
+            }
+            let mangled = format!("{type_name}${method_name}");
+            let return_type = self.module.lookup_function(&mangled).map_or_else(
+                || LangType::new(TypeBase::Void, 0, 0, false),
+                |f| f.return_type,
+            );
+            return Ok(Expression::new(
+                ExprKind::FunctionCall {
+                    name: mangled,
+                    args,
+                },
+                return_type,
+                pos,
+            ));
+        }
+
+        // Instance call: `base` must be a type-struct value or pointer-to-struct.
+        let bt = base.expr_type;
+        let id = match bt.base {
+            TypeBase::Struct(id) => id,
+            _ => {
+                return Err(ParserError::TypeMismatch(
+                    "type-struct".to_string(),
+                    format!("{bt}"),
+                    pos,
+                ));
+            }
+        };
+        let type_name = self.module.struct_info(id).name.clone();
+        // Strict: the instance-call form must resolve to an instance method.
+        // A static method (no `this`) must be invoked as `Type.method(...)`,
+        // not `obj.method(...)`.
+        if let Some(sig) = self.module.struct_info(id).methods.get(method_name)
+            && sig.is_static
+        {
+            return Err(ParserError::MethodCallForm(
+                format!(
+                    "'{type_name}.{method_name}' is a static method; \
+                     call it as `{type_name}.{method_name}(...)` without a receiver"
+                ),
+                pos,
+            ));
+        }
+        let mangled = format!("{type_name}${method_name}");
+        let return_type = self.module.lookup_function(&mangled).map_or_else(
+            || LangType::new(TypeBase::Void, 0, 0, false),
+            |f| f.return_type,
+        );
+
+        // Receiver: autoref a value, pass a pointer as-is; deeper pointers fail.
+        let receiver = match bt.pointer_depth {
+            0 => {
+                let ref_ty = LangType {
+                    base: bt.base,
+                    size_bits: bt.size_bits,
+                    pointer_depth: 1,
+                    is_const: bt.is_const,
+                    array_size: None,
+                };
+                let base_pos = base.pos;
+                Expression::new(ExprKind::Reference(Box::new(base)), ref_ty, base_pos)
+            }
+            1 => base,
+            _ => {
+                return Err(ParserError::TypeMismatch(
+                    "type-struct or pointer-to-type-struct".to_string(),
+                    format!("{bt}"),
+                    pos,
+                ));
+            }
+        };
+
+        let mut all_args = Vec::with_capacity(args.len() + 1);
+        all_args.push(receiver);
+        all_args.extend(args);
+
+        Ok(Expression::new(
+            ExprKind::FunctionCall {
+                name: mangled,
+                args: all_args,
+            },
+            return_type,
             pos,
         ))
     }
