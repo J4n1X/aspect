@@ -142,6 +142,24 @@ the emitted IR.
 type. Any inline whitespace between `const` and the type is consumed by
 the lexer, so `const u8*` and `const u8 *` are both valid.
 
+**The opaque pointer `u0*`.** `u0` itself is not a value type — declaring a
+`u0` variable, parameter, or global is a type error — but `u0*` is the
+language's universal object pointer (C's `void*`):
+
+- Any pointer, of any depth, coerces to and from `u0*` implicitly:
+  `free(xs)` works for `i32* xs`, and `i32* p = malloc(n)` needs no cast.
+- A `u0*` is *opaque*: dereferencing it, subscripting it, and pointer
+  arithmetic on it are all rejected — cast to a sized pointer first
+  (`p as i32*`, or `p as u8*` for byte offsets).
+- Null tests work directly: `p == null`, `if p { ... }`, `!p`.
+- `u0**` is an ordinary pointer whose pointee happens to be `u0*`; it
+  subscripts fine and is **not** implicitly convertible like `u0*` is.
+- `sizeof(u0*)` is the pointer width; `sizeof(u0)` is an error.
+
+Use `u0*` where no particular pointee is expected (allocators, callbacks
+over erased elements, opaque handles like `FILE*`); use `u8*` when the
+data really is bytes.
+
 Type modifier examples:
 
 ```tjlb
@@ -596,15 +614,19 @@ functions.
 ### Array-to-pointer decay
 
 A preallocated array variable (`u8[N]`) decays to a pointer (`u8*`) in
-any expression context. To pass the array's address to a function
-expecting `u8*`:
+any expression context — pass it directly, no `&` and no cast:
 
 ```
 u8[256] buf
 fn takes_ptr(u8 *p) { ... }
 
-takes_ptr(&buf as u8*)   # &buf is u8**, cast to u8*
+takes_ptr(buf)           # u8[256] decays to u8*
 ```
+
+Same-depth pointers additionally coerce into one another implicitly, so
+a decayed `i32[5]` also passes where a `u8*` is expected. The historical
+`takes_ptr(&buf as u8*)` dance still works (`&buf` is `u8**`, the cast
+flattens it) but is never needed.
 
 ### `for` loop init and increment: no trailing terminator
 
@@ -678,7 +700,7 @@ fn memset(u8 *dst, u64 len, u8 c) -> u0 {
 
 fn main(u32 argc, u8 **argv) -> i32 {
     u8[256] buffer
-    memset(&buffer as u8*, 256 as u64, 0 as u8)
+    memset(buffer, 256, 0)      # array decays to u8*
     return 0
 }
 ```

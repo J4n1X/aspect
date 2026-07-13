@@ -1,0 +1,11 @@
+# expected: "Cannot apply operator 'Add' to types 'u0*'"
+#-
+  Pointer arithmetic on `u0*` must be rejected — the pointee is unsized,
+  so a GEP cannot scale. Cast to `u8*` for byte offsets.
+-#
+
+fn main(u32 argc, u8** argv) -> i32 {
+    u0* p = null
+    u0* q = p + 1
+    return 0
+}

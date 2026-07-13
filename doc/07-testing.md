@@ -38,6 +38,12 @@ Files without a `# expected:` line are silently skipped by the macro.
 
 Create a `.tjlb` file anywhere under `tests/programs/`, add a `# expected:` line, and `cargo test` picks it up automatically — no changes to `integration_tests.rs` needed.
 
+`tests/programs/` is the **only** scan root. The `demos/` folder is
+deliberately not scanned — demos are showcase programs, not regression
+tests. The shared demo standard library (`demos/std/**`) *is* covered,
+via `tests/programs/stdlib_check.tjlb`, which `$include`s it across the
+tree boundary.
+
 ### Argument Passing
 
 `compile_and_run_with_args()` forwards the `# run_args:` entries as the

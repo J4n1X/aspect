@@ -16,9 +16,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         global: &GlobalVar,
     ) -> Result<(), CodegenError> {
         let (global_type, _is_array) = if global.var_type.is_array() {
-            (global.var_type.to_llvm_array(self.context)?.into(), true)
+            // Cache-aware: resolves type-struct elements too.
+            (self.lang_type_to_llvm_array(&global.var_type)?.into(), true)
         } else {
-            (global.var_type.to_llvm(self.context)?, false)
+            (self.lang_type_to_llvm(&global.var_type)?, false)
         };
 
         let global_var =

@@ -1,0 +1,11 @@
+# expected: "Cannot dereference 'u0*'", "cast it to a sized pointer"
+#-
+  `u0*` is opaque: dereferencing (and thus subscripting) requires a cast
+  to a sized pointer type first.
+-#
+
+fn main(u32 argc, u8** argv) -> i32 {
+    u0* p = null
+    *p
+    return 0
+}

@@ -32,9 +32,22 @@ pub fn types_coercible(from: &LangType, to: &LangType) -> bool {
         return true;
     }
 
-    // Void is only compatible with void
-    if from.base == TypeBase::Void || to.base == TypeBase::Void {
-        return from.base == TypeBase::Void && to.base == TypeBase::Void;
+    // Void *values* are only compatible with void (function-return contexts).
+    let from_void_value = from.base == TypeBase::Void && decayed_from.pointer_depth == 0;
+    let to_void_value = to.base == TypeBase::Void && decayed_to.pointer_depth == 0;
+    if from_void_value || to_void_value {
+        return from_void_value && to_void_value;
+    }
+
+    // `u0*` (exactly depth 1) is the universal object pointer: any pointer of
+    // any depth converts to and from it implicitly — C's void* rule. Deeper
+    // void pointers (`u0**`, ...) are NOT special; they follow the ordinary
+    // same-depth rules below, as do depth mismatches among sized pointers.
+    let from_opaque = from.base == TypeBase::Void && decayed_from.pointer_depth == 1;
+    let to_opaque = to.base == TypeBase::Void && decayed_to.pointer_depth == 1;
+    if (to_opaque && decayed_from.pointer_depth >= 1) || (from_opaque && decayed_to.pointer_depth >= 1)
+    {
+        return true;
     }
 
     // Pointer depth must match after decay

@@ -115,6 +115,12 @@ pub enum TypeCheckError {
         type_name: String,
         position: Position,
     },
+
+    #[error("'u0' is not a value type — it only exists behind a pointer (u0*); use a sized type instead at {0}")]
+    InvalidVoidValue(Position),
+
+    #[error("Cannot dereference 'u0*' — cast it to a sized pointer type first at {0}")]
+    OpaqueDereference(Position),
 }
 
 impl TypeCheckError {
@@ -140,7 +146,9 @@ impl TypeCheckError {
             | Self::UndefinedFunction(_, pos)
             | Self::InvalidDereference(_, pos)
             | Self::InvalidReference(pos)
-            | Self::InvalidConditionType(_, pos) => Some(*pos),
+            | Self::InvalidConditionType(_, pos)
+            | Self::InvalidVoidValue(pos)
+            | Self::OpaqueDereference(pos) => Some(*pos),
             Self::MissingReturn(_) => None,
         }
     }

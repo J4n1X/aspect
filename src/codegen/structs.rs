@@ -2,7 +2,7 @@
 //! the struct cache, and the address (lvalue) path that field access, field
 //! assignment, and `&expr` all rely on.
 
-use inkwell::types::BasicTypeEnum;
+use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::values::PointerValue;
 
 use crate::codegen::generator::CodeGenerator;
@@ -59,6 +59,24 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Ok((*st).into());
         }
         ty.to_llvm(self.context)
+    }
+
+    /// Lower an array `LangType` to `[N x T]`, resolving type-struct elements
+    /// through the cache. Cache-aware sibling of [`LangTypeExt::to_llvm_array`].
+    pub(crate) fn lang_type_to_llvm_array(
+        &self,
+        ty: &LangType,
+    ) -> Result<inkwell::types::ArrayType<'ctx>, CodegenError> {
+        let array_size = ty.array_size.ok_or_else(|| {
+            CodegenError::TypeError("Expected array type".to_string(), Position::new(0, 0))
+        })?;
+        // The element strips only the array dimension; pointer depth stays part
+        // of the element type (`(i32*)[3]` allocates `[3 x ptr]`).
+        let elem_ty = LangType {
+            array_size: None,
+            ..*ty
+        };
+        Ok(self.lang_type_to_llvm(&elem_ty)?.array_type(array_size))
     }
 
     /// Field layout index and type for `field` of struct `id`.

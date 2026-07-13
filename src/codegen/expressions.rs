@@ -234,7 +234,9 @@ pub(crate) fn walk_expression<'ctx>(
                 }
                 let left_ptr = left_val.into_pointer_value();
                 let right_int = right_val.into_int_value();
-                let pointee_type = left.expr_type.pointee().to_llvm(cg.context)?;
+                // `lang_type_to_llvm` (not the context-only `to_llvm`) so the
+                // GEP scales correctly when the pointee is a type-struct.
+                let pointee_type = cg.lang_type_to_llvm(&left.expr_type.pointee())?;
                 return match op {
                     BinaryOp::Add => unsafe {
                         Ok(cg
@@ -421,7 +423,9 @@ pub(crate) fn walk_expression<'ctx>(
                     array_size: None,
                 }
             };
-            let pointee_type = derefed_type.to_llvm(cg.context)?;
+            // Cache-aware lowering: `*(Pair*)` loads a struct value, which the
+            // context-only `to_llvm` cannot resolve.
+            let pointee_type = cg.lang_type_to_llvm(&derefed_type)?;
             Ok(cg
                 .builder
                 .build_load(pointee_type, ptr.into_pointer_value(), "deref")?)
@@ -481,7 +485,28 @@ pub(crate) fn walk_expression<'ctx>(
 
         // ── Logical / bitwise NOT ─────────────────────────────────────────
         ExprKind::UnaryNot(inner) => {
-            let val = walk_expression(inner, cg, mode)?.into_int_value();
+            let raw = walk_expression(inner, cg, mode)?;
+            // `!p` on a pointer is a null test: compare the address as an
+            // integer against zero (runtime only — pointers don't fold).
+            if raw.is_pointer_value() {
+                if mode == EmitMode::Constant {
+                    return Err(CodegenError::InvalidOperation(
+                        "logical NOT of a pointer is not a constant expression".to_string(),
+                        inner.pos,
+                    ));
+                }
+                let addr = cg.builder.build_ptr_to_int(
+                    raw.into_pointer_value(),
+                    cg.context.i64_type(),
+                    "ptr_addr",
+                )?;
+                let zero = addr.get_type().const_zero();
+                return Ok(cg
+                    .builder
+                    .build_int_compare(IntPredicate::EQ, addr, zero, "nottmp")?
+                    .into());
+            }
+            let val = raw.into_int_value();
             // Logical NOT yields an i1 boolean; callers extend if they need a
             // wider integer.
             match mode {

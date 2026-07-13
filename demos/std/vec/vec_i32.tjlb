@@ -33,7 +33,7 @@ type VecI32 {
         if cap == 0 {
             return VecI32.new()
         }
-        i32* buf = malloc(cap * sizeof(i32)) as i32*
+        i32* buf = malloc(cap * sizeof(i32))
         return VecI32 { data = buf, length = 0, capacity = cap }
     }
 
@@ -60,8 +60,7 @@ type VecI32 {
         u64 new_cap = this.capacity * 2
         if new_cap < 4 { new_cap = 4 }
         if new_cap < need_total { new_cap = need_total }
-        u8* old = this.data as u8*
-        this.data = realloc(old, new_cap * sizeof(i32)) as i32*
+        this.data = realloc(this.data, new_cap * sizeof(i32))
         this.capacity = new_cap
     }
 
@@ -83,7 +82,7 @@ type VecI32 {
     # `free(NULL)` is fine too - so the cap-guard is cosmetic, not required.
     fn destroy(this) {
         if this.capacity > 0 {
-            free(this.data as u8*)
+            free(this.data)
         }
         this.data = null
         this.length = 0

@@ -126,7 +126,12 @@ All functions are pure (no side effects):
 
 1. **Exact match** → `true`
 2. **Array-to-pointer decay**: `i32[10]` is coercible to `i32*`
-3. **Void**: only compatible with void
+3. **Void values**: `u0` (pointer depth 0 after decay) is only compatible with `u0`.
+   `u0*` is an ordinary pointer for coercion purposes and follows the pointer
+   rules below — so `T* <-> u0*` is implicit in both directions. What makes
+   `u0*` special is *use*, not assignment: dereferencing/subscripting it and
+   pointer arithmetic on it are rejected (`OpaqueDereference`, invalid binary
+   op) until it is cast to a sized pointer type.
 4. **Pointer depth mismatch** (after decay) → `false`
 5. **Integer widening** (non-pointer, non-array): `size_bits(from) <= size_bits(to)` → `true`
    - Both `SInt↔UInt` families are treated as integers here (widening is allowed even across sign)

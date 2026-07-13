@@ -98,7 +98,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         initializer: Option<&Expression>,
     ) -> Result<(), CodegenError> {
         let llvm_type = if var_type.is_array() {
-            var_type.to_llvm_array(self.context)?.into()
+            // Cache-aware: resolves type-struct elements (`Pair[2]`) too.
+            self.lang_type_to_llvm_array(var_type)?.into()
         } else {
             // `lang_type_to_llvm` resolves type-struct values through the cache;
             // it falls back to `to_llvm` for scalars/pointers.

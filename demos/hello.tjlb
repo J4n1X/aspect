@@ -15,7 +15,7 @@ fn main(u32 argc, u8** argv) -> i32 {
 
     # Heap-allocated array of i32. `sizeof(i32)` is a compile-time `u64`,
     # so the multiplication folds against the runtime `3` at LLVM level.
-    i32* xs = alloc_bytes(3 * sizeof(i32)) as i32*
+    i32* xs = alloc_bytes(3 * sizeof(i32))
     xs[0] = 10
     xs[1] = 20
     xs[2] = 12

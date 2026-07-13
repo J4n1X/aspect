@@ -50,7 +50,7 @@ fn print_str(u8 *s) -> u0 {
 fn println(u8 *s) -> u0 {
     u8[2] nl = {10, 0}
     write(1, s, strlen(s))
-    write(1, &nl as u8*, 1)
+    write(1, nl, 1)
 }
 
 # -- number formatting -----------------------------------------------------
@@ -84,7 +84,7 @@ fn i64_to_str(i64 v, u8 *buf) -> u8 * {
     if v < 0 {
         buf[0] = 45
         u8[22] tmp
-        u64_to_str((0 - v) as u64, &tmp as u8*)
+        u64_to_str((0 - v) as u64, tmp)
         u64 j = 0
         while tmp[j] != 0 {
             buf[j + 1] = tmp[j]
@@ -98,14 +98,14 @@ fn i64_to_str(i64 v, u8 *buf) -> u8 * {
 
 fn print_u64(u64 v) -> u0 {
     u8[24] buf
-    u64_to_str(v, &buf as u8*)
-    write(1, &buf as u8*, strlen(&buf as u8*))
+    u64_to_str(v, buf)
+    write(1, buf, strlen(buf))
 }
 
 fn print_i64(i64 v) -> u0 {
     u8[24] buf
-    i64_to_str(v, &buf as u8*)
-    write(1, &buf as u8*, strlen(&buf as u8*))
+    i64_to_str(v, buf)
+    write(1, buf, strlen(buf))
 }
 
 # -- test harness ----------------------------------------------------------
@@ -411,20 +411,20 @@ fn main(u32 argc, u8 **argv) -> i32 {
 
     # Constant list initializer (ConstantArray path -- all literals)
     i32[6] fibs = {0, 1, 1, 2, 3, 5}
-    check_i64("const list init sum=12", 12, sum_i32(&fibs as i32*, 6))
+    check_i64("const list init sum=12", 12, sum_i32(fibs, 6))
 
     # Runtime list initializer (two-index GEP path -- contains variable)
     const i32 base = 7
     i32[4] rt = {base, base * 2, base * 3, base * 4}
-    check_i64("runtime list init sum=70", 70, sum_i32(&rt as i32*, 4))
+    check_i64("runtime list init sum=70", 70, sum_i32(rt, 4))
 
     # Partial list initializer -- remaining elements zero-filled
     i32[5] partial = {10, 20}
-    check_i64("partial list init sum=30", 30, sum_i32(&partial as i32*, 5))
+    check_i64("partial list init sum=30", 30, sum_i32(partial, 5))
 
     # Empty list initializer -- entire array is zeroed
     i32[4] empty = {}
-    check_i64("empty list init sum=0", 0, sum_i32(&empty as i32*, 4))
+    check_i64("empty list init sum=0", 0, sum_i32(empty, 4))
 
     # Global array reads (PRIMES)
     check_i64("PRIMES[0]=2",  2,  PRIMES[0])
@@ -444,14 +444,14 @@ fn main(u32 argc, u8 **argv) -> i32 {
 
     # Insertion sort
     i32[8] tosort = {5, 3, 8, 1, 9, 2, 7, 4}
-    sort_asc(&tosort as i32*, 8)
+    sort_asc(tosort, 8)
     check_i64("sort[0]=1", 1, tosort[0])
     check_i64("sort[4]=5", 5, tosort[4])
     check_i64("sort[7]=9", 9, tosort[7])
 
     # Linear search (on sorted array)
-    check_i64("search(5)=4",   4,     linear_search(&tosort as i32*, 8, 5))
-    check_i64("search(99)=-1", 0 - 1, linear_search(&tosort as i32*, 8, 99))
+    check_i64("search(5)=4",   4,     linear_search(tosort, 8, 5))
+    check_i64("search(99)=-1", 0 - 1, linear_search(tosort, 8, 99))
 
     # -- Section 6: pointers --------------------------------------------
     puts("")
@@ -465,7 +465,7 @@ fn main(u32 argc, u8 **argv) -> i32 {
     # Pointer arithmetic: walk a u8 array, accumulate bytes
     # u8 elements widen implicitly to u64 when summed into sum8
     u8[5] greeting = {72, 101, 108, 108, 111}
-    u8 *gp = &greeting as u8*
+    u8 *gp = greeting
     u64 sum8 = 0
     for (u32 gi = 0; gi < 5; gi += 1) {
         sum8 += gp[gi]
@@ -475,9 +475,9 @@ fn main(u32 argc, u8 **argv) -> i32 {
     # Double-pointer: copy a string through a pointer-to-pointer
     u8[32] src_buf
     u8[32] dst_buf
-    strcpy(&src_buf as u8*, "StressTest")
-    strcpy(&dst_buf as u8*, &src_buf as u8*)
-    check_i64("strcpy round-trip", 0, strcmp(&dst_buf as u8*, "StressTest"))
+    strcpy(src_buf, "StressTest")
+    strcpy(dst_buf, src_buf)
+    check_i64("strcpy round-trip", 0, strcmp(dst_buf, "StressTest"))
 
     # -- Section 7: implicit widening showcase --------------------------
     puts("")
@@ -547,8 +547,8 @@ fn main(u32 argc, u8 **argv) -> i32 {
 
     # Build a string via array + pointer walk
     u8[8] word = {84, 74, 76, 66, 0, 0, 0, 0}
-    check_u64("array-built strlen=4", 4, strlen(&word as u8*))
-    check_i64("array-built strcmp",   0, strcmp(&word as u8*, "TJLB"))
+    check_u64("array-built strlen=4", 4, strlen(word))
+    check_i64("array-built strcmp",   0, strcmp(word, "TJLB"))
 
     # -- Section 10: scope & shadowing ---------------------------------
     puts("")

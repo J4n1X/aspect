@@ -22,7 +22,7 @@ fn println(u8 *s) -> u0 {
     nl[0] = 10
     nl[1] = 0
     write(1, s, strlen(s))
-    write(1, &nl as u8*, 1 as u64)
+    write(1, nl, 1 as u64)
 }
 
 fn sum_i32(i32 *arr, i32 len) -> i32 {
@@ -40,24 +40,24 @@ fn main(u32 argc, u8 **argv) -> i32 {
 
     # Full initializer: {10, 20, 30, 40, 50}, sum = 150
     i32[5] full = {10, 20, 30, 40, 50}
-    i32 full_sum = sum_i32(&full as i32*, 5)
+    i32 full_sum = sum_i32(full, 5)
 
     # Empty initializer: all five slots must be zero, sum = 0
     i32[5] empty = {}
-    i32 empty_sum = sum_i32(&empty as i32*, 5)
+    i32 empty_sum = sum_i32(empty, 5)
 
     # Partial initializer: {7, 8}, remaining three slots zero, sum = 15
     i32[5] partial = {7, 8}
-    i32 partial_sum = sum_i32(&partial as i32*, 5)
+    i32 partial_sum = sum_i32(partial, 5)
 
     # u8 null-terminated string via full init
     u8[6] hello = {72, 101, 108, 108, 111, 0}
-    puts(&hello as u8*)
+    puts(hello)
 
     # Expression elements
     i32 x = 3
     i32[3] derived = {x * 2, x + 10, x * x}
-    i32 d_sum = sum_i32(&derived as i32*, 3)
+    i32 d_sum = sum_i32(derived, 3)
 
     puts("All list initializer checks passed.")
 

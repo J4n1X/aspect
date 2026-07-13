@@ -64,8 +64,8 @@ The `LangTypeExt` trait adds methods directly to `LangType`:
 
 | Method | Behaviour |
 |--------|-----------|
-| `to_llvm(ctx)` | Main conversion. Pointers and arrays → `ptr`. SInt/UInt → `iN`. SFloat → `fN`. |
-| `to_llvm_array(ctx)` | Returns `[N x elem]` for statically-sized arrays |
+| `to_llvm(ctx)` | Main conversion. Pointers and arrays → `ptr`. SInt/UInt → `iN`. SFloat → `fN`. Type-struct *values* → error (no cache access). |
+| `to_llvm_array(ctx)` | Returns `[N x elem]` for statically-sized arrays (struct elements → error) |
 | `element_type()` | Strip pointer/array, return base scalar `LangType` |
 | `is_int()` | True for SInt/UInt with `pointer_depth == 0` |
 | `is_float()` | True for SFloat with `pointer_depth == 0` |
@@ -73,6 +73,16 @@ The `LangTypeExt` trait adds methods directly to `LangType`:
 | `is_array()` | True when `array_size.is_some()` |
 
 **Key**: Signed vs unsigned makes no difference at the LLVM type level — both map to the same `iN`. Signedness is tracked by `LangType::base` and consulted at instruction selection time.
+
+**Type-structs**: the trait methods are context-only and cannot resolve
+`TypeBase::Struct(id)` against the generator's named-struct cache. Every
+codegen site where a struct *value* type can appear must go through the
+cache-aware `CodeGenerator::lang_type_to_llvm` (scalars/pointers fall
+through to `to_llvm`) or `CodeGenerator::lang_type_to_llvm_array` for
+`[N x T]` allocas/globals. This matters for: pointer-arithmetic GEPs
+(`Pair* + i` scales by struct size), dereference loads (`*(Pair*)` —
+subscripts desugar to these), struct-array allocas (`Pair[2]`), and
+struct-array globals. Regression test: `tests/programs/struct_arrays.tjlb`.
 
 ### Operation Helpers
 
@@ -288,7 +298,7 @@ All `alloca` instructions are placed in the **function entry block**, not at the
 
 ## Global Variables and Constant Expressions (`globals.rs`)
 
-1. Compute LLVM type (arrays → `LangTypeExt::to_llvm_array`)
+1. Compute LLVM type (arrays → `CodeGenerator::lang_type_to_llvm_array`, scalars → `lang_type_to_llvm`; both cache-aware for type-structs)
 2. `module.add_global()`
 3. For **array** initializers: `generate_constant_array_value` → LLVM `ConstantArray`
 4. For **scalar** initializers: `walk_expression(expr, self, EmitMode::Constant)`

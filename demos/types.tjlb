@@ -124,7 +124,7 @@ fn i64_to_str(i64 v, u8 *buf) -> u8 * {
     u64 i = 0
     if v < 0 {
         buf[0] = 45
-        u64_to_str(0 - v as u64, &tmp as u8*)
+        u64_to_str(0 - v as u64, tmp)
         while tmp[i] != 0 {
             buf[i + 1] = tmp[i]
             i += 1
@@ -155,7 +155,7 @@ fn f64_to_str_2dp(f64 v, u8 *buf) -> u8 * {
         buf[len] = 48
         len += 1
     }
-    i64_to_str(cents, &cents_str as u8*)
+    i64_to_str(cents, cents_str)
     while cents_str[j] != 0 {
         buf[len] = cents_str[j]
         len += 1
@@ -176,25 +176,25 @@ fn println(u8 *s) -> u0 {
     nl[0] = 10
     nl[1] = 0
     write(1, s, strlen(s))
-    write(1, &nl as u8*, 1)
+    write(1, nl, 1)
 }
 
 fn print_u64(u64 v) -> u0 {
     u8[24] buf
-    u64_to_str(v, &buf as u8*)
-    write(1, &buf as u8*, strlen(&buf as u8*))
+    u64_to_str(v, buf)
+    write(1, buf, strlen(buf))
 }
 
 fn print_i64(i64 v) -> u0 {
     u8[24] buf
-    i64_to_str(v, &buf as u8*)
-    write(1, &buf as u8*, strlen(&buf as u8*))
+    i64_to_str(v, buf)
+    write(1, buf, strlen(buf))
 }
 
 fn print_f64_2dp(f64 v) -> u0 {
     u8[32] buf
-    f64_to_str_2dp(v, &buf as u8*)
-    write(1, &buf as u8*, strlen(&buf as u8*))
+    f64_to_str_2dp(v, buf)
+    write(1, buf, strlen(buf))
 }
 
 fn main(u32 argc, u8 **argv) -> i32 {
@@ -266,7 +266,7 @@ fn main(u32 argc, u8 **argv) -> i32 {
     buf[3] = 10 as u8    # '\n'
     buf[4] = 0 as u8     # null terminator
 
-    u8 *p   = &buf as u8*
+    u8 *p   = buf
     u64 len = strlen(p)
     write(1, p, len)
     puts("6. u8[8] buf walked through u8* pointer -- wrote 'Hi!' above")

@@ -1,0 +1,10 @@
+# expected: "'u0' is not a value type"
+#-
+  A `u0`-valued parameter must be rejected, on extern declarations too.
+-#
+
+extern fn takes_void(u0 x) -> u0
+
+fn main(u32 argc, u8** argv) -> i32 {
+    return 0
+}

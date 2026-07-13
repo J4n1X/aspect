@@ -123,16 +123,11 @@ pub fn generate_tests_impl(_input: TokenStream) -> TokenStream {
 
     let mut output = TokenStream2::new();
 
-    // Two scan roots: the integration-test corpus and the demo programs.
-    // Each gets its own test-name prefix so the namespaces never collide
-    // (e.g. `tests/programs/foo.tjlb` and `demos/foo.tjlb` produce
-    // `test_foo` and `test_demo_foo` respectively). Demo helpers in
-    // `demos/std/**/*.tjlb` lack `# expected:` and are silently skipped,
-    // just like helpers under `tests/programs/include_helpers/`.
-    let scans: [(&str, &[&str], &str); 2] = [
-        ("test", &["tests", "programs"], ""),
-        ("test_demo", &["demos"], ""),
-    ];
+    // One scan root: the integration-test corpus. Demos are showcase
+    // programs, not regression tests — they are deliberately NOT scanned.
+    // Helpers under `tests/programs/include_helpers/` lack `# expected:`
+    // and are silently skipped.
+    let scans: [(&str, &[&str], &str); 1] = [("test", &["tests", "programs"], "")];
 
     for (prefix, base_components, _) in &scans {
         let mut base_dir = PathBuf::from(&manifest_dir);

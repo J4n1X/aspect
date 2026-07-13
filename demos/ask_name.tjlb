@@ -43,13 +43,13 @@ fn main(u32 argc, u8 **argv) -> i32 {
 
     puts("What is your name?")
 
-    i64 n = read(0, &input as u8*, 255 as u64)
+    i64 n = read(0, input, 255 as u64)
     if n > 0 && input[n - 1] == 10 as u8 {
         input[n - 1] = 0 as u8
     }
 
     strcpy(output, "Hello, ")
-    strcat(output, &input as u8*)
+    strcat(output, input)
     puts(output)
 
     return 0

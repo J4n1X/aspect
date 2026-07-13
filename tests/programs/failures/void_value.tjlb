@@ -1,0 +1,9 @@
+# expected: "'u0' is not a value type"
+#-
+  `u0` as a variable type must be rejected — only `u0*` exists as a value.
+-#
+
+fn main(u32 argc, u8** argv) -> i32 {
+    u0 x
+    return 0
+}

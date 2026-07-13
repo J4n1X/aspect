@@ -103,6 +103,7 @@ impl TypeChecker {
         }
 
         for func in &mut program.functions {
+            self.check_proto(&func.proto);
             if !func.proto.is_extern {
                 self.check_function(func);
             }
@@ -131,6 +132,10 @@ impl TypeChecker {
 
     fn check_global_var(&mut self, global: &mut GlobalVar) {
         let var_type = global.var_type;
+        if Self::is_void_value(&var_type) {
+            self.errors
+                .push(TypeCheckError::InvalidVoidValue(global.pos));
+        }
         if let Some(init_expr) = &mut global.initializer {
             let init_pos = init_expr.pos;
             if let ExprKind::ListInitializer(elements) = &mut init_expr.kind {
@@ -156,6 +161,24 @@ impl TypeChecker {
     }
 
     // ── Function checking ────────────────────────────────────────────────────
+
+    /// True for `u0` used as a *value* type (no pointer depth): illegal
+    /// everywhere except as a function return type. `u0*` (any depth) and
+    /// arrays of `u0*` are fine — but an array of void values is not.
+    fn is_void_value(ty: &LangType) -> bool {
+        ty.base == TypeBase::Void && ty.pointer_depth == 0
+    }
+
+    /// Validate a function prototype: no `u0`-valued parameters. Runs for
+    /// extern declarations too (they never reach `check_function`).
+    fn check_proto(&mut self, proto: &crate::parser::FunctionProto) {
+        for (param_type, _) in &proto.params {
+            if Self::is_void_value(param_type) {
+                self.errors
+                    .push(TypeCheckError::InvalidVoidValue(proto.pos));
+            }
+        }
+    }
 
     fn check_function(&mut self, func: &mut Function) {
         self.current_function = Some(func.proto.name.clone());
@@ -184,6 +207,9 @@ impl TypeChecker {
                 initializer,
             } => {
                 let var_type = *var_type;
+                if Self::is_void_value(&var_type) {
+                    self.errors.push(TypeCheckError::InvalidVoidValue(stmt_pos));
+                }
                 self.define_var(name.clone(), var_type);
                 if let Some(init_expr) = initializer {
                     let init_pos = init_expr.pos;
@@ -426,6 +452,16 @@ impl TypeChecker {
                     self.errors
                         .push(TypeCheckError::InvalidDereference(inner_type, pos));
                 }
+                // `u0*` is opaque: its pointee is a void value, so it cannot be
+                // dereferenced (or subscripted) without a cast to a sized
+                // pointer first. `u0**` and arrays of `u0*` deref fine — their
+                // pointee is itself a pointer.
+                if inner_type.base == TypeBase::Void
+                    && inner_type.pointer_depth == 1
+                    && !inner_type.is_array()
+                {
+                    self.errors.push(TypeCheckError::OpaqueDereference(pos));
+                }
                 default_type
             }
 
@@ -449,10 +485,10 @@ impl TypeChecker {
                 *target_type
             }
 
-            ExprKind::Alloc {
-                alloc_type: _,
-                count,
-            } => {
+            ExprKind::Alloc { alloc_type, count } => {
+                if Self::is_void_value(alloc_type) {
+                    self.errors.push(TypeCheckError::InvalidVoidValue(pos));
+                }
                 let count_pos = count.pos;
                 let count_type = self.synth_expression(count);
                 if !matches!(count_type.base, TypeBase::SInt | TypeBase::UInt)
@@ -469,7 +505,9 @@ impl TypeChecker {
 
             ExprKind::UnaryNot(inner) => {
                 let inner_type = self.synth_expression(inner);
-                if inner_type.base == TypeBase::Void {
+                // `!p` is a null test and works for any pointer, `u0*`
+                // included; only void *values* are rejected.
+                if inner_type.base == TypeBase::Void && inner_type.pointer_depth == 0 {
                     self.errors.push(TypeCheckError::InvalidUnaryOperation {
                         operator: "!".to_string(),
                         operand: inner_type,
@@ -484,6 +522,8 @@ impl TypeChecker {
 
             ExprKind::BitwiseNot(inner) => {
                 let inner_type = self.synth_expression(inner);
+                // Bit-twiddling an opaque pointer deserves an explicit cast,
+                // so `u0*` stays rejected here (unlike `!` above).
                 if inner_type.base == TypeBase::Void {
                     self.errors.push(TypeCheckError::InvalidUnaryOperation {
                         operator: "~".to_string(),
@@ -815,7 +855,12 @@ impl TypeChecker {
             // (C-style `const T* p = &t`), so the inner itself need not carry
             // the pointee's const-ness.
             ExprKind::Reference(inner) => {
-                if target.pointer_depth > 0 {
+                // Against an opaque `u0*` target the pointee is `u0` — no
+                // value has that type, so nothing useful can be pushed
+                // inward; synthesise instead (any `&lvalue` coerces to u0*).
+                let opaque_target =
+                    target.base == TypeBase::Void && target.pointer_depth == 1;
+                if target.pointer_depth > 0 && !opaque_target {
                     let mut inner_target = *target;
                     inner_target.pointer_depth -= 1;
                     inner_target.is_const = false;
@@ -913,10 +958,17 @@ impl TypeChecker {
             && right.pointer_depth == 0
             && !right.is_array();
 
+        // A `u0*` has an unsized pointee: no arithmetic (GEP cannot scale by
+        // sizeof(u0)). Cast to `u8*` for byte offsets. Depth >= 2 and arrays
+        // of `u0*` are fine — their element is a (sized) pointer.
+        let left_opaque = left.base == TypeBase::Void && left.pointer_depth == 1 && !left.is_array();
+        let right_opaque =
+            right.base == TypeBase::Void && right.pointer_depth == 1 && !right.is_array();
+
         if matches!(op, BinaryOp::Add | BinaryOp::Sub)
             && ((left_is_ptr && right_is_int) || (left_is_int && right_is_ptr))
         {
-            return true;
+            return !(left_opaque || right_opaque);
         }
 
         // Both same family — either side can widen to the other
