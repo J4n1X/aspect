@@ -1,10 +1,13 @@
 # TJLB Compiler
 
-A compiler for the TJLB programming language, written in Rust. TJLB is a statically-typed, systems programming language that compiles to LLVM IR.
+**A while ago, I thought "Rust is too sophisticated, C is too simple, and I am bored. Why not try to make something that takes many aspects I like and create my own language?" Anyway, that was a massive mistake, and now we're here, trying to deliver on that premise.**
+
+A compiler for the TJLB programming language, written in Rust. TJLB is a statically-typed systems programming language that compiles to LLVM IR.
 
 ## Features
 
 - **Statically typed** with explicit type annotations
+- **Types - The poor man's classes** which can have functions but are not capable of polymorphism by design.
 - **Low-level control** with pointers and manual memory management
 - **LLVM backend** for optimized machine code generation
 - **C interoperability** through extern function declarations
@@ -12,10 +15,10 @@ A compiler for the TJLB programming language, written in Rust. TJLB is a statica
 
 ## Requirements
 
-- Rust (2021 edition)
+- Rust (2024 edition)
 - LLVM 19.1
 - For compiling to native executables:
-  - `llc` (LLVM static compiler)
+  - `llc` (LLVM static compiler, if you want to compile from llvm IR output)
   - `gcc` or another C compiler/linker
 
 ## Building
@@ -70,6 +73,8 @@ Options:
 - `-p, --print` - Print IR to stdout even when writing to a file
 - `-O, --optimize <LEVEL>` - Optimization level (0-3, default: 0)
 - `--verify-each` - Verify IR after each optimization pass (slower, useful for debugging)
+- `-I, --include-dir` - Include a directory for module search
+- `-D, --define` - Define a preprocessor value
 
 Examples:
 ```bash
@@ -103,6 +108,8 @@ tjlb-parser interpret <FILE> [-O LEVEL] [-- ARGS...]
 
 Options:
 - `-O, --optimize <LEVEL>` - Optimization level (0-3, default: 0)
+- `-I, --include-dir` - Include a directory for module search
+- `-D, --define` - Define a preprocessor value
 - Trailing positional arguments are forwarded to the program as `argv[1..]`
   (the source path is used as `argv[0]`). Use `--` to separate them from this
   CLI's own flags.
@@ -124,21 +131,11 @@ tjlb-parser interpret program.tjlb -O 2 -- arg1 arg2
 
 ## Compiling to Native Executable
 
-To compile a TJLB program to a native executable, you can use the provided script or run the commands manually:
-
-### Using the Script
-
-```bash
-./compile-file.sh program.tjlb
-```
-
-This will produce `program.out`.
-
-### Manual Compilation
+To compile a TJLB program to a native executable, proceed as follows:
 
 ```bash
 # Emit object code directly
-tjlb-parser compile program.tjlb --emit obj -o program.o
+tjlb-parser compile program.tjlb -e obj -o program.o
 
 # Link to executable
 gcc -o program program.o
@@ -149,11 +146,11 @@ gcc -o program program.o
 Here's a simple "Hello World" style program:
 
 ```tjlb
-extern fn puts(u8 *str) -> u0
+$import std/io
 
 fn main(u32 argc, u8 **argv) -> i32 {
     const u8 *message = "Hello, TJLB!"
-    puts(message)
+    println(message)
     return 0
 }
 ```
@@ -166,7 +163,7 @@ cargo test
 
 ## Documentation
 
-For language syntax and features as well as the function and makeup of the compiler, see the doc directory.
+For language syntax and features as well as the function and makeup of the compiler, see the doc directory. (DISCLAIMER: The documentation is almost entirely AI generated and may contain errors, as most AI things do.)
 
 ## License
 

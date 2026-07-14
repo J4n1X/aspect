@@ -8,6 +8,7 @@
 | Noalias handling              | This could also improve optimizations, by reducing the amount of moves and memory.          | LOW      |
 | Consolidate codegen variables | Unify disparate struct fields in the code generator to reduce code smell and improve maintainability. | LOW      |
 | Implement Bash Completion     | This can be done for free with clap-complete. File stored to ~/.bash_completion.d/          | LOW      |
+| Methods as fn-pointer values  | Possible addition: let a type function be taken as a function-pointer value, not just free functions. Today `&func` / bare `func` only names a free function (`FunctionRef` resolves via the module function table), so `demos/vm.tjlb` must make its opcode handlers free functions with `public` fields to fill the `(fn(VM*))[10]` dispatch table. Cheapest design mirrors Rust/C static members: an instance method `fn(this, ...)` is already a function with an explicit receiver param, so `Type.method` could coerce to `fn(T*, ...) -> R` and drop straight into a table — receiver still passed at the call site. *Bound* callables that carry the instance (closures/delegates, à la C++ `std::function`/`std::bind`) are a bigger, separate feature (capture + heap/type-erasure); start with the zero-overhead unbound form. | LOW |
 
 
 ## Done
