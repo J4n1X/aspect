@@ -1,0 +1,11 @@
+# expected: "every path"
+# A value block whose paths can fall off the end without returning is
+# rejected: the `if` has no else, so the fall-through path yields nothing.
+fn main(u32 argc, u8** argv) -> i32 {
+    i32 x = {
+        if argc > 1 {
+            return 1
+        }
+    }
+    return x
+}

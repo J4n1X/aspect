@@ -534,6 +534,20 @@ pub(crate) fn walk_expression<'ctx>(
             .ptr_type(inkwell::AddressSpace::default())
             .const_null()
             .into()),
+
+        // ── Value-block `{ ...; return v }` — runtime only: it executes
+        // statements, so it can never fold to a compile-time constant
+        // (the Constant-mode Err makes `try_fold` fall back to the
+        // runtime path for initializers).
+        ExprKind::ValueBlock(stmts) => match mode {
+            EmitMode::Runtime => {
+                cg.generate_value_block(stmts, expr.expr_type, expr.pos)
+            }
+            EmitMode::Constant => Err(CodegenError::InvalidOperation(
+                "value block is not a compile-time constant".to_string(),
+                expr.pos,
+            )),
+        },
     }
 }
 

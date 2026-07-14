@@ -109,6 +109,16 @@ pub enum ExprKind {
     /// `u8*` placeholder so the same coercion rules used for any other
     /// pointer-to-pointer comparison apply.
     Null,
+    /// A value-block: `{ stmt* }` in *expression* position. Its value is
+    /// produced by `return <expr>` statements inside, which bind to the
+    /// innermost value-block rather than the enclosing function (so a
+    /// wrapping block captures every exit path of the code it encases).
+    /// The type checker verifies that every control path returns a value
+    /// and stamps the block's type; `break`/`continue` pass through to
+    /// enclosing loops. Distinguished from a `ListInitializer` at parse
+    /// time: a brace expression that parses as a comma-separated list *is*
+    /// a list; anything else is re-parsed as statements.
+    ValueBlock(Vec<Statement>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

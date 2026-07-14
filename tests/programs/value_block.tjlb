@@ -1,0 +1,55 @@
+# expected: 42
+#-
+  Value blocks: `{ ... return v }` in expression position. A `return`
+  inside binds to the innermost value-block, not the enclosing function;
+  the type checker enforces that every control path returns a value.
+  Exercised here: checked-position blocks (initializers, call arguments),
+  the if/else all-paths form, nested blocks (each return binds to its own
+  block), and loops inside a block (`continue` passes through to the loop,
+  and the guaranteed `return` after the loop satisfies the all-paths rule).
+-#
+
+fn add(i32 a, i32 b) -> i32 {
+    return a + b
+}
+
+fn pick(i32 flag) -> i32 {
+    # if/else covers every path
+    i32 base = {
+        if flag > 0 {
+            return 30
+        } else {
+            return 7
+        }
+    }
+
+    # straight-line block with locals; nested block binds independently
+    i32 bumped = {
+        i32 doubled = {
+            return base * 2
+        }
+        return doubled - base + 12       # 60 - 30 + 12 = 42 (flag > 0)
+    }
+    return bumped
+}
+
+fn loop_sum() -> i32 {
+    # loop inside a block: `continue` targets the for, not the block;
+    # the return after the loop satisfies the all-paths rule.
+    i32 sum = {
+        i32 acc = 0
+        for (i32 i = 1; i <= 4; i += 1) {
+            if i == 3 {
+                continue
+            }
+            acc += i
+        }
+        return acc                       # 1 + 2 + 4 = 7
+    }
+    return sum
+}
+
+fn main(u32 argc, u8** argv) -> i32 {
+    # value-block as a call argument: (42 - 7) + 7 = 42
+    return add({ return pick(1) - loop_sum() }, loop_sum())
+}

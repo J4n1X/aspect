@@ -238,6 +238,29 @@ impl<'ctx> CodeGenerator<'ctx> {
         &mut self,
         expr: Option<&Expression>,
     ) -> Result<(), CodegenError> {
+        // A `return` inside a value-block yields the innermost block, not the
+        // function: store into the block's result slot and branch to its exit
+        // block. Checked before the sret path — a value-block inside a
+        // struct-returning function must still yield the block.
+        if let Some((slot, exit_bb, result_type)) = self.value_block_stack.last().copied() {
+            let expr = expr.ok_or_else(|| {
+                CodegenError::InvalidOperation(
+                    "value block `return` must carry a value".to_string(),
+                    crate::lexer::Position::new(0, 0),
+                )
+            })?;
+            let value = self.generate_coerced_value(expr, Some(&result_type))?;
+            self.builder.build_store(slot, value)?;
+            self.builder.build_unconditional_branch(exit_bb)?;
+            // Park subsequent (unreachable) statements in a dead block, the
+            // same trick `break`/`continue` use.
+            let dead_bb = self
+                .context
+                .append_basic_block(self.current_function.unwrap(), "vblock.dead");
+            self.builder.position_at_end(dead_bb);
+            return Ok(());
+        }
+
         // Struct-by-value return: store through the hidden sret out-pointer and
         // return void.
         if let Some(sret_ptr) = self.current_sret {
@@ -271,6 +294,68 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         self.exit_scope();
         Ok(())
+    }
+
+    /// Generate a value-block expression: `{ ...; return v }` used as a value.
+    ///
+    /// The statements run in a fresh scope. Every `return` inside — routed
+    /// here by `generate_return` via `value_block_stack` — stores into the
+    /// result slot and branches to the exit block. The type checker
+    /// guarantees every path returns, so the fall-through tail is
+    /// unreachable and is terminated as such.
+    pub(crate) fn generate_value_block(
+        &mut self,
+        statements: &[Statement],
+        result_type: LangType,
+        pos: crate::lexer::Position,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let function = self
+            .current_function
+            .ok_or(CodegenError::UnexpectedStatement(pos))?;
+        let llvm_type = self.lang_type_to_llvm(&result_type)?;
+
+        // Result slot in the entry block (mem2reg-friendly), mirroring
+        // `generate_var_decl`'s alloca placement.
+        let entry_block = function
+            .get_first_basic_block()
+            .ok_or(CodegenError::UnexpectedStatement(pos))?;
+        let current_block = self.builder.get_insert_block().unwrap();
+        if let Some(first_instr) = entry_block.get_first_instruction() {
+            self.builder.position_before(&first_instr);
+        } else {
+            self.builder.position_at_end(entry_block);
+        }
+        let slot = self.builder.build_alloca(llvm_type, "vblock.slot")?;
+        self.builder.position_at_end(current_block);
+
+        let exit_bb = self.context.append_basic_block(function, "vblock.exit");
+
+        self.value_block_stack.push((slot, exit_bb, result_type));
+        self.enter_scope();
+        for stmt in statements {
+            if let Err(e) = self.generate_statement(stmt) {
+                self.exit_scope();
+                self.value_block_stack.pop();
+                return Err(e);
+            }
+        }
+        self.exit_scope();
+        self.value_block_stack.pop();
+
+        // The checker's all-paths rule makes the tail unreachable; if the
+        // current block still lacks a terminator, say so explicitly.
+        if self
+            .builder
+            .get_insert_block()
+            .unwrap()
+            .get_terminator()
+            .is_none()
+        {
+            self.builder.build_unreachable()?;
+        }
+
+        self.builder.position_at_end(exit_bb);
+        Ok(self.builder.build_load(llvm_type, slot, "vblock.val")?)
     }
 
     /// Generate an if statement

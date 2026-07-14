@@ -1,0 +1,12 @@
+# expected: "every path"
+# Loops never satisfy the value-block all-paths rule, conservatively —
+# even `while true`: a `break` could skip the return, and the checker
+# does not prove loop termination behaviour.
+fn main(u32 argc, u8** argv) -> i32 {
+    i32 x = {
+        while true {
+            return 1
+        }
+    }
+    return x
+}

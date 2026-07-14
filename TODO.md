@@ -6,6 +6,7 @@
 | Struct by-value ABI           | SysV/Win64 aggregate classification so structs can cross the `extern`/C boundary by value (small-struct-in-registers, sret>16 on SysV; ≤8B-in-register vs by-ref on Win64). Until then `extern` by-value struct params/returns are rejected. | LOW |
 | Direct syscalls (no libc)     | Skip libc altogether and emit `syscall`/`int 0x80` directly so `interpret` / linked binaries run with no `-lc` dependency. Linux: well-documented numbers + register conventions per arch (x86-64 / aarch64 / riscv64), each `extern fn read/write/openat/close/exit_group/...` becomes a tiny inline-asm body. Windows: hard — syscall numbers are unstable across builds; would need to go via `ntdll!Nt*` thunks instead. Start Linux-only; gate Windows behind an explicit feature flag once syscall stubs land. | LOW |
 | Noalias handling              | This could also improve optimizations, by reducing the amount of moves and memory.          | LOW      |
+| Consolidate codegen variables | Unify disparate struct fields in the code generator to reduce code smell and improve maintainability. | LOW      |
 | Implement Bash Completion     | This can be done for free with clap-complete. File stored to ~/.bash_completion.d/          | LOW      |
 
 

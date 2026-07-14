@@ -25,9 +25,10 @@ method calls — over compiler-provided **special structs** (`TokenTree`, `Ast`,
   into it. Desugars to explicit `Ast.*` constructors. Must **gensym** the
   identifiers it introduces (`__t`, `__v`, …) so they can't capture spliced user
   code (hygiene).
-- **Value-blocks** — a `{ ... }` in *expression* position whose `return` yields the
-  block's value (not the function's). All paths must yield; `return` binds to the
-  nearest value-block. This is the primitive every wrapping transform stands on.
+- **Value-blocks** *(landed 2026-07-14 — see doc/09 §Value blocks)* — a `{ ... }`
+  in *expression* position whose `return` yields the block's value (not the
+  function's). All paths must yield; `return` binds to the nearest value-block.
+  This is the primitive every wrapping transform stands on.
 - **Statement-position attributes** — `@attr` legal before a statement, not just
   before items. Widens parent §3 (see caveats).
 
@@ -355,8 +356,9 @@ judgment hook polices the result (#3). Each sees exactly what its phase exposes.
 ## What it lowers to (valid today)
 
 Strip the hooks and this compiles against the current compiler — the ergonomic delta
-the hooks buy. The one piece not yet expressible as a single expression is the
-value-block, so the manual form spells it out as statements:
+the hooks buy. (Value-blocks are real now, so even the expansion's *output* is
+directly expressible by hand; the manual form below spells it out as plain
+statements only for clarity:)
 
 ```tjlb
 fn greet(u8* who) -> i32 {

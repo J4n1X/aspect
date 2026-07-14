@@ -183,5 +183,7 @@ This project uses or used AI for the following purposes:
 5. Some inline comments to improve readability 
 6. The DSL Procedural Macro System for the Parser
 7. Commit messages
+8. Most tests.
+9. Some of the demos. The reasoning for this is that if the AI understands how to write code in my language, a user should be able to as well.
 
 The reasoning for using it in these cases is rather simple: I am lazy, and I hate documenting stuff. 

@@ -573,11 +573,49 @@ primary-expr ::= integer-literal
                | ident
                | '(' expr ')'
                | sizeof-expr
+               | list-initializer
+               | value-block
 
 sizeof-expr ::= 'sizeof' '(' type ')'    # compile-time u64 byte size
 
+list-initializer ::= '{' (expr (',' expr)*)? '}'   # array literals
+value-block      ::= '{' stmt* '}'                 # block as an expression; see below
+
 arg-list ::= /* empty */ | expr (',' expr)*
 ```
+
+**Value blocks.** A `{ ... }` in *expression* position whose statements produce the
+expression's value via `return`:
+
+```tjlb
+i32 clamped = {
+    if x > 100 {
+        return 100
+    }
+    return x
+}
+```
+
+- A `return` inside a value block binds to the **innermost value block**, not the
+  enclosing function — so inside one, you cannot early-return from the function.
+  Nested value blocks each capture their own `return`s.
+- **Every control path must end in `return <expr>`** (the if/else form counts when
+  both arms return). Loops never satisfy the rule, conservatively — even
+  `while true { return 1 }` is rejected, since the checker does not prove loop
+  behaviour. A bare `return` (no value) inside a value block is an error.
+- `break` and `continue` pass through to the enclosing **loop**; value blocks are
+  transparent to them.
+- In a checked position (initializer, argument, function `return`) the block adopts
+  the target type and pushes it into every `return`; in a synthesis position
+  (condition, cast operand) the first `return` fixes the type and the rest must
+  coerce to it.
+- **Disambiguation from list initializers**: a brace expression that parses as a
+  comma-separated expression list *is* a list (`{1, 2, 3}`, `{x}`, `{}`); anything
+  else is re-parsed as a value block. The grammars cannot collide — a valid value
+  block must contain `return`, which can never appear in a list. A `{` in
+  *statement* position is always a plain block statement, never a value block.
+- Value blocks execute statements, so they are never compile-time constants:
+  global initializers cannot use them.
 
 **Notes:**
 

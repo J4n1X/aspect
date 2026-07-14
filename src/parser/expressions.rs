@@ -808,8 +808,9 @@ impl Parser {
                 self.expect(&TokenKind::CloseParen, ")")?;
                 Ok(expr)
             }
-            // List initializer (array literals; in the future, struct initializers)
-            TokenKind::OpenBrace => self.parse_init_list(),
+            // A brace expression: list initializer (`{1, 2, 3}`) or
+            // value-block (`{ ...; return v }`) — see `parse_brace_expression`.
+            TokenKind::OpenBrace => self.parse_brace_expression(),
 
             _ => Err(ParserError::ExpectedExpression(pos)),
         }
@@ -1960,6 +1961,70 @@ impl Parser {
 
         Ok(Expression::new(
             ExprKind::ListInitializer(elements),
+            LangType::VOID,
+            pos,
+        ))
+    }
+
+    /// Disambiguate a bare `{` in expression position.
+    ///
+    /// A brace expression that parses as a comma-separated expression list
+    /// *is* a list initializer (`{1, 2, 3}`, `{x}`, `{}`). Anything else —
+    /// statement terminators, declarations, `return` — fails the list parse
+    /// and is re-parsed as a **value-block** (`{ ...; return v }`). The two
+    /// grammars cannot both accept one input: a valid value-block must
+    /// contain a `return`, which can never appear in a valid list.
+    ///
+    /// Speculation is safe here for the same reason as `parse_cast_or_alloc`:
+    /// expression parsing has no side effects beyond interned string
+    /// literals, which are rolled back by truncation.
+    fn parse_brace_expression(&mut self) -> Result<Expression, ParserError> {
+        let saved = self.current;
+        let saved_strlits = self.string_literals.len();
+        match self.parse_init_list() {
+            Ok(list) => Ok(list),
+            Err(list_err) => {
+                let list_at = self.current;
+                self.current = saved;
+                self.string_literals.truncate(saved_strlits);
+                self.parse_value_block().map_err(|block_err| {
+                    // Two failed readings: report the one that got further —
+                    // it is almost always the one the user meant.
+                    if list_at > self.current {
+                        self.current = list_at;
+                        list_err
+                    } else {
+                        block_err
+                    }
+                })
+            }
+        }
+    }
+
+    /// Parse a value-block: `{ stmt* }` as an expression. The opening brace
+    /// has not yet been consumed. Statements are parsed with the regular
+    /// statement grammar in a fresh variable scope; errors propagate (no
+    /// `sync!` recovery — inside an expression there is no safe resync
+    /// point). The expression type is a `void` placeholder; the type
+    /// checker resolves it from the block's `return` statements.
+    #[parse_rule]
+    fn parse_value_block(&mut self) -> Result<Expression, ParserError> {
+        let pos = pos!();
+        token!(OpenBrace);
+        let statements = scoped!({
+            let mut stmts = Vec::new();
+            loop {
+                skip_nl!();
+                if self.check(&TokenKind::CloseBrace) || self.is_at_end() {
+                    break;
+                }
+                stmts.push(self.parse_statement()?);
+            }
+            stmts
+        });
+        token!(CloseBrace);
+        Ok(Expression::new(
+            ExprKind::ValueBlock(statements),
             LangType::VOID,
             pos,
         ))

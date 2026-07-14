@@ -214,8 +214,8 @@ Phased, checkbox form. Each phase is independently useful; earlier phases de-ris
 
 ### Phase 0 — Prerequisites (language + infra)
 
-- [ ] **Module system** — finish Preprocessor-Infrastructure (`$module`/`$import`, `-I`). Two-pass prototype registration already landed. (M)
-- [ ] **Value-blocks** — `ExprKind::Block` variant; parser disambiguation vs list-init in `parse_primary` (`src/parser/expressions.rs`); checker: join of `return` types + all-paths-return (void exception); codegen: result slot + block-exit label. (M)
+- [x] **Module system** — finish Preprocessor-Infrastructure (`$module`/`$import`, `-I`). Two-pass prototype registration already landed. (M)
+- [x] **Value-blocks** — *landed 2026-07-14.* `ExprKind::ValueBlock`; parser disambiguates vs list-init by speculative list parse with rollback (`parse_brace_expression`); checker: target-directed / first-return-synthesized typing + conservative all-paths-return (loops never count; bare `return` rejected — no void exception, a value block always yields a value); codegen: entry-block result slot + `vblock.exit`, `return` rerouted via `value_block_stack`. Spec: doc/09 §Value blocks. Regression: `tests/programs/value_block.tjlb`.
 - [ ] **Attributes** — `@` lexer token (`src/lexer/scanner.rs`, `tokens.rs`); `Attribute { name, args }`; `attrs` on `Stmt`/items; consume `@ident(args?)` before statement dispatch (`src/parser/statements.rs`); outside-in stacking. (M)
 - [ ] **Metaprogramming std (`std/meta`)** — opaque-handle special structs + `extern` builtins (`Ast`/`Expr`/`Stmt`/`Fn`/`TokenTree`/`Program`/`Judgments` + `*List` with `.count()/.at()`); compiler-side arena + handle registry. (L)
 - [ ] **`quote` / `$(…)`** — parse contract, desugar to `Ast.*` builders, **hygienic gensym**. (L)

@@ -123,6 +123,12 @@ pub enum TypeCheckError {
         position: Position,
     },
 
+    #[error("Value block does not produce a value on every path — each control path must end in `return <expr>` at {0}")]
+    ValueBlockMissingReturn(Position),
+
+    #[error("A `return` inside a value block must carry a value at {0}")]
+    ValueBlockVoidReturn(Position),
+
     #[error("'u0' is not a value type — it only exists behind a pointer (u0*); use a sized type instead at {0}")]
     InvalidVoidValue(Position),
 
@@ -156,6 +162,8 @@ impl TypeCheckError {
             | Self::InvalidReference(pos)
             | Self::InvalidConditionType(_, pos)
             | Self::InvalidVoidValue(pos)
+            | Self::ValueBlockMissingReturn(pos)
+            | Self::ValueBlockVoidReturn(pos)
             | Self::OpaqueDereference(pos) => Some(*pos),
             Self::MissingReturn(_) => None,
         }

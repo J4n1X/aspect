@@ -37,6 +37,11 @@ pub struct TypeChecker {
     /// File registry inherited from the parsed `Program` so error messages
     /// can name the file the error actually came from.
     source_files: Vec<std::path::PathBuf>,
+    /// Stack of enclosing value-block result types, innermost last. A
+    /// `return` statement binds to the top entry instead of the function.
+    /// `Some(t)` once the type is known (checked position, or the first
+    /// `return` in synthesis position); `None` while still undetermined.
+    value_block_types: Vec<Option<LangType>>,
     errors: Vec<TypeCheckError>,
 }
 
@@ -49,6 +54,7 @@ impl TypeChecker {
             globals: HashMap::new(),
             current_function: None,
             source_files: Vec::new(),
+            value_block_types: Vec::new(),
             errors: Vec::new(),
         }
     }
@@ -249,7 +255,24 @@ impl TypeChecker {
             }
 
             StatementKind::Return(opt_expr) => {
-                if let Some(func_name) = self.current_function.clone()
+                // Inside a value-block, `return` yields the innermost block,
+                // not the function. In a checked position the block's type is
+                // known up front; in synthesis position the first `return`
+                // fixes it and later ones are checked against it.
+                if let Some(slot) = self.value_block_types.last().copied() {
+                    match opt_expr {
+                        Some(expr) => match slot {
+                            Some(t) => self.check_expression(expr, &t),
+                            None => {
+                                let t = self.synth_expression(expr);
+                                *self.value_block_types.last_mut().unwrap() = Some(t);
+                            }
+                        },
+                        None => self
+                            .errors
+                            .push(TypeCheckError::ValueBlockVoidReturn(stmt_pos)),
+                    }
+                } else if let Some(func_name) = self.current_function.clone()
                     && let Some(sig) = self.symbols.lookup_function(&func_name).cloned()
                 {
                     match opt_expr {
@@ -346,6 +369,63 @@ impl TypeChecker {
         if cond_type.is_void_value() {
             self.errors
                 .push(TypeCheckError::InvalidConditionType(cond_type, cond.pos));
+        }
+    }
+
+    // ── Value blocks ─────────────────────────────────────────────────────────
+
+    /// Check a value-block's statements and resolve the block's type.
+    ///
+    /// `target` is `Some` in checked positions (the block must yield that
+    /// type) and `None` in synthesis positions (the first `return` fixes the
+    /// type; see the `Return` arm of `check_statement`). Also enforces the
+    /// all-paths rule: every control path through the block must end in a
+    /// `return`, conservatively (loops never count, even `while true`).
+    fn check_value_block(
+        &mut self,
+        stmts: &mut [Statement],
+        target: Option<LangType>,
+        pos: crate::lexer::Position,
+    ) -> LangType {
+        self.value_block_types.push(target);
+        self.enter_scope();
+        for s in stmts.iter_mut() {
+            self.check_statement(s);
+        }
+        self.exit_scope();
+        let resolved = self.value_block_types.pop().flatten();
+
+        if !Self::always_returns(stmts) {
+            self.errors
+                .push(TypeCheckError::ValueBlockMissingReturn(pos));
+        }
+        // `None` means the block contains no value-carrying `return` at all;
+        // the all-paths error above has already fired (zero returns cannot
+        // cover every path), so `void` is only a placeholder.
+        resolved.unwrap_or(LangType::VOID)
+    }
+
+    /// Conservative "every path returns" analysis for value-blocks: a
+    /// statement list returns iff any statement in it definitely returns
+    /// (everything after that one is unreachable). Loops never count —
+    /// `break` could skip their returns — and neither do `break`/`continue`
+    /// themselves. Returns inside *nested* value-blocks live under an
+    /// expression, which this walk deliberately does not descend into, so
+    /// they never satisfy the outer block.
+    fn always_returns(stmts: &[Statement]) -> bool {
+        stmts.iter().any(Self::stmt_always_returns)
+    }
+
+    fn stmt_always_returns(stmt: &Statement) -> bool {
+        match &stmt.kind {
+            StatementKind::Return(_) => true,
+            StatementKind::Block(inner) => Self::always_returns(inner),
+            StatementKind::If {
+                then_block,
+                else_block: Some(else_stmts),
+                ..
+            } => Self::always_returns(then_block) && Self::always_returns(else_stmts),
+            _ => false,
         }
     }
 
@@ -640,6 +720,15 @@ impl TypeChecker {
             // a context that doesn't constrain its type (e.g. `null == p`).
             // Pointer-to-pointer coercion handles the rest at the boundary.
             ExprKind::Null => default_type,
+
+            // Value-block with no contextual target: the first `return`
+            // inside synthesizes the block's type, later ones check against
+            // it (see the `Return` arm of `check_statement`).
+            ExprKind::ValueBlock(stmts) => {
+                let ty = self.check_value_block(stmts, None, pos);
+                expr.expr_type = ty;
+                ty
+            }
         }
     }
 
@@ -882,6 +971,13 @@ impl TypeChecker {
             ExprKind::Dereference(_) => {
                 let found = self.synth_expression(expr);
                 self.assert_coercible(found, target, pos);
+            }
+
+            // Value-block in a checked position: the target is pushed into
+            // every `return` inside the block, and the block adopts it.
+            ExprKind::ValueBlock(stmts) => {
+                self.check_value_block(stmts, Some(*target), pos);
+                expr.expr_type = *target;
             }
 
             // List initialiser: decay the target to its element type and check
@@ -1225,6 +1321,87 @@ mod tests {
                 .any(|e| matches!(e, TypeCheckError::MissingStructFields { .. })),
             "got {errs:?}"
         );
+    }
+
+    // 18. Value-block in a checked position adopts the target type; its
+    //     `return` binds to the block, NOT the enclosing function (1000
+    //     fits the block's i32 but not the function's u8 return).
+    #[test]
+    fn value_block_return_binds_to_block() {
+        let src = "fn f() -> u8 {\n    i32 x = { return 1000 }\n    return 0\n}\n";
+        let (program, res) = check(src);
+        assert!(res.is_ok(), "expected ok, got {res:?}");
+        assert_ty(nth_var_init(&program, "f", 0).expr_type, TypeBase::SInt, 32, 0);
+    }
+
+    // 19. Nested value-blocks: each `return` binds to its innermost block.
+    #[test]
+    fn value_block_nested() {
+        let src = "fn main() -> i32 {\n    i32 x = {\n    i32 y = { return 21 }\n    return y * 2\n}\n    return x\n}\n";
+        let (_p, res) = check(src);
+        assert!(res.is_ok(), "expected ok, got {res:?}");
+    }
+
+    // 20. Synthesis position (condition): the first `return` fixes the type.
+    #[test]
+    fn value_block_synth_position() {
+        let src = "fn main() -> i32 {\n    if { return true } {\n    return 1\n}\n    return 0\n}\n";
+        let (_p, res) = check(src);
+        assert!(res.is_ok(), "expected ok, got {res:?}");
+    }
+
+    // 21. A path that falls off the end without returning is rejected.
+    #[test]
+    fn value_block_missing_return_errors() {
+        let src = "fn main(u32 argc, u8** argv) -> i32 {\n    i32 x = {\n    if argc > 1 { return 1 }\n}\n    return x\n}\n";
+        let (_p, res) = check(src);
+        let errs = res.expect_err("expected all-paths error");
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, TypeCheckError::ValueBlockMissingReturn(_))),
+            "got {errs:?}"
+        );
+    }
+
+    // 22. Loops never satisfy the all-paths rule (conservative: `break`
+    //     could skip the return).
+    #[test]
+    fn value_block_loop_return_rejected() {
+        let src = "fn main() -> i32 {\n    i32 x = {\n    while true { return 1 }\n}\n    return x\n}\n";
+        let (_p, res) = check(src);
+        let errs = res.expect_err("expected all-paths error");
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, TypeCheckError::ValueBlockMissingReturn(_))),
+            "got {errs:?}"
+        );
+    }
+
+    // 23. A bare `return` inside a value-block is rejected. (`return;` —
+    //     a bare `return` directly before `}` is already a parse error.)
+    #[test]
+    fn value_block_bare_return_errors() {
+        let src = "fn main() -> i32 {\n    i32 x = { return; }\n    return x\n}\n";
+        let (_p, res) = check(src);
+        let errs = res.expect_err("expected void-return error");
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, TypeCheckError::ValueBlockVoidReturn(_))),
+            "got {errs:?}"
+        );
+    }
+
+    // 24. Brace disambiguation regression: `{1, 2, 3}` stays a list
+    //     initializer (test 11 covers the positive case; this pins the
+    //     single-element form, which is a 1-element list, not a block).
+    #[test]
+    fn single_element_brace_stays_list() {
+        let (program, res) = check("fn main() -> i32 {\n    u8[1] arr = {5}\n    return 0\n}\n");
+        assert!(res.is_ok(), "expected ok, got {res:?}");
+        assert!(matches!(
+            nth_var_init(&program, "main", 0).kind,
+            ExprKind::ListInitializer(_)
+        ));
     }
 
     // 16. A private method (no `public`) is not callable from outside the type.

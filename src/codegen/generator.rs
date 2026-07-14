@@ -62,6 +62,16 @@ pub struct CodeGenerator<'ctx> {
 
     // Loop stack for break/continue support; each entry is (break_bb, continue_bb)
     pub(crate) loop_stack: Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>,
+
+    /// While generating a value-block expression, the innermost block's
+    /// (result slot, exit block, result type), innermost last. A `return`
+    /// inside a value-block stores into the slot and branches to the exit
+    /// block instead of returning from the function (see `generate_return`).
+    pub(crate) value_block_stack: Vec<(
+        inkwell::values::PointerValue<'ctx>,
+        BasicBlock<'ctx>,
+        LangType,
+    )>,
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -114,6 +124,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             current_function: None,
             current_function_return_type: None,
             loop_stack: Vec::new(),
+            value_block_stack: Vec::new(),
         }
     }
 
