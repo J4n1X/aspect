@@ -23,5 +23,11 @@
   "indentationRules": {
     "increaseIndentPattern": "\\{[^}]*$",
     "decreaseIndentPattern": "^\\s*\\}"
+  },
+  "folding": {
+    "markers": {
+      "start": "^\\s*\\$(?:if|ifdef|ifndef)\\b",
+      "end": "^\\s*\\$endif\\b"
+    }
   }
 }

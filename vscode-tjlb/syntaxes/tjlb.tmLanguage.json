@@ -6,13 +6,25 @@
   "patterns": [
     { "include": "#block-comment" },
     { "include": "#line-comment" },
+    { "include": "#preproc-module" },
+    { "include": "#preproc-define" },
+    { "include": "#preproc-conditional" },
+    { "include": "#preproc-illegal" },
     { "include": "#string" },
     { "include": "#number" },
+    { "include": "#type-declaration" },
+    { "include": "#alias-declaration" },
     { "include": "#fn-declaration" },
-    { "include": "#type-token" },
     { "include": "#keyword-control" },
     { "include": "#keyword-declaration" },
+    { "include": "#sizeof" },
+    { "include": "#constant-language" },
+    { "include": "#this" },
+    { "include": "#type-token" },
+    { "include": "#storage-modifier" },
     { "include": "#keyword-cast" },
+    { "include": "#caps-constant" },
+    { "include": "#pascal-type" },
     { "include": "#operator" },
     { "include": "#function-call" },
     { "include": "#punctuation" },
@@ -37,6 +49,69 @@
         "1": { "name": "punctuation.definition.comment.tjlb" }
       }
     },
+    "preproc-module": {
+      "name": "meta.preprocessor.module.tjlb",
+      "begin": "^\\s*(\\$)(module|import)\\b\\s*([A-Za-z_][A-Za-z0-9_]*(?:/[A-Za-z_][A-Za-z0-9_]*)*)?",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.directive.tjlb" },
+        "2": { "name": "keyword.control.directive.import.tjlb" },
+        "3": { "name": "entity.name.namespace.tjlb" }
+      },
+      "end": "$",
+      "patterns": [
+        { "include": "#line-comment" },
+        { "include": "#block-comment" }
+      ]
+    },
+    "preproc-define": {
+      "name": "meta.preprocessor.define.tjlb",
+      "begin": "^\\s*(\\$)(define|undefine)\\b\\s*([A-Za-z_][A-Za-z0-9_]*)?",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.directive.tjlb" },
+        "2": { "name": "keyword.control.directive.define.tjlb" },
+        "3": { "name": "entity.name.function.preprocessor.tjlb" }
+      },
+      "end": "$",
+      "patterns": [
+        { "include": "#line-comment" },
+        { "include": "#block-comment" },
+        { "include": "#string" },
+        { "include": "#number" },
+        { "include": "#type-token" },
+        { "include": "#constant-language" },
+        { "include": "#caps-constant" },
+        { "include": "#pascal-type" },
+        { "include": "#operator" },
+        { "include": "#punctuation" },
+        { "include": "#identifier" }
+      ]
+    },
+    "preproc-conditional": {
+      "name": "meta.preprocessor.conditional.tjlb",
+      "begin": "^\\s*(\\$)(ifdef|ifndef|elseifdef|elseif|endif|else|if)\\b",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.directive.tjlb" },
+        "2": { "name": "keyword.control.directive.conditional.tjlb" }
+      },
+      "end": "$",
+      "patterns": [
+        { "include": "#line-comment" },
+        { "include": "#block-comment" },
+        {
+          "name": "keyword.operator.defined.tjlb",
+          "match": "\\bdefined\\b"
+        },
+        { "include": "#number" },
+        { "include": "#operator" },
+        { "include": "#caps-constant" },
+        { "include": "#punctuation" },
+        { "include": "#identifier" }
+      ]
+    },
+    "preproc-illegal": {
+      "name": "invalid.illegal.directive.tjlb",
+      "match": "\\$[A-Za-z_]?[A-Za-z0-9_]*"
+    },
     "string": {
       "name": "string.quoted.double.tjlb",
       "begin": "\"",
@@ -50,7 +125,11 @@
       "patterns": [
         {
           "name": "constant.character.escape.tjlb",
-          "match": "\\\\[nrt\\\\\"']"
+          "match": "\\\\[nrt\\\\\"]"
+        },
+        {
+          "name": "invalid.illegal.escape.tjlb",
+          "match": "\\\\."
         }
       ]
     },
@@ -74,19 +153,25 @@
         }
       ]
     },
+    "type-declaration": {
+      "match": "\\b(type)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.declaration.type.tjlb" },
+        "2": { "name": "entity.name.type.struct.tjlb" }
+      }
+    },
+    "alias-declaration": {
+      "match": "\\b(alias)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.declaration.type.tjlb" },
+        "2": { "name": "entity.name.type.alias.tjlb" }
+      }
+    },
     "fn-declaration": {
       "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
       "captures": {
         "1": { "name": "keyword.declaration.function.tjlb" },
         "2": { "name": "entity.name.function.tjlb" }
-      }
-    },
-    "type-token": {
-      "match": "\\b(const\\s+)?(i(?:8|16|32|64)|u(?:0|8|16|32|64)|f(?:32|64))(\\[\\d+\\])?(?![A-Za-z0-9_])",
-      "captures": {
-        "1": { "name": "storage.modifier.tjlb" },
-        "2": { "name": "storage.type.tjlb" },
-        "3": { "name": "storage.type.tjlb" }
       }
     },
     "keyword-control": {
@@ -95,11 +180,51 @@
     },
     "keyword-declaration": {
       "name": "keyword.other.tjlb",
-      "match": "\\b(fn|extern|type|struct)\\b"
+      "match": "\\b(fn|extern|type|struct|alias)\\b"
+    },
+    "sizeof": {
+      "name": "keyword.operator.sizeof.tjlb",
+      "match": "\\bsizeof\\b"
+    },
+    "constant-language": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.tjlb",
+          "match": "\\b(true|false)\\b"
+        },
+        {
+          "name": "constant.language.null.tjlb",
+          "match": "\\bnull\\b"
+        }
+      ]
+    },
+    "this": {
+      "name": "variable.language.this.tjlb",
+      "match": "\\bthis\\b"
+    },
+    "type-token": {
+      "match": "\\b(const\\s+)?(i(?:8|16|32|64)|u(?:0|8|16|32|64)|f(?:32|64)|bool)(\\[\\s*[A-Za-z0-9_]+\\s*\\])?(?![A-Za-z0-9_])",
+      "captures": {
+        "1": { "name": "storage.modifier.tjlb" },
+        "2": { "name": "storage.type.tjlb" },
+        "3": { "name": "storage.type.tjlb" }
+      }
+    },
+    "storage-modifier": {
+      "name": "storage.modifier.tjlb",
+      "match": "\\b(const|public)\\b"
     },
     "keyword-cast": {
       "name": "keyword.operator.cast.tjlb",
       "match": "\\bas\\b"
+    },
+    "caps-constant": {
+      "name": "constant.other.caps.tjlb",
+      "match": "\\b[A-Z][A-Z0-9_]+\\b(?![a-z])"
+    },
+    "pascal-type": {
+      "name": "entity.name.type.tjlb",
+      "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
     },
     "operator": {
       "name": "keyword.operator.tjlb",
@@ -122,7 +247,8 @@
         { "name": "punctuation.separator.comma.tjlb",    "match": "," },
         { "name": "punctuation.terminator.statement.tjlb", "match": ";" },
         { "name": "punctuation.accessor.tjlb",           "match": "\\." },
-        { "name": "punctuation.separator.colon.tjlb",    "match": ":" }
+        { "name": "punctuation.separator.colon.tjlb",    "match": ":" },
+        { "name": "punctuation.other.question.tjlb",     "match": "\\?" }
       ]
     },
     "identifier": {
