@@ -1,0 +1,7 @@
+# Search-order fixture: `shadow` also exists in tests/modules_alt/; the
+# first `-I` root in flag order must win.
+$module shadow
+
+fn shadow_value() -> i32 {
+    return 1
+}

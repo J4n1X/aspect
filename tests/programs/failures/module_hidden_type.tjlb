@@ -1,0 +1,11 @@
+# expected: "type-struct 'HiddenBox' is defined in module 'hidden'", "the root module does not import"
+# compile_args: "-I", "tests/modules"
+# A type-struct from a transitively-loaded module is invisible: the entry
+# imports `middle` only, so naming `hidden`'s type-struct is an error.
+
+$import middle
+
+fn main(u32 argc, u8** argv) -> i32 {
+    HiddenBox b = HiddenBox { stored = 1 }
+    return b.stored
+}

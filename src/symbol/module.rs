@@ -18,6 +18,22 @@ use crate::lexer::LangType;
 use crate::symbol::table::{FunctionSymbol, SymbolError};
 use std::collections::HashMap;
 
+/// Build the mangled free-function name a type-struct method lowers to:
+/// `Type$method`. The single authority for the mangling scheme — see also
+/// [`method_owner_prefix`] for the reverse test.
+#[must_use]
+pub fn mangle_method(type_name: &str, method_name: &str) -> String {
+    format!("{type_name}${method_name}")
+}
+
+/// The mangled-name prefix shared by every method of `type_name`
+/// (`"Type$"`). A function whose name starts with this prefix is a method of
+/// that type — the inverse of [`mangle_method`].
+#[must_use]
+pub fn method_owner_prefix(type_name: &str) -> String {
+    format!("{type_name}$")
+}
+
 /// Field visibility. The default for a type-struct field is [`Visibility::Private`];
 /// `public` opts a field into external access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +62,9 @@ pub struct MethodSig {
     pub is_static: bool,
     /// `true` for `const fn` (receiver lowered to `*const Struct`).
     pub is_const: bool,
+    /// Method visibility. Like fields, methods default to [`Visibility::Private`];
+    /// `public fn` opts a method into external access.
+    pub vis: Visibility,
 }
 
 /// A registered type-struct: its name, ordered fields, and methods.
@@ -53,6 +72,10 @@ pub struct MethodSig {
 pub struct StructInfo {
     pub id: u32,
     pub name: String,
+    /// `Position::file_id` of the file whose `type` keyword declared this
+    /// struct — the provenance the import-visibility check resolves to a
+    /// defining module.
+    pub file_id: u32,
     /// Fields in declaration/layout order. Empty until [`ModuleSymbols::set_fields`].
     pub fields: Vec<FieldInfo>,
     /// Field name -> index into `fields` (mirrors the LLVM struct element order).
@@ -69,6 +92,15 @@ pub struct FnPtrSig {
     pub return_type: LangType,
 }
 
+/// A defined type alias: the (eagerly resolved) target type plus the
+/// `Position::file_id` of the file whose `alias` directive declared it —
+/// the provenance the import-visibility check resolves to a defining module.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AliasInfo {
+    pub ty: LangType,
+    pub file_id: u32,
+}
+
 /// The program-wide table of resolved global symbols.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ModuleSymbols {
@@ -78,8 +110,8 @@ pub struct ModuleSymbols {
     structs_by_id: Vec<StructInfo>,
     /// Struct name -> id.
     structs_by_name: HashMap<String, u32>,
-    /// Alias name -> the type it resolves to.
-    aliases: HashMap<String, LangType>,
+    /// Alias name -> the type it resolves to plus its declaring file.
+    aliases: HashMap<String, AliasInfo>,
     /// Function-pointer signatures, interned by structural identity.
     /// Index into the vec == the FnPtr id stored in `TypeBase::FnPtr(u32)`.
     fnptr_sigs: Vec<FnPtrSig>,
@@ -135,11 +167,15 @@ impl ModuleSymbols {
     // ── Type-structs ────────────────────────────────────────────────────────────
 
     /// Reserve an id for a struct name, creating an empty (body-less) entry.
+    /// `file_id` records the declaring file (from the `type` keyword token)
+    /// for the import-visibility check.
     ///
     /// Called during the parser's name-collection prescan so that struct names
     /// resolve regardless of declaration order (including self/mutual reference).
-    /// Returns the existing id if the name was already interned.
-    pub fn intern_struct(&mut self, name: &str) -> u32 {
+    /// Returns the existing id if the name was already interned (the first
+    /// declaration's `file_id` wins; a second `type` body for the same name
+    /// is a duplicate-type error downstream).
+    pub fn intern_struct(&mut self, name: &str, file_id: u32) -> u32 {
         if let Some(&id) = self.structs_by_name.get(name) {
             return id;
         }
@@ -148,6 +184,7 @@ impl ModuleSymbols {
         self.structs_by_id.push(StructInfo {
             id,
             name: name.to_string(),
+            file_id,
             fields: Vec::new(),
             field_index: HashMap::new(),
             methods: HashMap::new(),
@@ -203,13 +240,21 @@ impl ModuleSymbols {
 
     // ── Aliases ───────────────────────────────────────────────────────────────
 
-    /// Define a type alias (`alias New Target`).
-    pub fn define_alias(&mut self, name: String, ty: LangType) {
-        self.aliases.insert(name, ty);
+    /// Define a type alias (`alias New Target`). `file_id` records the
+    /// declaring file (from the `alias` keyword token) for the
+    /// import-visibility check.
+    pub fn define_alias(&mut self, name: String, ty: LangType, file_id: u32) {
+        self.aliases.insert(name, AliasInfo { ty, file_id });
     }
 
     #[must_use]
     pub fn resolve_alias(&self, name: &str) -> Option<LangType> {
+        self.aliases.get(name).map(|info| info.ty)
+    }
+
+    /// Full alias entry — the resolved type plus its declaring file.
+    #[must_use]
+    pub fn alias_info(&self, name: &str) -> Option<AliasInfo> {
         self.aliases.get(name).copied()
     }
 

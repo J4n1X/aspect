@@ -1,0 +1,6 @@
+# Second file of the directory-form `strutil` module.
+$module strutil
+
+fn su_second() -> i32 {
+    return 20
+}

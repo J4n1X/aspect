@@ -1,0 +1,55 @@
+# expected: 42
+#-
+  Two-pass prototype registration: pass 1 registers every prototype and
+  skips bodies, pass 2 parses the bodies; struct names and aliases are
+  pre-installed by prescans. Definition order no longer matters: forward
+  calls, mutual recursion, methods calling later methods or later free
+  functions, bodies reading later globals, and signatures/fields using
+  later aliases (even chained out of order) all work.
+-#
+
+fn main(u32 argc, u8** argv) -> i32 {
+    Counter c = Counter { value = 4 }            # type defined below
+    return later(2) + parity(9) + c.twice() + shift
+}
+
+fn later(myint x) -> i32 {                       # alias defined at the bottom
+    return x * 10                                # 20
+}
+
+fn parity(i32 n) -> i32 {
+    if is_odd(n) == 1 {                          # mutual recursion below
+        return 2
+    }
+    return 0
+}
+
+fn is_odd(i32 n) -> i32 {
+    if n == 0 { return 0 }
+    return is_even(n - 1)                        # forward: is_even is below
+}
+
+fn is_even(i32 n) -> i32 {
+    if n == 0 { return 1 }
+    return is_odd(n - 1)
+}
+
+type Counter {
+    public myint value                           # field typed via later alias
+
+    public fn twice(this) -> i32 {
+        return this.bump() + this.bump()         # bump is declared below twice
+    }
+    fn bump(this) -> i32 {
+        return helper(this.value)                # free function below the type
+    }
+}
+
+fn helper(i32 x) -> i32 {
+    return x + 1                                 # bump = 5, twice = 10
+}
+
+i32 shift = 10                                   # global read by main above
+
+alias myint smallint                             # chain defined out of order:
+alias smallint i32                               # myint -> smallint -> i32

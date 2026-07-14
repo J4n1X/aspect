@@ -102,7 +102,7 @@ pub enum TokenKind {
     Dot,          // .
     Arrow,        // ->
     Question,     // ?
-    Dollar,       // $ — preprocessor directive sigil (e.g. `$include "foo.tjlb"`)
+    Dollar,       // $ — preprocessor directive sigil (e.g. `$import std/io`)
 
     // Arithmetic operators
     Plus,     // +
@@ -202,6 +202,89 @@ impl LangType {
         }
     }
 
+    // ── Named constructors ──────────────────────────────────────────────
+
+    const fn plain(base: TypeBase, size_bits: u32, pointer_depth: u32) -> Self {
+        Self {
+            base,
+            size_bits,
+            pointer_depth,
+            is_const: false,
+            array_size: None,
+        }
+    }
+
+    /// The void type (`u0`).
+    pub const VOID: Self = Self::plain(TypeBase::Void, 0, 0);
+    /// The default integer type (`i32`).
+    pub const I32: Self = Self::plain(TypeBase::SInt, 32, 0);
+    /// `i64` — integer literals too large for `i32` default to this.
+    pub const I64: Self = Self::plain(TypeBase::SInt, 64, 0);
+    /// `u64` — the type of `sizeof(T)`.
+    pub const U64: Self = Self::plain(TypeBase::UInt, 64, 0);
+    /// The default float type (`f64`).
+    pub const F64: Self = Self::plain(TypeBase::SFloat, 64, 0);
+    /// The TJLB boolean: an `i1` logical value stored as `i8`.
+    pub const BOOL: Self = Self::plain(TypeBase::Bool, 8, 0);
+    /// `u8*` — byte pointer; the type of string literals and the parser's
+    /// placeholder stamp for `null`.
+    pub const U8_PTR: Self = Self::plain(TypeBase::UInt, 8, 1);
+
+    /// A type-struct value type for the interned struct `id`.
+    #[must_use]
+    pub const fn struct_type(id: u32) -> Self {
+        Self::plain(TypeBase::Struct(id), 0, 0)
+    }
+
+    /// A function-pointer type for the interned signature `id`.
+    #[must_use]
+    pub const fn fnptr_type(id: u32) -> Self {
+        Self::plain(TypeBase::FnPtr(id), 0, 0)
+    }
+
+    // ── Shape predicates ────────────────────────────────────────────────
+
+    /// True for `u0` used as a *value* type (no pointer depth): illegal
+    /// everywhere except as a function return type. `u0*` (any depth) is not
+    /// a void value — but an array of `u0` values is.
+    #[must_use]
+    pub fn is_void_value(&self) -> bool {
+        self.base == TypeBase::Void && self.pointer_depth == 0
+    }
+
+    /// True for the opaque pointer `u0*` (exactly depth 1, not an array):
+    /// its pointee is unsized, so it cannot be dereferenced or offset
+    /// without a cast to a sized pointer. `u0**` and arrays of `u0*` are
+    /// not opaque — their element is itself a (sized) pointer.
+    #[must_use]
+    pub fn is_opaque_ptr(&self) -> bool {
+        self.base == TypeBase::Void && self.pointer_depth == 1 && !self.is_array()
+    }
+
+    /// True for a plain (non-pointer, non-array) integer value (`iN`/`uN`).
+    #[must_use]
+    pub fn is_plain_int(&self) -> bool {
+        matches!(self.base, TypeBase::SInt | TypeBase::UInt)
+            && self.pointer_depth == 0
+            && !self.is_array()
+    }
+
+    /// True for a plain (non-pointer, non-array) numeric value: integer or float.
+    #[must_use]
+    pub fn is_plain_numeric(&self) -> bool {
+        self.is_plain_int()
+            || (matches!(self.base, TypeBase::SFloat)
+                && self.pointer_depth == 0
+                && !self.is_array())
+    }
+
+    /// True when the value is pointer-shaped for arithmetic/comparison
+    /// purposes: any pointer depth, or an array (which decays to a pointer).
+    #[must_use]
+    pub fn is_pointer_like(&self) -> bool {
+        self.pointer_depth > 0 || self.is_array()
+    }
+
     #[must_use]
     pub fn langtype_from_str(s: &str) -> Option<Self> {
         if s.len() < 2 {
@@ -210,7 +293,7 @@ impl LangType {
 
         // `bool`: i1 logical value, stored as i8 (size_bits is the storage width).
         if s == "bool" {
-            return Some(LangType::new(TypeBase::Bool, 8, 0, false));
+            return Some(Self::BOOL);
         }
 
         let base = match s.chars().next()? {
@@ -225,7 +308,7 @@ impl LangType {
 
         // Special case for void (u0)
         if matches!(base, TypeBase::UInt) && size == 0 {
-            Some(LangType::new(TypeBase::Void, 0, 0, false))
+            Some(Self::VOID)
         } else if size.is_multiple_of(8) && size > 0 {
             Some(LangType::new(base, size, 0, false))
         } else {

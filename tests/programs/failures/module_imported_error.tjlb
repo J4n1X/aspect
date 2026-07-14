@@ -1,0 +1,12 @@
+# expected: "broken.tjlb", "this_var_does_not_exist"
+# compile_args: "-I", "tests/modules"
+# Regression: an error inside an imported module's file must name *that*
+# file in its diagnostic, not the importer. The expected-fragment check
+# requires `broken.tjlb` to appear in the formatted error — proving the
+# file_id on the offending token was preserved from the imported file
+# through to `format_error`'s file-registry lookup.
+$import broken
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return buggy(0)
+}

@@ -1,6 +1,5 @@
 use crate::lexer::{LangType, Position};
 
-/// Literal values in the AST
 #[derive(Debug, Clone, PartialEq)]
 pub enum LiteralValue {
     Integer(i64),
@@ -9,7 +8,6 @@ pub enum LiteralValue {
     Bool(bool),
 }
 
-/// Binary operators
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BinaryOp {
     // Arithmetic
@@ -35,7 +33,6 @@ pub enum BinaryOp {
 // (`src/parser/expressions.rs`); it is the single source of truth for binding
 // strength and includes comparison operators, which `BinaryOp` does not model.
 
-/// Comparison operators
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ComparisonOp {
     Greater,
@@ -46,7 +43,6 @@ pub enum ComparisonOp {
     NotEqual,
 }
 
-/// Expression variants
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind {
     Literal(LiteralValue),
@@ -115,7 +111,6 @@ pub enum ExprKind {
     Null,
 }
 
-/// Expression with type information
 #[derive(Debug, Clone, PartialEq)]
 pub struct Expression {
     pub kind: ExprKind,
@@ -134,7 +129,6 @@ impl Expression {
     }
 }
 
-/// Statement variants
 #[derive(Debug, Clone, PartialEq)]
 pub enum StatementKind {
     Expression(Expression),
@@ -176,7 +170,6 @@ pub enum StatementKind {
     Continue,
 }
 
-/// Statement with position information
 #[derive(Debug, Clone, PartialEq)]
 pub struct Statement {
     pub kind: StatementKind,
@@ -190,7 +183,6 @@ impl Statement {
     }
 }
 
-/// Function prototype
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionProto {
     pub name: String,
@@ -200,14 +192,12 @@ pub struct FunctionProto {
     pub pos: Position,
 }
 
-/// Function definition
 #[derive(Debug, Clone, PartialEq)]
 pub struct Function {
     pub proto: FunctionProto,
     pub body: Vec<Statement>,
 }
 
-/// Global variable
 #[derive(Debug, Clone, PartialEq)]
 pub struct GlobalVar {
     pub var_type: LangType,
@@ -216,7 +206,6 @@ pub struct GlobalVar {
     pub pos: Position,
 }
 
-/// Complete program AST
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub functions: Vec<Function>,
@@ -226,7 +215,7 @@ pub struct Program {
     /// built by the parser and consumed by the type checker and code generator.
     pub symbols: crate::symbol::module::ModuleSymbols,
     /// Source-file registry indexed by `Position::file_id` — entry file at id 0,
-    /// each `$include`-pulled file after that. Empty for synthetic programs
+    /// each `$import`-pulled file after that. Empty for synthetic programs
     /// (e.g. checker unit tests that don't go through the preprocessor).
     pub source_files: Vec<std::path::PathBuf>,
 }

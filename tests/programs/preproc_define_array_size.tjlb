@@ -1,0 +1,15 @@
+# expected: 42
+# `$define` substitution feeding an array size: the scanner only folds
+# `T[N]` for literal N, so `u8[MAX_SIZE]` reaches the preprocessor
+# unfolded (`u8` `[` `MAX_SIZE` `]`); substitution splices `10` and the
+# parser's type-suffix rule folds it back into `u8[10]`. MAX_SIZE also
+# appears in an index expression, ANSWER on the return path.
+$define MAX_SIZE 10
+$define ANSWER 40
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    u8[MAX_SIZE] buf
+    buf[MAX_SIZE - 1] = 2
+    i32 extra = buf[9] as i32
+    return ANSWER + extra
+}

@@ -4,13 +4,13 @@
 type Counter {
     i32 count                                # private (hidden by default)
 
-    fn make(i32 start) -> Counter {
+    public fn make(i32 start) -> Counter {
         return Counter { count = start }     # naming `count` ok — inside the type's methods
     }
-    const fn value(this) -> i32 {
+    public const fn value(this) -> i32 {
         return this.count                    # private read ok — inside a method
     }
-    fn bump(this, i32 delta) {
+    public fn bump(this, i32 delta) {
         this.count = this.count + delta      # private write ok — non-const, inside the type
     }
 }

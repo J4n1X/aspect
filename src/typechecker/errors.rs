@@ -116,6 +116,13 @@ pub enum TypeCheckError {
         position: Position,
     },
 
+    #[error("Method '{method}' of type-struct '{type_name}' is private and not accessible here at {position}")]
+    InaccessibleMethod {
+        method: String,
+        type_name: String,
+        position: Position,
+    },
+
     #[error("'u0' is not a value type — it only exists behind a pointer (u0*); use a sized type instead at {0}")]
     InvalidVoidValue(Position),
 
@@ -141,7 +148,8 @@ impl TypeCheckError {
             | Self::NotAStruct { position, .. }
             | Self::UnknownField { position, .. }
             | Self::MissingStructFields { position, .. }
-            | Self::InaccessibleField { position, .. } => Some(*position),
+            | Self::InaccessibleField { position, .. }
+            | Self::InaccessibleMethod { position, .. } => Some(*position),
             Self::UndefinedVariable(_, pos)
             | Self::UndefinedFunction(_, pos)
             | Self::InvalidDereference(_, pos)

@@ -13,13 +13,14 @@
   stores through subscripts, and pointer-arithmetic over struct
   elements — all lowered through the named-struct cache in codegen.
 
-  Run:   tjlb-parser interpret demos/sort_demo.tjlb
+  Run:   tjlb-parser interpret -I lib demos/sort_demo.tjlb
 -#
 
-$include "std/io/print.tjlb"
-$include "std/sort/sort.tjlb"
-$include "std/rand/rand.tjlb"
-$include "std/c/stdlib.tjlb"
+$import std/io
+$import std/sort
+$import std/rand
+$import std/c/string    # strcmp/strlen
+$import std/c/stdio     # putchar
 
 type Person {
     public u8* name

@@ -1,0 +1,11 @@
+# expected: "Duplicate type 'A'"
+#-
+  Defining the same alias name twice is an error; the second site is the
+  duplicate (the prescan installs the first definition in source order).
+-#
+alias A i32
+alias A u8
+
+fn main() -> i32 {
+    return 0
+}

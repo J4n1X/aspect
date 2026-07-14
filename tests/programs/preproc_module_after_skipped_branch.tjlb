@@ -1,0 +1,12 @@
+# expected: 5
+# compile_args: "-I", "tests/modules"
+#-
+  Cross-feature (conditionals x modules): content inside a fully-skipped
+  conditional branch does not count as "content before $module" — only
+  emitted tokens block the declaration.
+-#
+$import guarded
+
+fn main(u32 argc, u8** argv) -> i32 {
+    return guarded_value()
+}

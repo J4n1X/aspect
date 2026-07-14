@@ -25,7 +25,7 @@ impl Position {
     }
 
     /// Construct a position with an explicit `file_id`, used by the lexer
-    /// when tokenising included files.
+    /// when tokenising imported files.
     #[must_use]
     pub fn with_file(line: usize, column: usize, file_id: u32) -> Self {
         Self {
@@ -67,7 +67,4 @@ pub enum LexerError {
 
     #[error("Unexpected end of input")]
     UnexpectedEof,
-
-    #[error("Include error: {0}")]
-    IncludeError(String),
 }

@@ -14,6 +14,7 @@ enum Expected {
 struct Annotation {
     expected: Expected,
     run_args: Vec<String>,
+    compile_args: Vec<String>,
 }
 
 // ── Annotation parsing ────────────────────────────────────────────────────────
@@ -37,12 +38,18 @@ fn parse_string_list(s: &str) -> Vec<String> {
     result
 }
 
-/// Scan the first 10 lines of `path` for `# expected:` and `# run_args:` annotations.
-/// Returns `None` if no `# expected:` annotation is found (file is skipped).
+/// Scan the first 10 lines of `path` for `# expected:`, `# run_args:`, and
+/// `# compile_args:` annotations. Returns `None` if no `# expected:`
+/// annotation is found (file is skipped).
+///
+/// `# compile_args:` holds extra compiler flags for the invocation, as a
+/// quoted-string list mirroring the CLI word-for-word — e.g.
+/// `# compile_args: "-D", "DEBUG=1", "-I", "lib"`.
 fn parse_annotation(path: &Path) -> Option<Annotation> {
     let source = fs::read_to_string(path).ok()?;
     let mut expected: Option<Expected> = None;
     let mut run_args: Vec<String> = Vec::new();
+    let mut compile_args: Vec<String> = Vec::new();
 
     for line in source.lines().take(10) {
         let trimmed = line.trim();
@@ -58,12 +65,15 @@ fn parse_annotation(path: &Path) -> Option<Annotation> {
             }
         } else if let Some(rest) = trimmed.strip_prefix("# run_args:") {
             run_args = parse_string_list(rest.trim());
+        } else if let Some(rest) = trimmed.strip_prefix("# compile_args:") {
+            compile_args = parse_string_list(rest.trim());
         }
     }
 
     expected.map(|e| Annotation {
         expected: e,
         run_args,
+        compile_args,
     })
 }
 
@@ -153,8 +163,9 @@ pub fn generate_tests_impl(_input: TokenStream) -> TokenStream {
             let relative_to_base = abs_path.strip_prefix(&base_dir).unwrap_or(&abs_path);
             let test_ident = make_test_ident(relative_to_base, prefix);
 
+            let compile_args: Vec<&str> = ann.compile_args.iter().map(String::as_str).collect();
             let test_fn: TokenStream2 = match ann.expected {
-            Expected::ExitCode(code) if ann.run_args.is_empty() => quote! {
+            Expected::ExitCode(code) if ann.run_args.is_empty() && compile_args.is_empty() => quote! {
                 #[test]
                 fn #test_ident() {
                     let result = compile_and_run(#path_str)
@@ -170,6 +181,7 @@ pub fn generate_tests_impl(_input: TokenStream) -> TokenStream {
                         let result = compile_and_run_with_args(
                             #path_str,
                             &[#(String::from(#args)),*],
+                            &[#(String::from(#compile_args)),*],
                         ).expect(concat!("Failed to compile and run ", #path_str));
                         assert_eq!(result, #code, "Expected exit code {}, got {}", #code, result);
                     }
@@ -181,6 +193,7 @@ pub fn generate_tests_impl(_input: TokenStream) -> TokenStream {
                     assert_compile_error_contains(
                         #path_str,
                         &[#(#frags),*],
+                        &[#(String::from(#compile_args)),*],
                     );
                 }
             },

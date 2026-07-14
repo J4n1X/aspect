@@ -1,0 +1,10 @@
+# expected: "method 'HiddenBox.make' is defined in module 'hidden'", "the root module does not import"
+# compile_args: "-I", "tests/modules"
+# A method's visibility follows its type-struct's module: the entry
+# imports `middle` only, so calling a `hidden` type's method is an error.
+
+$import middle
+
+fn main(u32 argc, u8** argv) -> i32 {
+    return HiddenBox.make(3).get()
+}

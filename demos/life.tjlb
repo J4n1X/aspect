@@ -7,15 +7,15 @@
   mixes a deterministic random soup (std/rand at a fixed seed) with an
   R-pentomino dropped in the middle.
 
-  Run:            tjlb-parser interpret demos/life.tjlb
-  Animate:        tjlb-parser interpret demos/life.tjlb -- watch
+  Run:            tjlb-parser interpret -I lib demos/life.tjlb
+  Animate:        tjlb-parser interpret -I lib demos/life.tjlb -- watch
                   (any extra argument turns on ANSI animation)
 -#
 
-$include "std/io/print.tjlb"
-$include "std/rand/rand.tjlb"
-$include "std/c/stdlib.tjlb"
-$include "std/c/string.tjlb"
+$import std/io
+$import std/rand
+$import std/c/stdlib    # calloc/free
+$import std/c/stdio     # putchar
 
 extern fn usleep(u32 usec) -> i32
 
@@ -27,7 +27,7 @@ type Board {
     i64 w           # private
     i64 h           # private
 
-    fn new(i64 w, i64 h) -> Board {
+    public fn new(i64 w, i64 h) -> Board {
         u8* buf = calloc((w * h) as u64, 1)
         return Board { cells = buf, w = w, h = h }
     }
@@ -43,7 +43,7 @@ type Board {
         this.cells[y * this.w + x] = v
     }
 
-    const fn population(this) -> i64 {
+    public const fn population(this) -> i64 {
         i64 n = 0
         for (i64 i = 0; i < this.w * this.h; i += 1) {
             n = n + (this.cells[i] as i64)
@@ -64,7 +64,7 @@ type Board {
     }
 
     # One generation: B3/S23, written into `next` (same dimensions).
-    const fn step_into(this, Board* next) {
+    public const fn step_into(this, Board* next) {
         for (i64 y = 0; y < this.h; y += 1) {
             for (i64 x = 0; x < this.w; x += 1) {
                 i64 n = this.live_neighbors(x, y)
@@ -78,13 +78,13 @@ type Board {
     }
 
     # Exchange cell buffers with `other` — O(1), no copying.
-    fn swap_with(this, Board* other) {
+    public fn swap_with(this, Board* other) {
         u8* tmp = this.cells
         this.cells = other.cells
         other.cells = tmp
     }
 
-    const fn render(this) {
+    public const fn render(this) {
         for (i64 y = 0; y < this.h; y += 1) {
             for (i64 x = 0; x < this.w; x += 1) {
                 if this.at(x, y) == 1 {
@@ -98,7 +98,7 @@ type Board {
     }
 
     # ~18% random soup away from the centre, R-pentomino in the middle.
-    fn seed(this, u64 rng_seed) {
+    public fn seed(this, u64 rng_seed) {
         Rng rng = Rng.seeded(rng_seed)
         for (i64 y = 0; y < this.h; y += 1) {
             for (i64 x = 0; x < this.w; x += 1) {
@@ -123,7 +123,7 @@ type Board {
         this.set(mx, my + 1, 1)
     }
 
-    fn destroy(this) {
+    public fn destroy(this) {
         free(this.cells)
         this.cells = null
     }

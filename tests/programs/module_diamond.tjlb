@@ -1,0 +1,12 @@
+# expected: 17
+# compile_args: "-I", "tests/modules"
+# Diamond import: `left` and `right` both import `base`. Import-once must
+# load `base` exactly once — a duplicate load would redefine base_value()
+# and fail compilation. (7 + 1) + (7 + 2) = 17.
+
+$import left
+$import right
+
+fn main(u32 argc, u8** argv) -> i32 {
+    return left_value() + right_value()
+}

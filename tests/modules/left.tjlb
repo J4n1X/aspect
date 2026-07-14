@@ -1,0 +1,7 @@
+# Left edge of the diamond import test.
+$module left
+$import base
+
+fn left_value() -> i32 {
+    return base_value() + 1
+}

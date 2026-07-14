@@ -4,14 +4,16 @@ Showcase programs for the TJLB language. **Demos are not part of the test
 suite** — they exist to be read and run. (The shared standard library below
 *is* regression-tested, via `tests/programs/stdlib_check.tjlb`.)
 
-Run any demo with the JIT interpreter:
+Run any demo with the JIT interpreter. Demos import the standard library
+(`lib/std/**`), so pass the `-I lib` search root:
 
 ```bash
-cargo run -- interpret demos/<name>.tjlb            # or target/…/tjlb-parser
-cargo run -- interpret demos/life.tjlb -- watch     # args after --
+cargo run -- interpret -I lib demos/<name>.tjlb            # or target/…/tjlb-parser
+cargo run -- interpret -I lib demos/life.tjlb -- watch     # args after --
 ```
 
-Or compile to native via `./compile-file.sh demos/<name>.tjlb`.
+Or compile to native via `./compile-file.sh demos/<name>.tjlb`
+(the script passes `-I lib` itself).
 
 ## Feature showcases
 
@@ -28,7 +30,7 @@ Or compile to native via `./compile-file.sh demos/<name>.tjlb`.
 
 | Demo | What it shows |
 |------|---------------|
-| [`hello.tjlb`](hello.tjlb) | `$include`, printing, heap allocation with `sizeof(T)`. |
+| [`hello.tjlb`](hello.tjlb) | `$import std/...`, printing, heap allocation with `sizeof(T)`. |
 | [`types.tjlb`](types.tjlb) | Guided tour of the numeric type system (widths, signedness, casts, bit ops). Self-contained. |
 | [`string_demo.tjlb`](string_demo.tjlb) | The `String` type-struct: factories, sret returns, autoref methods, encapsulation. |
 | [`vec_demo.tjlb`](vec_demo.tjlb) | `VecI32` dynamic array: push/pop/at, amortised growth. |
@@ -38,19 +40,24 @@ Or compile to native via `./compile-file.sh demos/<name>.tjlb`.
 | [`ask_name.tjlb`](ask_name.tjlb) | Interactive stdin (blocks — run in a terminal). |
 | [`stress_test.tjlb`](stress_test.tjlb) | Kitchen-sink compiler exercise; `bench.tjlb` + `bench.c` compare against C. |
 
-## The demo standard library (`std/`)
+## The standard library (`lib/std/`)
 
-Plain `.tjlb` files pulled in with `$include` — no module system yet, so
-paths are relative to the including file.
+Real modules under [`../lib/std/`](../lib/std/), pulled in with
+`$import <module>` and resolved against the `-I lib` search root. See
+[`doc/10-modules.md`](../doc/10-modules.md) for the module system.
 
-| Module | Provides |
+| Import | Provides |
 |--------|----------|
-| [`std/c/`](std/c/) | Raw libc externs: `stdio`, `stdlib`, `string`. |
-| [`std/io/print.tjlb`](std/io/print.tjlb) | `print`/`println` for strings, all integer widths, `f64`. No `printf` (no varargs). |
-| [`std/mem/alloc.tjlb`](std/mem/alloc.tjlb) | Byte-count allocation wrappers; pair with `sizeof(T)`. |
-| [`std/math/math.tjlb`](std/math/math.tjlb) | min/max/clamp/abs per width, gcd/lcm, `ipow`, exact `isqrt_u64`, Newton `sqrt_f64`, floor/ceil/round, `PI`/`TAU`/`E`. |
-| [`std/rand/rand.tjlb`](std/rand/rand.tjlb) | `Rng` type-struct (xorshift64\*): `next_u64`, `below`, `range_i64`, `next_f64`, `chance`. Deterministic per seed. |
-| [`std/sort/sort.tjlb`](std/sort/sort.tjlb) | Type-erased `sort_bytes(base, n, size, cmp)` (quicksort + insertion), stock comparators, typed wrappers `sort_i32`/`sort_i64`/`sort_f64`/`sort_cstr`. |
-| [`std/collections/map_str_i64.tjlb`](std/collections/map_str_i64.tjlb) | `MapStrI64`: FNV-1a, open addressing, key-owning `put`/`get_or`/`contains`/`for_each`/`destroy`. |
-| [`std/string/String.tjlb`](std/string/String.tjlb) | Growable heap string. |
-| [`std/vec/vec_i32.tjlb`](std/vec/vec_i32.tjlb) | Dynamic `i32` array. |
+| `std/c/stdio`, `std/c/stdlib`, `std/c/string` | Raw libc externs at header granularity. |
+| `std/io` | `print`/`println` for strings, all integer widths, `f64`. No `printf` (no varargs). |
+| `std/mem` | Byte-count allocation wrappers; pair with `sizeof(T)`. |
+| `std/math` | min/max/clamp/abs per width, gcd/lcm, `ipow`, exact `isqrt_u64`, Newton `sqrt_f64`, floor/ceil/round, `PI`/`TAU`/`E`. |
+| `std/rand` | `Rng` type-struct (xorshift64\*): `next_u64`, `below`, `range_i64`, `next_f64`, `chance`. Deterministic per seed. |
+| `std/sort` | Type-erased `sort_bytes(base, n, size, cmp)` (quicksort + insertion), stock comparators, typed wrappers `sort_i32`/`sort_i64`/`sort_f64`/`sort_cstr`. |
+| `std/collections` | `MapStrI64`: FNV-1a, open addressing, key-owning `put`/`get_or`/`contains`/`for_each`/`destroy`. |
+| `std/string` | Growable heap `String`. |
+| `std/vec` | Dynamic `i32` array `VecI32`. |
+
+Imports are not transitive: `$import std/sort` does not hand you
+`strcmp` — a demo that calls libc directly imports the `std/c/*` module
+itself (see the import lists at the top of each demo).

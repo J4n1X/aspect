@@ -1,0 +1,9 @@
+# expected: "redefinition", "MAX_SIZE", "command line"
+# compile_args: "-D", "MAX_SIZE=1024"
+# `-D` definitions count as prior defines: a file-level `$define` of a
+# `-D`-injected name is the same redefinition error as any other.
+$define MAX_SIZE 2048
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

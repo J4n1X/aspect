@@ -57,7 +57,6 @@ const STATEMENT_TABLE: &[(StatementPred, StatementHandler)] = &[
 ];
 
 impl Parser {
-    /// Parse a statement
     pub(crate) fn parse_statement(&mut self) -> Result<Statement, ParserError> {
         self.skip_newlines();
         for &(pred, handler) in STATEMENT_TABLE {
@@ -68,7 +67,6 @@ impl Parser {
         self.parse_expression_or_assign_statement()
     }
 
-    /// Parse a block statement { ... }
     #[parse_rule]
     pub(crate) fn parse_block_statement(&mut self) -> Result<Statement, ParserError> {
         let pos = pos!();
@@ -90,7 +88,6 @@ impl Parser {
         Ok(Statement::new(StatementKind::Block(statements), pos))
     }
 
-    /// Parse a return statement
     #[parse_rule]
     fn parse_return_statement(&mut self) -> Result<Statement, ParserError> {
         let pos = pos!();
@@ -100,7 +97,6 @@ impl Parser {
         Ok(Statement::new(StatementKind::Return(value), pos))
     }
 
-    /// Parse an if statement
     #[parse_rule]
     fn parse_if_statement(&mut self) -> Result<Statement, ParserError> {
         let pos = pos!();
@@ -169,7 +165,6 @@ impl Parser {
         ))
     }
 
-    /// Parse a while loop
     #[parse_rule]
     fn parse_while_statement(&mut self) -> Result<Statement, ParserError> {
         let pos = pos!();
@@ -183,7 +178,6 @@ impl Parser {
         ))
     }
 
-    /// Parse a break statement
     #[parse_rule]
     fn parse_break_statement(&mut self) -> Result<Statement, ParserError> {
         let pos = pos!();
@@ -192,7 +186,6 @@ impl Parser {
         Ok(Statement::new(StatementKind::Break, pos))
     }
 
-    /// Parse a continue statement
     #[parse_rule]
     fn parse_continue_statement(&mut self) -> Result<Statement, ParserError> {
         let pos = pos!();
@@ -201,7 +194,6 @@ impl Parser {
         Ok(Statement::new(StatementKind::Continue, pos))
     }
 
-    /// Parse a for loop
     #[parse_rule]
     fn parse_for_statement(&mut self) -> Result<Statement, ParserError> {
         let pos = pos!();

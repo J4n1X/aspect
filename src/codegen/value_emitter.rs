@@ -17,7 +17,9 @@ use inkwell::{
 };
 
 use crate::{
-    codegen::types::{const_widen_ints_to_match, widen_floats_to_match, widen_ints_to_match},
+    codegen::types::{
+        const_widen_ints_to_match, widen_floats_to_match, widen_ints_to_match, LangTypeExt,
+    },
     codegen::CodegenError,
     lexer::{LangType, Position, TypeBase},
     parser::BinaryOp,
@@ -63,20 +65,40 @@ pub trait ValueEmitter<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, CodegenError>;
 
     /// Emit an integer literal at the given language type.
+    ///
+    /// Literals are LLVM constants in both modes, so this shared default
+    /// (which only needs `context()`) serves both emitters.
     fn emit_int_literal(
         &self,
         val: i64,
         ty: &LangType,
         pos: Position,
-    ) -> Result<BasicValueEnum<'ctx>, CodegenError>;
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        match ty.to_llvm(self.context())? {
+            BasicTypeEnum::IntType(int_ty) => Ok(int_ty.const_int(val as u64, true).into()),
+            _ => Err(CodegenError::TypeError(
+                "integer literal must have integer type".to_string(),
+                pos,
+            )),
+        }
+    }
 
-    /// Emit a float literal at the given language type.
+    /// Emit a float literal at the given language type (shared default, as
+    /// for [`ValueEmitter::emit_int_literal`]).
     fn emit_float_literal(
         &self,
         val: f64,
         ty: &LangType,
         pos: Position,
-    ) -> Result<BasicValueEnum<'ctx>, CodegenError>;
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        match ty.to_llvm(self.context())? {
+            BasicTypeEnum::FloatType(float_ty) => Ok(float_ty.const_float(val).into()),
+            _ => Err(CodegenError::TypeError(
+                "float literal must have float type".to_string(),
+                pos,
+            )),
+        }
+    }
 
     /// Widen two integer values to the same bit-width.
     fn emit_widen_ints(
@@ -353,38 +375,6 @@ impl<'ctx> ValueEmitter<'ctx> for RuntimeEmitter<'_, 'ctx> {
         }
 
         Ok(value)
-    }
-
-    fn emit_int_literal(
-        &self,
-        val: i64,
-        ty: &LangType,
-        pos: Position,
-    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-        use crate::codegen::types::LangTypeExt;
-        match ty.to_llvm(self.context)? {
-            BasicTypeEnum::IntType(int_ty) => Ok(int_ty.const_int(val as u64, true).into()),
-            _ => Err(CodegenError::TypeError(
-                "integer literal must have integer type".to_string(),
-                pos,
-            )),
-        }
-    }
-
-    fn emit_float_literal(
-        &self,
-        val: f64,
-        ty: &LangType,
-        pos: Position,
-    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-        use crate::codegen::types::LangTypeExt;
-        match ty.to_llvm(self.context)? {
-            BasicTypeEnum::FloatType(float_ty) => Ok(float_ty.const_float(val).into()),
-            _ => Err(CodegenError::TypeError(
-                "float literal must have float type".to_string(),
-                pos,
-            )),
-        }
     }
 
     fn emit_widen_ints(
@@ -679,38 +669,6 @@ impl<'ctx> ValueEmitter<'ctx> for ConstantEmitter<'ctx> {
             ),
             pos,
         ))
-    }
-
-    fn emit_int_literal(
-        &self,
-        val: i64,
-        ty: &LangType,
-        pos: Position,
-    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-        use crate::codegen::types::LangTypeExt;
-        match ty.to_llvm(self.context)? {
-            BasicTypeEnum::IntType(int_ty) => Ok(int_ty.const_int(val as u64, true).into()),
-            _ => Err(CodegenError::TypeError(
-                "integer literal must have integer type".to_string(),
-                pos,
-            )),
-        }
-    }
-
-    fn emit_float_literal(
-        &self,
-        val: f64,
-        ty: &LangType,
-        pos: Position,
-    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-        use crate::codegen::types::LangTypeExt;
-        match ty.to_llvm(self.context)? {
-            BasicTypeEnum::FloatType(float_ty) => Ok(float_ty.const_float(val).into()),
-            _ => Err(CodegenError::TypeError(
-                "float literal must have float type".to_string(),
-                pos,
-            )),
-        }
     }
 
     fn emit_widen_ints(

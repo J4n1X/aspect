@@ -1,0 +1,9 @@
+# expected: 42
+# compile_args: "-D", "ANSWER=40 + 2"
+# `-D NAME=VALUE` seeds the define table before the entry file is
+# processed; the value is lexed into a token sequence (here three tokens:
+# `40` `+` `2`), so ANSWER substitutes to a whole expression.
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return ANSWER
+}

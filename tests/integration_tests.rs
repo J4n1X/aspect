@@ -3,17 +3,45 @@ use std::path::Path;
 use inkwell::context::Context;
 use tjlb_macros::generate_tests;
 use tjlb_rust::codegen::CodeGenerator;
-use tjlb_rust::preprocessor::tokenize_file;
+use tjlb_rust::preprocessor::{PreprocessedSource, Preprocessor};
 use tjlb_rust::parser::{Parser, Program};
 use tjlb_rust::typechecker::TypeChecker;
 
+/// Preprocess a source file with extra compiler flags from a
+/// `# compile_args:` annotation. Supported flags: `-D NAME[=VALUE]` (seeds
+/// the define table before the entry file) and `-I DIR` (module search
+/// root). Flags and their values are separate annotation strings, mirroring
+/// the CLI: `# compile_args: "-D", "DEBUG=1"`.
+fn preprocess_with_args(
+    source_path: &str,
+    compile_args: &[String],
+) -> Result<PreprocessedSource, String> {
+    let mut pp = Preprocessor::new();
+    let mut args = compile_args.iter();
+    while let Some(flag) = args.next() {
+        let value = args
+            .next()
+            .ok_or_else(|| format!("compile_args flag '{flag}' is missing its value"))?;
+        match flag.as_str() {
+            "-D" => pp
+                .add_cli_define(value)
+                .map_err(|e| format!("Tokenization failed: {}", pp.format_error(&e)))?,
+            "-I" => pp.add_include_dir(value),
+            other => return Err(format!("unsupported compile_args flag '{other}'")),
+        }
+    }
+    pp.preprocess(Path::new(source_path))
+        .map_err(|e| format!("Tokenization failed: {}", pp.format_error(&e)))
+}
+
 /// Read, tokenize, parse, and type-check the source file. Returns the typed
 /// AST ready for codegen, or a stage-tagged error string.
-fn parse_and_typecheck(source_path: &str) -> Result<Program, String> {
-    let pp = tokenize_file(Path::new(source_path))
-        .map_err(|e| format!("Tokenization failed: {e}"))?;
+fn parse_and_typecheck(source_path: &str, compile_args: &[String]) -> Result<Program, String> {
+    let pp = preprocess_with_args(source_path, compile_args)?;
 
-    let mut parser = Parser::new(pp.tokens).with_source_files(pp.files);
+    let mut parser = Parser::new(pp.tokens)
+        .with_source_files(pp.files)
+        .with_module_info(pp.modules, pp.imports);
     let mut program = parser.parse_program().map_err(|errors| {
         errors
             .iter()
@@ -43,8 +71,8 @@ fn module_name_for(source_path: &str) -> &str {
 
 /// Compile through codegen without executing — used by failure tests to assert
 /// that compilation reports the expected error.
-fn compile_only(source_path: &str) -> Result<(), String> {
-    let program = parse_and_typecheck(source_path)?;
+fn compile_only(source_path: &str, compile_args: &[String]) -> Result<(), String> {
+    let program = parse_and_typecheck(source_path, compile_args)?;
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, module_name_for(source_path));
     codegen
@@ -53,8 +81,12 @@ fn compile_only(source_path: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn assert_compile_error_contains(source_path: &str, expected_fragments: &[&str]) {
-    let err = compile_only(source_path).expect_err(&format!(
+fn assert_compile_error_contains(
+    source_path: &str,
+    expected_fragments: &[&str],
+    compile_args: &[String],
+) {
+    let err = compile_only(source_path, compile_args).expect_err(&format!(
         "Expected compilation to fail for {source_path}, but it succeeded"
     ));
 
@@ -70,9 +102,14 @@ fn assert_compile_error_contains(source_path: &str, expected_fragments: &[&str])
 
 /// Compile and JIT-execute a TJLB program in-process, returning `main`'s
 /// `i32` return value. `args` is the program's argv tail; the source path is
-/// prepended as the conventional `argv[0]`.
-fn compile_and_run_with_args(source_path: &str, args: &[String]) -> Result<i32, String> {
-    let program = parse_and_typecheck(source_path)?;
+/// prepended as the conventional `argv[0]`. `compile_args` holds
+/// `# compile_args:` flags for the preprocessor (`-D`/`-I`).
+fn compile_and_run_with_args(
+    source_path: &str,
+    args: &[String],
+    compile_args: &[String],
+) -> Result<i32, String> {
+    let program = parse_and_typecheck(source_path, compile_args)?;
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, module_name_for(source_path));
     codegen
@@ -92,7 +129,7 @@ fn compile_and_run_with_args(source_path: &str, args: &[String]) -> Result<i32, 
 }
 
 fn compile_and_run(source_path: &str) -> Result<i32, String> {
-    compile_and_run_with_args(source_path, &[])
+    compile_and_run_with_args(source_path, &[], &[])
 }
 
 generate_tests!();

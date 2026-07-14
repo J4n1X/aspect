@@ -1,0 +1,33 @@
+#-
+  std/mem - thin wrappers around libc malloc/free.
+
+  Allocation is by *byte count*, not by typed-array count, because
+  `sizeof(T)` is a built-in compile-time constant — `malloc(n *
+  sizeof(T))` is the right idiom and needs no further wrapping:
+
+      i32* xs = malloc(n * sizeof(i32))
+      Point* p = malloc(sizeof(Point))
+
+  Everything traffics in `u0*`: same-depth pointers coerce implicitly,
+  so any `T*` passes into `free_ptr` directly and an allocation result
+  lands in any pointer variable. The opacity bites exactly where it
+  should — a `u0*` cannot be dereferenced without a cast.
+-#
+$module std/mem
+
+$import std/c/stdlib
+
+# Raw byte allocation — `n` uninitialised bytes.
+fn alloc_bytes(u64 n) -> u0* {
+    return malloc(n)
+}
+
+# Zero-initialised byte allocation.
+fn zalloc_bytes(u64 n) -> u0* {
+    return calloc(n, 1)
+}
+
+# Release any pointer obtained from `alloc_bytes`/`malloc`/`realloc`/`calloc`.
+fn free_ptr(u0* p) -> u0 {
+    free(p)
+}

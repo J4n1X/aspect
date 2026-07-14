@@ -1,0 +1,7 @@
+# Ambiguity fixture: both `dual.tjlb` (file form) and `dual/` (directory
+# form) exist in this root — `$import dual` must be an error.
+$module dual
+
+fn dual_file_value() -> i32 {
+    return 1
+}

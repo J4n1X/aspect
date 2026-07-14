@@ -18,7 +18,6 @@ pub enum SymbolError {
     SignatureMismatch(String),
 }
 
-/// Symbol information
 #[derive(Debug, Clone, PartialEq)]
 pub struct Symbol {
     pub name: String,
@@ -26,7 +25,6 @@ pub struct Symbol {
     pub pos: Position,
 }
 
-/// Variable symbol
 pub type VarSymbol = Symbol;
 
 /// Function symbol.
@@ -70,12 +68,10 @@ impl SymbolTable {
         }
     }
 
-    /// Enter a new scope
     pub fn enter_scope(&mut self) {
         self.var_scopes.enter();
     }
 
-    /// Exit the current scope and clean up variables
     pub fn exit_scope(&mut self) {
         self.var_scopes.exit();
     }
@@ -106,5 +102,14 @@ impl SymbolTable {
     #[must_use]
     pub fn lookup_variable(&self, name: &str) -> Option<&VarSymbol> {
         self.var_scopes.lookup(name)
+    }
+
+    /// Like [`SymbolTable::lookup_variable`], additionally reporting whether
+    /// the binding is a *global* (lives in the outermost scope). The
+    /// import-visibility check applies to globals only — locals and
+    /// parameters are same-function by construction.
+    #[must_use]
+    pub fn lookup_variable_scoped(&self, name: &str) -> Option<(&VarSymbol, bool)> {
+        self.var_scopes.lookup_scoped(name)
     }
 }

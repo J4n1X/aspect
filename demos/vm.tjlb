@@ -16,11 +16,11 @@
     1. factorial(12)     — a STORE/LOAD/JZ/JMP countdown loop
     2. sum 1..=1000      — same loop skeleton, ADD instead of MUL
 
-  Run:   tjlb-parser interpret demos/vm.tjlb
+  Run:   tjlb-parser interpret -I lib demos/vm.tjlb
 -#
 
-$include "std/io/print.tjlb"
-$include "std/c/stdlib.tjlb"
+$import std/io
+$import std/c/stdlib
 
 # ── instruction set ──────────────────────────────────────────────────────
 

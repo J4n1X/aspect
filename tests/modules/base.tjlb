@@ -1,0 +1,7 @@
+# Bottom of the diamond: imported by both `left` and `right`; import-once
+# must load it exactly once.
+$module base
+
+fn base_value() -> i32 {
+    return 7
+}

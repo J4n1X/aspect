@@ -5,13 +5,13 @@ type Pair {
     public i32 a
     public i32 b
 
-    fn make(i32 x, i32 y) -> Pair {            # static factory (sret return)
+    public fn make(i32 x, i32 y) -> Pair {     # static factory (sret return)
         return Pair { a = x, b = y }
     }
-    const fn sum(this) -> i32 {                # const instance method
+    public const fn sum(this) -> i32 {         # const instance method
         return this.a + this.b
     }
-    fn bump(this, i32 delta) {                 # mutating instance method
+    public fn bump(this, i32 delta) {          # mutating instance method
         this.a = this.a + delta
         this.b = this.b + delta
     }

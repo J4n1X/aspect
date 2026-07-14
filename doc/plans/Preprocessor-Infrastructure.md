@@ -1,6 +1,8 @@
 # Preprocessor Infrastructure Plan
 
-**Status:** Draft 2 — directive set and module story agreed; open questions at the end.
+**Status:** Implemented 2026-07-14 — all eight steps landed (defines,
+conditionals, modules with enforced visibility, stdlib migration to
+`lib/std`, `$include` removed, docs rewritten; see § Implementation order).
 **Supersedes:** Draft 1 (text-level `@include`/`@define`/`@ifdef`) and the shipped `$include`.
 
 ## Overview
@@ -68,6 +70,11 @@ bodies. With that in place, import order stops being semantic and module
 cycles (A imports B imports A) degrade gracefully via import-once instead
 of producing baffling "undefined function" errors. Ship it first.
 
+*(Landed 2026-07-14: `do_parse_program` prescans struct names and aliases,
+registers every prototype in pass 1 while brace-skipping bodies, and parses
+bodies in pass 2. Only global-variable initializers remain order-sensitive.
+Regression: `tests/programs/forward_references.tjlb`.)*
+
 ### 3. `$module` is authoritative; paths only locate files
 
 If `search/std/math/vector.tjlb` declares `$module std/math`, the compiler
@@ -104,7 +111,11 @@ $undefine DEBUG                    # removes; no-op if not defined
   recursive but a name may expand at most once per chain (self-reference
   guard, like C).
 - **Redefinition is an error** (use `$undefine` first). Catches
-  import-order surprises early; relax later if it stings.
+  import-order surprises early; relax later if it stings. `-D` definitions
+  count as prior defines: a file-level `$define` of a `-D`-injected name is
+  the same redefinition error. Files that want overridable defaults write
+  the `$ifndef` guard (`$ifndef MAX_SIZE` / `$define MAX_SIZE 1024` /
+  `$endif`).
 - Defines are global once made: a define is visible in every file
   processed after it, including imported ones. (Consequence of flat
   token-stream processing; revisit with real module isolation.)
@@ -140,9 +151,10 @@ $else
 $endif
 ```
 
-- `$ifdef NAME` — true iff NAME is defined. (`$if !defined(NAME)` covers
-  ifndef; a dedicated `$ifndef` is cut for surface area — see open
-  questions.)
+- `$ifdef NAME` / `$ifndef NAME` — true iff NAME is (not) defined.
+  `$ifndef` earns its keep via the overridable-default pattern (see
+  Defines). There is no `$elseifndef` — chains spell it
+  `$elseif !defined(NAME)`.
 - `$if EXPR` — EXPR is a **constant integer expression** over: integer
   literals, defined names (substituted first; must expand to constant
   integer expressions), `defined(NAME)` (1 or 0), the operators
@@ -194,31 +206,45 @@ fn main(u32 argc, u8** argv) -> i32 {
 
 **`$import <path>`** — makes the module part of the compilation.
 
-Resolution, for each search root `R` in order:
+**Resolution is convention + verification** (decided 2026-07-14). Per `-I`
+root, in flag order, `$import std/math` looks for:
 
-1. `R/<path>.tjlb` is a file → the module is that single file.
-2. `R/<path>/` is a directory → the module is every `*.tjlb` **directly**
-   inside it (no recursion — subdirectories are submodules, imported
-   explicitly). Files are loaded in sorted (deterministic) order.
-3. Neither in any root → error listing every candidate path tried.
+- **file form:** `<root>/std/math.tjlb`, or
+- **directory form:** every `.tjlb` file directly inside `<root>/std/math/`
+  (non-recursive).
 
-Search roots, in order: the entry file's directory, then each `-I`/
-`--module-path <dir>` in CLI order. (A `TJLB_PATH` env var can join later.)
+The first root that yields either form wins; a root offering *both* forms
+is an error. Every loaded file's `$module` declaration must equal the
+import path — a mismatch or a missing declaration is a hard error naming
+the file, its declaration, and the import that pulled it in (§ 3). There is
+no tree scanning: the import path *is* the location contract, and
+`$module` is the verified identity.
 
 Semantics:
-
 - Loaded files are lexed and preprocessed recursively (they may
   themselves `$import`).
+- **Imports do not trickle down — and this is enforced** (decided
+  2026-07-14). A module's imports are visible to all files of that module,
+  but not to its importers. The symbol *table* stays flat (load-unit
+  semantics, codegen unchanged); *resolution* is checked: the parser knows
+  each file's module (`pos.file_id` → module), each module's direct
+  imports, and each symbol's defining module (its `pos.file_id`), so
+  resolving a function/type/global defined in a module the current module
+  never imported is a compile error ("function `memcpy` lives in `std/mem`,
+  which `std/math` does not import"). Same-module references are always
+  visible. Real encapsulation in v1, and it encourages good source
+  structure.
 - **Import-once by module identity**: importing `std/math` twice —
-  directly or diamond-shaped — loads it once. File-level canonical-path
+  directly or diamond-shaped — loads it once. Another import merely makes the functions of that imported module visible to the file/module that imports it. File-level canonical-path
   dedup stays as a second guard (two module paths must not silently load
   one file twice).
-- Every loaded file's `$module` declaration must equal the imported path
-  (see "authoritative" above).
 - Cycles are permitted and terminate via import-once; with two-pass
   prototype registration they are also *semantically* harmless.
-- v1 is include-like: all symbols land in the flat global namespace.
-  Name it plainly in the docs so nobody expects `math.gcd` yet.
+- v1 has no *namespacing*: symbols land in one flat global namespace (no
+  `math.gcd` syntax yet), so names must be globally unique across all
+  loaded modules — visibility is enforced per the trickle-down rule above,
+  but two modules exporting the same name still collide. Name it plainly
+  in the docs.
 
 ---
 
@@ -240,8 +266,11 @@ src/preprocessor/
 └── errors.rs       # PreprocessError (grown from today's LexerError reuse)
 ```
 
-- `PreprocessedSource` grows: `pub modules: Vec<(u16 /*file_id*/, String /*module path*/)>`
-  plus the search-root list used (for error reporting).
+- `PreprocessedSource` grows: `pub modules: Vec<(u16 /*file_id*/, String /*module path*/)>`,
+  `pub imports: HashMap<String /*module*/, Vec<String /*direct import*/>>`,
+  plus the search-root list used (for error reporting). The parser threads
+  `modules` + `imports` into function/type/global resolution for the
+  visibility check.
 - Driver keeps a define table (`HashMap<String, Vec<Token>>`), a module
   registry (`HashMap<String, ModuleStatus>` for import-once + cycle
   state), and the conditional stack.
@@ -279,42 +308,55 @@ Unit (preprocessor):
 - chain handling: `$elseif`/`$elseifdef` mixes, nesting, skipped-branch
   nesting integrity, unterminated/stray-directive errors
 - modules: file-form and directory-form resolution, search-root order,
-  import-once (diamond), cycle termination, `$module` mismatch error,
-  module-not-found error listing candidates
+  both-forms-in-one-root error, import-once (diamond), cycle termination,
+  `$module` mismatch / missing-declaration errors, module-not-found error
+  listing candidates
 
 Integration (`tests/programs/`):
 - `-D`-injected define selects a branch that returns the expected code
+- `-D NAME` + file `$define NAME` → redefinition error
+- `$ifndef` overridable-default pattern, with and without `-D` override
 - two-module import (file form + directory form) end-to-end
 - diamond import compiles without duplicate-symbol errors
+- visibility: A imports B, B imports C → A calling into C is a compile
+  error; two files of one module share that module's imports
 - platform define smoke test (`$ifdef OS_LINUX` on the Linux CI)
 
 ## Implementation order
 
-1. **Two-pass prototype registration** (separate TODO, prerequisite —
-   makes import order non-semantic).
+1. ~~Two-pass prototype registration~~ — **done 2026-07-14**.
 2. Driver: line-anchored dispatch + directive table (reuses `Dollar`).
 3. `defines.rs` + `-D` + compiler-provided platform defines.
-4. `conditional.rs` (`$ifdef`/`$else`/`$endif` first, then the `$if`
-   evaluator + `$elseif*`).
-5. `modules.rs` + `-I` (resolution, registry, import-once).
-6. Stdlib/demos/test migration; delete `$include`.
-7. Docs: rewrite `doc/09` §Preprocessor, new `doc/10-modules.md`,
-   update `doc/00-overview.md` pipeline diagram.
+4. `conditional.rs` (`$ifdef`/`$ifndef`/`$else`/`$endif` first, then the
+   `$if` evaluator + `$elseif*`).
+5. `modules.rs` + `-I` (resolution, registry, import-once, `$module`
+   verification).
+6. ~~Visibility enforcement~~ — **done 2026-07-14** (functions, methods,
+   type-structs, aliases, globals; `ParserError::NotImported`).
+7. ~~Stdlib/demos/test migration; delete `$include`~~ — **done 2026-07-14**
+   (stdlib moved to `lib/std/**` with `$module` declarations, demos and
+   `stdlib_check.tjlb` import it with `-I lib`, include tests re-expressed
+   as module tests, `src/preprocessor/include.rs` and
+   `LexerError::IncludeError` deleted).
+8. ~~Docs~~ — **done 2026-07-14** (`doc/09` §Preprocessor rewritten,
+   `doc/10-modules.md` written, `doc/00-overview.md` pipeline updated).
 
-## Open questions
+Steps 4 and 5 are independent of each other (both sit on step 2/3's
+driver + define table) and can proceed in parallel; step 6 needs 5's
+data structures.
 
-- **`$ifndef`**: cut in favour of `$if !defined(X)`. Cheap to add if the
-  long form gets annoying — decide after a month of use.
-- **Define scoping across modules**: today a define leaks into everything
-  processed later. Should an imported module see the importer's defines
-  (C-style, current plan) or start clean (module-hygienic)? Clean-start
-  is more principled but kills the `-D DEBUG` use case unless CLI defines
-  are exempted. Deferred until it bites.
-- **Directory-form determinism**: sorted filename order is deterministic
-  but arbitrary; with two-pass registration it stops mattering. If a
-  module ever needs intra-module ordering beyond that, that's a smell
-  worth an error, not a feature.
-- **Metasystem attribute syntax**: `@` is now wholly reserved for
+## Resolved questions (2026-07-14)
+
+- **Module discovery**: convention + verification — the import path maps
+  to a file (`<path>.tjlb`) or directory (`<path>/`) under the `-I` roots,
+  and every loaded file's `$module` declaration is verified against the
+  import path. No declaration-based tree scanning.
+- **Import visibility**: non-transitivity is *enforced* in v1 at parse-time
+  resolution (functions, types, globals). Flat table, checked lookups.
+- **`$ifndef`**: exists (overridable-default pattern); no `$elseifndef`.
+- **`-D` collisions**: uniform redefinition error — `-D` counts as a prior
+  define; overridable defaults use the `$ifndef` guard.
+- **Metasystem attribute syntax**: `@` is wholly reserved for
   attributes/transforms — no sharing, no reserved directive names. When
   hook #1 (expansions) lands, its `identifier { ... }` capture sites and
   `@attribute` markers coexist with `$` directives without interaction;

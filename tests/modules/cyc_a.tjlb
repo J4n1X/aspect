@@ -1,0 +1,8 @@
+# Import-cycle fixture: cyc_a imports cyc_b, which imports cyc_a back.
+# Import-once terminates the cycle.
+$module cyc_a
+$import cyc_b
+
+fn cyc_a_value() -> i32 {
+    return 1
+}

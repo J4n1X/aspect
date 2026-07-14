@@ -14,7 +14,9 @@ use inkwell::values::{BasicValue, BasicValueEnum, PointerValue};
 use inkwell::{AddressSpace, IntPredicate};
 
 use crate::codegen::generator::CodeGenerator;
-use crate::codegen::types::{float_cmp_pred, int_cmp_pred, LangTypeExt};
+use crate::codegen::types::{
+    float_cmp_pred, int_cmp_pred, widen_floats_to_match, widen_ints_to_match, LangTypeExt,
+};
 use crate::codegen::value_emitter::{ConstantEmitter, RuntimeEmitter, ValueEmitter};
 use crate::codegen::CodegenError;
 use crate::lexer::{LangType, Position, TypeBase};
@@ -33,9 +35,37 @@ pub(crate) enum EmitMode {
 
 // ─── Leaf-level helpers ───────────────────────────────────────────────────────
 
-/// Dispatch a non-pointer binary operation through the right emitter.
-fn emit_binary_dispatch<'ctx, E: ValueEmitter<'ctx>>(
-    e: &E,
+/// Construct the mode-appropriate emitter for leaf operations.
+fn emitter<'a, 'ctx>(
+    cg: &'a CodeGenerator<'ctx>,
+    mode: EmitMode,
+) -> Box<dyn ValueEmitter<'ctx> + 'a> {
+    match mode {
+        EmitMode::Runtime => Box::new(RuntimeEmitter {
+            builder: &cg.builder,
+            context: cg.context,
+        }),
+        EmitMode::Constant => Box::new(ConstantEmitter {
+            context: cg.context,
+        }),
+    }
+}
+
+/// Reject `what` in `Constant` mode — for operations that have no
+/// constant-folding path.
+fn require_runtime(mode: EmitMode, what: &str, pos: Position) -> Result<(), CodegenError> {
+    if mode == EmitMode::Constant {
+        return Err(CodegenError::InvalidOperation(
+            format!("{what} not supported in constant expressions"),
+            pos,
+        ));
+    }
+    Ok(())
+}
+
+/// Dispatch a non-pointer binary operation through the given emitter.
+fn emit_binary_dispatch<'ctx>(
+    e: &dyn ValueEmitter<'ctx>,
     left_val: BasicValueEnum<'ctx>,
     right_val: BasicValueEnum<'ctx>,
     op: &BinaryOp,
@@ -59,16 +89,57 @@ fn emit_binary_dispatch<'ctx, E: ValueEmitter<'ctx>>(
     }
 }
 
-/// Dispatch a cast through the right emitter.
-fn emit_cast_dispatch<'ctx, E: ValueEmitter<'ctx>>(
-    e: &E,
-    val: BasicValueEnum<'ctx>,
-    target_llvm: BasicTypeEnum<'ctx>,
-    src_lang: &LangType,
-    dst_lang: &LangType,
-    pos: Position,
+/// Lower `ptr ± int` (or `int + ptr`) to an in-bounds GEP scaled by the
+/// pointee type. Runtime only — the caller has already rejected `Constant`
+/// mode.
+fn emit_pointer_arithmetic<'ctx>(
+    cg: &mut CodeGenerator<'ctx>,
+    op: &BinaryOp,
+    left: &Expression,
+    right: &Expression,
+    left_val: BasicValueEnum<'ctx>,
+    right_val: BasicValueEnum<'ctx>,
 ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-    e.emit_cast(val, target_llvm, src_lang, dst_lang, pos)
+    let left_is_ptr = left.expr_type.pointer_depth > 0;
+    if left_is_ptr && right.expr_type.pointer_depth > 0 {
+        return Err(CodegenError::InvalidOperation(
+            "pointer arithmetic only allowed with integers".to_string(),
+            left.pos,
+        ));
+    }
+
+    let (ptr_expr, ptr_val, int_val) = if left_is_ptr {
+        (left, left_val, right_val)
+    } else {
+        (right, right_val, left_val)
+    };
+    let ptr = ptr_val.into_pointer_value();
+    let int = int_val.into_int_value();
+    // `lang_type_to_llvm` (not the context-only `to_llvm`) so the GEP scales
+    // correctly when the pointee is a type-struct.
+    let pointee_type = cg.lang_type_to_llvm(&ptr_expr.expr_type.pointee())?;
+
+    match op {
+        BinaryOp::Add => unsafe {
+            Ok(cg
+                .builder
+                .build_in_bounds_gep(pointee_type, ptr, &[int], "ptr_add")
+                .map(Into::into)?)
+        },
+        BinaryOp::Sub if left_is_ptr => {
+            let neg = cg.builder.build_int_neg(int, "neg")?;
+            unsafe {
+                Ok(cg
+                    .builder
+                    .build_in_bounds_gep(pointee_type, ptr, &[neg], "ptr_sub")
+                    .map(Into::into)?)
+            }
+        }
+        _ => Err(CodegenError::InvalidOperation(
+            format!("operator {op:?} not supported for pointers"),
+            left.pos,
+        )),
+    }
 }
 
 // ─── Main walker ──────────────────────────────────────────────────────────────
@@ -86,44 +157,13 @@ pub(crate) fn walk_expression<'ctx>(
     match &expr.kind {
         // ── Literals ──────────────────────────────────────────────────────
         ExprKind::Literal(lit) => match lit {
-            LiteralValue::Integer(val) => match mode {
-                EmitMode::Runtime => RuntimeEmitter {
-                    builder: &cg.builder,
-                    context: cg.context,
-                }
-                .emit_int_literal(*val, &expr.expr_type, expr.pos),
-                EmitMode::Constant => ConstantEmitter {
-                    context: cg.context,
-                }
-                .emit_int_literal(*val, &expr.expr_type, expr.pos),
-            },
-            LiteralValue::Float(val) => match mode {
-                EmitMode::Runtime => RuntimeEmitter {
-                    builder: &cg.builder,
-                    context: cg.context,
-                }
-                .emit_float_literal(*val, &expr.expr_type, expr.pos),
-                EmitMode::Constant => ConstantEmitter {
-                    context: cg.context,
-                }
-                .emit_float_literal(*val, &expr.expr_type, expr.pos),
-            },
-            LiteralValue::String(index) => {
-                let string_name = format!(".str.{index}");
-                let ptr = cg
-                    .scope
-                    .lookup_global(&string_name)
-                    .expect("Internal error: String literal global not found")
-                    .ptr;
-                let i8_ptr_type = cg.context.ptr_type(AddressSpace::default());
-                match mode {
-                    EmitMode::Runtime => Ok(cg
-                        .builder
-                        .build_pointer_cast(ptr, i8_ptr_type, "str")?
-                        .into()),
-                    EmitMode::Constant => Ok(ptr.const_cast(i8_ptr_type).into()),
-                }
+            LiteralValue::Integer(val) => {
+                emitter(cg, mode).emit_int_literal(*val, &expr.expr_type, expr.pos)
             }
+            LiteralValue::Float(val) => {
+                emitter(cg, mode).emit_float_literal(*val, &expr.expr_type, expr.pos)
+            }
+            LiteralValue::String(index) => cg.emit_string_ptr(*index, mode),
             // Boolean literal: an i1 value (zero-extended to i8 when stored).
             LiteralValue::Bool(b) => {
                 Ok(cg.context.bool_type().const_int(u64::from(*b), false).into())
@@ -218,90 +258,26 @@ pub(crate) fn walk_expression<'ctx>(
             let left_val = walk_expression(left, cg, mode)?;
             let right_val = walk_expression(right, cg, mode)?;
 
-            // TODO: Move this into it's own function because it's unwieldy in here.
-            if left.expr_type.pointer_depth > 0 {
-                if mode == EmitMode::Constant {
-                    return Err(CodegenError::InvalidOperation(
-                        "pointer arithmetic not supported in constant expressions".to_string(),
-                        expr.pos,
-                    ));
-                }
-                if right.expr_type.pointer_depth > 0 {
-                    return Err(CodegenError::InvalidOperation(
-                        "pointer arithmetic only allowed with integers".to_string(),
-                        left.pos,
-                    ));
-                }
-                let left_ptr = left_val.into_pointer_value();
-                let right_int = right_val.into_int_value();
-                // `lang_type_to_llvm` (not the context-only `to_llvm`) so the
-                // GEP scales correctly when the pointee is a type-struct.
-                let pointee_type = cg.lang_type_to_llvm(&left.expr_type.pointee())?;
-                return match op {
-                    BinaryOp::Add => unsafe {
-                        Ok(cg
-                            .builder
-                            .build_in_bounds_gep(pointee_type, left_ptr, &[right_int], "ptr_add")
-                            .map(Into::into)?)
-                    },
-                    BinaryOp::Sub => {
-                        let neg = cg.builder.build_int_neg(right_int, "neg")?;
-                        unsafe {
-                            Ok(cg
-                                .builder
-                                .build_in_bounds_gep(pointee_type, left_ptr, &[neg], "ptr_sub")
-                                .map(Into::into)?)
-                        }
-                    }
-                    _ => Err(CodegenError::InvalidOperation(
-                        format!("operator {op:?} not supported for pointers"),
-                        left.pos,
-                    )),
-                };
+            // Pointer arithmetic lowers to a GEP; everything else is scalar.
+            if left.expr_type.pointer_depth > 0 || right.expr_type.pointer_depth > 0 {
+                require_runtime(mode, "pointer arithmetic", expr.pos)?;
+                return emit_pointer_arithmetic(cg, op, left, right, left_val, right_val);
             }
 
-            // Scalar: dispatch through the right emitter (emitter created after recursive calls).
-            match mode {
-                EmitMode::Runtime => {
-                    let e = RuntimeEmitter {
-                        builder: &cg.builder,
-                        context: cg.context,
-                    };
-                    emit_binary_dispatch(
-                        &e,
-                        left_val,
-                        right_val,
-                        op,
-                        &left.expr_type,
-                        &right.expr_type,
-                        expr.pos,
-                    )
-                }
-                EmitMode::Constant => {
-                    let e = ConstantEmitter {
-                        context: cg.context,
-                    };
-                    emit_binary_dispatch(
-                        &e,
-                        left_val,
-                        right_val,
-                        op,
-                        &left.expr_type,
-                        &right.expr_type,
-                        expr.pos,
-                    )
-                }
-            }
+            emit_binary_dispatch(
+                &*emitter(cg, mode),
+                left_val,
+                right_val,
+                op,
+                &left.expr_type,
+                &right.expr_type,
+                expr.pos,
+            )
         }
 
         // ── Comparison (runtime only) ─────────────────────────────────────
         ExprKind::Comparison { left, op, right } => {
-            if mode == EmitMode::Constant {
-                return Err(CodegenError::InvalidOperation(
-                    "comparison not supported in constant expressions".to_string(),
-                    expr.pos,
-                ));
-            }
+            require_runtime(mode, "comparison", expr.pos)?;
             let left_val = walk_expression(left, cg, mode)?;
             let right_val = walk_expression(right, cg, mode)?;
 
@@ -318,13 +294,7 @@ pub(crate) fn walk_expression<'ctx>(
             } else if matches!(left.expr_type.base, TypeBase::SFloat) {
                 let lf = left_val.into_float_value();
                 let rf = right_val.into_float_value();
-                let (lf, rf) = {
-                    let e = RuntimeEmitter {
-                        builder: &cg.builder,
-                        context: cg.context,
-                    };
-                    e.emit_widen_floats(lf, rf)?
-                };
+                let (lf, rf) = widen_floats_to_match(cg.context, &cg.builder, lf, rf)?;
                 Ok(cg
                     .builder
                     .build_float_compare(float_cmp_pred(op), lf, rf, "fcmp")?
@@ -334,13 +304,7 @@ pub(crate) fn walk_expression<'ctx>(
                 let right_signed = matches!(right.expr_type.base, TypeBase::SInt);
                 let li = left_val.into_int_value();
                 let ri = right_val.into_int_value();
-                let (li, ri) = {
-                    let e = RuntimeEmitter {
-                        builder: &cg.builder,
-                        context: cg.context,
-                    };
-                    e.emit_widen_ints(li, is_signed, ri, right_signed)?
-                };
+                let (li, ri) = widen_ints_to_match(&cg.builder, li, is_signed, ri, right_signed)?;
                 Ok(cg
                     .builder
                     .build_int_compare(int_cmp_pred(op, is_signed), li, ri, "icmp")?
@@ -370,12 +334,7 @@ pub(crate) fn walk_expression<'ctx>(
             },
             ExprKind::Dereference(inner2) => walk_expression(inner2, cg, mode),
             ExprKind::FieldAccess { .. } => {
-                if mode == EmitMode::Constant {
-                    return Err(CodegenError::InvalidOperation(
-                        "address-of field not supported in constant expressions".to_string(),
-                        inner.pos,
-                    ));
-                }
+                require_runtime(mode, "address-of field", inner.pos)?;
                 let (ptr, _) = cg.emit_address(inner)?;
                 Ok(ptr.into())
             }
@@ -402,30 +361,17 @@ pub(crate) fn walk_expression<'ctx>(
 
         // ── Dereference (runtime only) ────────────────────────────────────
         ExprKind::Dereference(inner_expr) => {
-            if mode == EmitMode::Constant {
-                return Err(CodegenError::InvalidOperation(
-                    "dereference not supported in constant expressions".to_string(),
-                    expr.pos,
-                ));
-            }
+            require_runtime(mode, "dereference", expr.pos)?;
             let ptr = walk_expression(inner_expr, cg, mode)?;
-            let derefed_type = if inner_expr.expr_type.pointer_depth == 0 {
+            if inner_expr.expr_type.pointer_depth == 0 {
                 return Err(CodegenError::TypeError(
                     "Cannot dereference a non-pointer type".to_string(),
                     expr.pos,
                 ));
-            } else {
-                LangType {
-                    base: inner_expr.expr_type.base,
-                    size_bits: inner_expr.expr_type.size_bits,
-                    pointer_depth: inner_expr.expr_type.pointer_depth - 1,
-                    is_const: inner_expr.expr_type.is_const,
-                    array_size: None,
-                }
-            };
+            }
             // Cache-aware lowering: `*(Pair*)` loads a struct value, which the
             // context-only `to_llvm` cannot resolve.
-            let pointee_type = cg.lang_type_to_llvm(&derefed_type)?;
+            let pointee_type = cg.lang_type_to_llvm(&inner_expr.expr_type.pointee())?;
             Ok(cg
                 .builder
                 .build_load(pointee_type, ptr.into_pointer_value(), "deref")?)
@@ -433,12 +379,7 @@ pub(crate) fn walk_expression<'ctx>(
 
         // ── Function call (runtime only) ──────────────────────────────────
         ExprKind::FunctionCall { name, args } => {
-            if mode == EmitMode::Constant {
-                return Err(CodegenError::InvalidOperation(
-                    "function calls not supported in constant expressions".to_string(),
-                    expr.pos,
-                ));
-            }
+            require_runtime(mode, "function calls", expr.pos)?;
             cg.generate_function_call(name, args, expr.pos)
         }
 
@@ -449,35 +390,7 @@ pub(crate) fn walk_expression<'ctx>(
         } => {
             let val = walk_expression(inner, cg, mode)?;
             let target_llvm = target_type.to_llvm(cg.context)?;
-            match mode {
-                EmitMode::Runtime => {
-                    let e = RuntimeEmitter {
-                        builder: &cg.builder,
-                        context: cg.context,
-                    };
-                    emit_cast_dispatch(
-                        &e,
-                        val,
-                        target_llvm,
-                        &inner.expr_type,
-                        target_type,
-                        inner.pos,
-                    )
-                }
-                EmitMode::Constant => {
-                    let e = ConstantEmitter {
-                        context: cg.context,
-                    };
-                    emit_cast_dispatch(
-                        &e,
-                        val,
-                        target_llvm,
-                        &inner.expr_type,
-                        target_type,
-                        inner.pos,
-                    )
-                }
-            }
+            emitter(cg, mode).emit_cast(val, target_llvm, &inner.expr_type, target_type, inner.pos)
         }
 
         // ── Alloc (both modes — context determines stack vs global) ───────
@@ -489,12 +402,7 @@ pub(crate) fn walk_expression<'ctx>(
             // `!p` on a pointer is a null test: compare the address as an
             // integer against zero (runtime only — pointers don't fold).
             if raw.is_pointer_value() {
-                if mode == EmitMode::Constant {
-                    return Err(CodegenError::InvalidOperation(
-                        "logical NOT of a pointer is not a constant expression".to_string(),
-                        inner.pos,
-                    ));
-                }
+                require_runtime(mode, "logical NOT of a pointer", inner.pos)?;
                 let addr = cg.builder.build_ptr_to_int(
                     raw.into_pointer_value(),
                     cg.context.i64_type(),
@@ -549,12 +457,7 @@ pub(crate) fn walk_expression<'ctx>(
 
         // ── Field access `base.field` (runtime only) ──────────────────────
         ExprKind::FieldAccess { .. } => {
-            if mode == EmitMode::Constant {
-                return Err(CodegenError::InvalidOperation(
-                    "field access not supported in constant expressions".to_string(),
-                    expr.pos,
-                ));
-            }
+            require_runtime(mode, "field access", expr.pos)?;
             let (field_ptr, field_ty) = cg.emit_address(expr)?;
             // Arrays decay to a pointer (matching the variable-load rule);
             // scalars and nested struct values are loaded.
@@ -567,12 +470,7 @@ pub(crate) fn walk_expression<'ctx>(
 
         // ── Struct literal `Name { f = v, ... }` (runtime only) ───────────
         ExprKind::StructLiteral { struct_id, fields } => {
-            if mode == EmitMode::Constant {
-                return Err(CodegenError::InvalidOperation(
-                    "struct literal not supported in constant expressions".to_string(),
-                    expr.pos,
-                ));
-            }
+            require_runtime(mode, "struct literal", expr.pos)?;
             let struct_ty = *cg.struct_types.get(struct_id).ok_or_else(|| {
                 CodegenError::TypeError(
                     format!("unregistered type-struct id {struct_id}"),
@@ -616,12 +514,7 @@ pub(crate) fn walk_expression<'ctx>(
 
         // ── Indirect call through a function-pointer value (runtime only).
         ExprKind::IndirectCall { callee, args } => {
-            if mode == EmitMode::Constant {
-                return Err(CodegenError::InvalidOperation(
-                    "indirect call not supported in constant expressions".to_string(),
-                    expr.pos,
-                ));
-            }
+            require_runtime(mode, "indirect call", expr.pos)?;
             cg.generate_indirect_call(callee, args, expr.pos)
         }
 
@@ -655,6 +548,28 @@ impl<'ctx> CodeGenerator<'ctx> {
         walk_expression(expr, self, EmitMode::Runtime)
     }
 
+    /// Look up the interned global for string literal `index` (registered by
+    /// `generate_string_literal`) and cast it to `u8*`.
+    pub(crate) fn emit_string_ptr(
+        &self,
+        index: usize,
+        mode: EmitMode,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let ptr = self
+            .scope
+            .lookup_global(&Self::string_literal_name(index))
+            .expect("Internal error: String literal global not found")
+            .ptr;
+        let i8_ptr_type = self.context.ptr_type(AddressSpace::default());
+        match mode {
+            EmitMode::Runtime => Ok(self
+                .builder
+                .build_pointer_cast(ptr, i8_ptr_type, "str")?
+                .into()),
+            EmitMode::Constant => Ok(ptr.const_cast(i8_ptr_type).into()),
+        }
+    }
+
     /// Generate an expression, coercing it to `target` when the types differ.
     ///
     /// Integer/float literals assigned to a concrete target type are checked for
@@ -685,11 +600,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         {
             let target_llvm = target_ty.to_llvm(self.context)?;
             if val.get_type() != target_llvm {
-                let e = RuntimeEmitter {
-                    builder: &self.builder,
-                    context: self.context,
-                };
-                return e.emit_cast(val, target_llvm, &expr.expr_type, target_ty, expr.pos);
+                return emitter(self, EmitMode::Runtime).emit_cast(
+                    val,
+                    target_llvm,
+                    &expr.expr_type,
+                    target_ty,
+                    expr.pos,
+                );
             }
         }
 
@@ -767,19 +684,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     pos,
                 )),
             },
-            LiteralValue::String(index) => {
-                let string_name = format!(".str.{index}");
-                let ptr = self
-                    .scope
-                    .lookup_global(&string_name)
-                    .expect("Internal error: String literal global not found")
-                    .ptr;
-                let i8_ptr_type = self.context.ptr_type(AddressSpace::default());
-                Ok(self
-                    .builder
-                    .build_pointer_cast(ptr, i8_ptr_type, "str")?
-                    .into())
-            }
+            LiteralValue::String(index) => self.emit_string_ptr(*index, EmitMode::Runtime),
         }
     }
 

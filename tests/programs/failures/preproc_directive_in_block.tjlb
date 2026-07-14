@@ -1,0 +1,10 @@
+# expected: "top level", "inside a block"
+# Directives are only meaningful at the top level of a file: a line-leading
+# `$` inside a function body (brace depth > 0) is an error.
+
+fn main(u32 argc, u8 **argv) -> i32 {
+$ifdef OS_LINUX
+    return 1
+$endif
+    return 0
+}

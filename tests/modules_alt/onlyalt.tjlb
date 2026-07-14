@@ -1,0 +1,7 @@
+# Exists only in the second fixture root: resolution must fall through the
+# first root's misses and find it here.
+$module onlyalt
+
+fn onlyalt_value() -> i32 {
+    return 5
+}

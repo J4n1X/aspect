@@ -1,0 +1,7 @@
+# Right edge of the diamond import test.
+$module right
+$import base
+
+fn right_value() -> i32 {
+    return base_value() + 2
+}

@@ -1,0 +1,7 @@
+# Search-order fixture: the tests/modules_alt/ copy of `shadow` (see
+# tests/modules/shadow.tjlb).
+$module shadow
+
+fn shadow_value() -> i32 {
+    return 2
+}

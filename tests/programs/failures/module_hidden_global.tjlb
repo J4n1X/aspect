@@ -1,0 +1,10 @@
+# expected: "global variable 'hidden_global' is defined in module 'hidden'", "the root module does not import"
+# compile_args: "-I", "tests/modules"
+# A global from a transitively-loaded module is invisible: the entry
+# imports `middle` only, so reading `hidden`'s global is an error.
+
+$import middle
+
+fn main(u32 argc, u8** argv) -> i32 {
+    return hidden_global
+}

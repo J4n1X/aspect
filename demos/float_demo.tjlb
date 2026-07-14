@@ -9,8 +9,7 @@
   Returns 0 on success, non-zero on any check that fails.
 -#
 
-$include "std/io/print.tjlb"
-$include "std/c/stdlib.tjlb"     # for abort()
+$import std/io
 
 # A quick equality check via comparison-with-tolerance, since exact `==`
 # on float results would be flaky.

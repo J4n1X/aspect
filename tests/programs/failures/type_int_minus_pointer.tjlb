@@ -1,0 +1,10 @@
+# expected: "Cannot apply operator 'Sub'"
+#-
+  `int - ptr` has no meaning (unlike `ptr - int` and `int + ptr`) and must
+  be rejected by the typechecker.
+-#
+fn main() -> i32 {
+    i64[3] arr = {1, 2, 3}
+    i64* p = 2 - arr
+    return 0
+}

@@ -9,12 +9,15 @@
   Iteration order of a hash map is slot order — meaningless — so the
   words are collected, sorted, and only then printed.
 
-  Run:   tjlb-parser interpret demos/wordfreq.tjlb
+  Run:   tjlb-parser interpret -I lib demos/wordfreq.tjlb
 -#
 
-$include "std/io/print.tjlb"
-$include "std/collections/map_str_i64.tjlb"
-$include "std/sort/sort.tjlb"
+$import std/io
+$import std/collections
+$import std/sort
+$import std/c/stdlib    # malloc/free
+$import std/c/string    # strlen
+$import std/c/stdio     # putchar
 
 # for_each callbacks are plain function pointers — no closures — so the
 # collection target lives in globals.

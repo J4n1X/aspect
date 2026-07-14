@@ -1,0 +1,7 @@
+# `$module` is authoritative: `$import badmod` finds this file by path,
+# but its declaration disagrees — that must be a hard error.
+$module actually_other
+
+fn bad_value() -> i32 {
+    return 0
+}

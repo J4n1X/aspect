@@ -32,6 +32,20 @@ pub enum ParserError {
     #[error("Undefined function '{0}' at {1}")]
     UndefinedFunction(String, Position),
 
+    /// A cross-module reference to a symbol whose defining module the use
+    /// site's module does not *directly* import (import visibility is
+    /// non-transitive). `defining`/`referring` arrive pre-rendered —
+    /// `module 'std/math'`, or `the root module` for the anonymous root
+    /// module `""` — via [`ParserError::not_imported`].
+    #[error("{kind} '{name}' is defined in {defining}, which {referring} does not import at {pos}")]
+    NotImported {
+        kind: &'static str,
+        name: String,
+        defining: String,
+        referring: String,
+        pos: Position,
+    },
+
     #[error("Function '{0}' expects {1} arguments but got {2} at {3}")]
     ArgumentCountMismatch(String, usize, usize, Position),
 
@@ -69,6 +83,33 @@ impl ParserError {
         }
     }
 
+    /// Build a [`ParserError::NotImported`], rendering each module path for
+    /// the message: the anonymous root module (the empty string) reads as
+    /// `the root module`, anything else as `module '<path>'`.
+    #[must_use]
+    pub(crate) fn not_imported(
+        kind: &'static str,
+        name: impl Into<String>,
+        defining_module: &str,
+        referring_module: &str,
+        pos: Position,
+    ) -> Self {
+        let describe = |module: &str| {
+            if module.is_empty() {
+                "the root module".to_string()
+            } else {
+                format!("module '{module}'")
+            }
+        };
+        ParserError::NotImported {
+            kind,
+            name: name.into(),
+            defining: describe(defining_module),
+            referring: describe(referring_module),
+            pos,
+        }
+    }
+
     /// Extract the source position from this error, if any.
     #[must_use]
     pub fn position(&self) -> Option<Position> {
@@ -82,6 +123,7 @@ impl ParserError {
             ParserError::TypeMismatch(_, _, pos) => Some(*pos),
             ParserError::UndefinedVariable(_, pos) => Some(*pos),
             ParserError::UndefinedFunction(_, pos) => Some(*pos),
+            ParserError::NotImported { pos, .. } => Some(*pos),
             ParserError::ArgumentCountMismatch(_, _, _, pos) => Some(*pos),
             ParserError::InvalidDereference(pos) => Some(*pos),
             ParserError::FunctionRedefinition(_, pos) => Some(*pos),

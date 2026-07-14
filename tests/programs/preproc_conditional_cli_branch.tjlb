@@ -1,0 +1,23 @@
+# expected: 7
+# compile_args: "-D", "MODE=2"
+# A `-D`-injected define steers the `$if`/`$elseif`/`$else` chain: exactly
+# one `pick` survives preprocessing, and its exit code proves which branch
+# was compiled.
+
+$if MODE == 2
+fn pick() -> i32 {
+    return 7
+}
+$elseif MODE == 1
+fn pick() -> i32 {
+    return 1
+}
+$else
+fn pick() -> i32 {
+    return 0
+}
+$endif
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return pick()
+}

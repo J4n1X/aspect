@@ -1,0 +1,17 @@
+# expected: "private", "Counter", "secret"
+# Calling a private method (no `public`) from outside the type's own methods
+# is rejected — the method twin of the private-field rule. The public factory
+# `make` is reachable; the private `secret` accessor is not.
+type Counter {
+    i32 n
+
+    public fn make(i32 v) -> Counter { return Counter { n = v } }
+
+    const fn secret(this) -> i32 {           # private (no `public`)
+        return this.n
+    }
+}
+fn main(u32 argc, u8 **argv) -> i32 {
+    Counter c = Counter.make(41)
+    return c.secret()                        # error: secret is private here
+}

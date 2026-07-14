@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
-use clap::{Parser as ClapParser, Subcommand, ValueEnum};
+use clap::{Args, Parser as ClapParser, Subcommand, ValueEnum};
 use inkwell::context::Context as LLVMContext;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use tjlb_rust::codegen::CodeGenerator;
-use tjlb_rust::preprocessor::tokenize_file;
-use tjlb_rust::parser::Parser;
+use tjlb_rust::preprocessor::{PreprocessedSource, Preprocessor};
+use tjlb_rust::parser::{Parser, Program};
 use tjlb_rust::typechecker::TypeChecker;
 
 #[derive(ClapParser)]
@@ -23,6 +23,18 @@ enum EmitTarget {
     Exe,
 }
 
+/// Preprocessor flags shared by every subcommand that lexes source.
+#[derive(Args)]
+struct PreprocArgs {
+    /// Preprocessor define: NAME (flag) or NAME=VALUE (repeatable)
+    #[arg(short = 'D', long = "define", value_name = "NAME[=VALUE]")]
+    defines: Vec<String>,
+
+    /// Module search root for `$import` (repeatable; module system pending)
+    #[arg(short = 'I', long = "include-dir", value_name = "DIR")]
+    include_dirs: Vec<PathBuf>,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Tokenize the input file and print tokens
@@ -30,18 +42,27 @@ enum Commands {
         /// Input file path
         #[arg(value_name = "FILE")]
         file: PathBuf,
+
+        #[command(flatten)]
+        preproc: PreprocArgs,
     },
     /// Parse the input file and print the AST
     Parse {
         /// Input file path
         #[arg(value_name = "FILE")]
         file: PathBuf,
+
+        #[command(flatten)]
+        preproc: PreprocArgs,
     },
     /// Compile the input file and emit a selected artifact target
     Compile {
         /// Input file path
         #[arg(value_name = "FILE")]
         file: PathBuf,
+
+        #[command(flatten)]
+        preproc: PreprocArgs,
 
         /// Output target kind
         #[arg(short = 'e', long = "emit", value_enum, default_value_t = EmitTarget::Ir)]
@@ -73,6 +94,9 @@ enum Commands {
         /// Input file path
         #[arg(value_name = "FILE")]
         file: PathBuf,
+
+        #[command(flatten)]
+        preproc: PreprocArgs,
         /// Optimization level (0-3)
         #[arg(
             short = 'O',
@@ -92,31 +116,126 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Lex { file } => lex_file(&file)?,
-        Commands::Parse { file } => parse_file(&file)?,
+        Commands::Lex { file, preproc } => lex_file(&file, &preproc)?,
+        Commands::Parse { file, preproc } => parse_file(&file, &preproc)?,
         Commands::Compile {
             file,
+            preproc,
             emit,
             output,
             print,
             opt_level,
             verify_each,
-        } => compile_file(&file, emit, output.as_deref(), print, opt_level, verify_each)?,
+        } => compile_file(
+            &file,
+            &preproc,
+            emit,
+            output.as_deref(),
+            print,
+            opt_level,
+            verify_each,
+        )?,
         Commands::Interpret {
             file,
+            preproc,
             opt_level,
             program_args,
         } => {
-            interpret_file(&file, opt_level, &program_args)?;
+            interpret_file(&file, &preproc, opt_level, &program_args)?;
         }
     }
 
     Ok(())
 }
 
-fn lex_file(path: &Path) -> Result<()> {
-    let pp = tokenize_file(path)
-        .with_context(|| format!("failed to tokenize '{}'", path.display()))?;
+// ── Shared pipeline stages ───────────────────────────────────────────────────
+
+/// Preprocess `path`: seed `-D` defines and `-I` search roots from the CLI,
+/// then tokenize with directive expansion. Errors are formatted with their
+/// originating file/position via the driver's file registry.
+fn preprocess_source(path: &Path, preproc: &PreprocArgs) -> Result<PreprocessedSource> {
+    let mut pp = Preprocessor::new();
+    for dir in &preproc.include_dirs {
+        pp.add_include_dir(dir.clone());
+    }
+    for spec in &preproc.defines {
+        if let Err(e) = pp.add_cli_define(spec) {
+            anyhow::bail!("{}", pp.format_error(&e));
+        }
+    }
+    pp.preprocess(path)
+        .map_err(|e| anyhow::anyhow!("{}", pp.format_error(&e)))
+        .with_context(|| format!("failed to tokenize '{}'", path.display()))
+}
+
+/// Tokenize `path` (expanding preprocessor directives) and parse it into a
+/// `Program`, formatting parse errors with their originating file/position.
+fn parse_program_from(path: &Path, preproc: &PreprocArgs) -> Result<Program> {
+    let pp = preprocess_source(path, preproc)?;
+
+    let mut parser = Parser::new(pp.tokens)
+        .with_source_files(pp.files)
+        .with_module_info(pp.modules, pp.imports);
+    parser.parse_program().map_err(|errors| {
+        let msgs: Vec<String> = errors.iter().map(|e| parser.format_error(e)).collect();
+        anyhow::anyhow!("{}", msgs.join("\n"))
+    })
+}
+
+/// Full front end: parse, then type-check (stamping resolved types onto the
+/// AST). Every command that reaches codegen goes through here.
+fn build_program(path: &Path, preproc: &PreprocArgs) -> Result<Program> {
+    let mut program = parse_program_from(path, preproc)?;
+
+    let mut typechecker = TypeChecker::new();
+    typechecker.check_program(&mut program).map_err(|errors| {
+        let mut err_msg = String::new();
+        for error in &errors {
+            let _ = writeln!(err_msg, "{}", typechecker.format_error(error));
+        }
+        anyhow::anyhow!(
+            "Type checking failed for '{}':\n{}",
+            path.display(),
+            err_msg.trim_end()
+        )
+    })?;
+
+    Ok(program)
+}
+
+/// Back-end setup shared by `compile` and `interpret`: generate LLVM IR for
+/// `program` (module named after the file stem) and run optimization passes
+/// when `opt_level > 0`.
+fn build_codegen<'ctx>(
+    context: &'ctx LLVMContext,
+    path: &Path,
+    program: &Program,
+    opt_level: u8,
+    verify_each: bool,
+) -> Result<CodeGenerator<'ctx>> {
+    let module_name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("module");
+
+    let mut codegen = CodeGenerator::new(context, module_name);
+    codegen
+        .generate(program)
+        .with_context(|| format!("failed to generate code for '{}'", path.display()))?;
+
+    if opt_level > 0 {
+        codegen
+            .optimize(opt_level, verify_each)
+            .with_context(|| format!("failed to optimize code for '{}'", path.display()))?;
+    }
+
+    Ok(codegen)
+}
+
+// ── Subcommands ──────────────────────────────────────────────────────────────
+
+fn lex_file(path: &Path, preproc: &PreprocArgs) -> Result<()> {
+    let pp = preprocess_source(path, preproc)?;
 
     println!("Tokens:");
     println!("-------");
@@ -137,20 +256,9 @@ fn lex_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn parse_file(path: &Path) -> Result<()> {
-    // Tokenize (expanding any `$include` directives).
-    let pp = tokenize_file(path)
-        .with_context(|| format!("failed to tokenize '{}'", path.display()))?;
+fn parse_file(path: &Path, preproc: &PreprocArgs) -> Result<()> {
+    let program = parse_program_from(path, preproc)?;
 
-    // Parse
-    let mut parser = Parser::new(pp.tokens).with_source_files(pp.files);
-    let parse_result = parser.parse_program();
-    let program = parse_result.map_err(|errors| {
-        let msgs: Vec<String> = errors.iter().map(|e| parser.format_error(e)).collect();
-        anyhow::anyhow!("{}", msgs.join("\n"))
-    })?;
-
-    // Print AST
     println!("Program AST:");
     println!("============\n");
 
@@ -204,57 +312,17 @@ fn parse_file(path: &Path) -> Result<()> {
 
 fn compile_file(
     path: &Path,
+    preproc: &PreprocArgs,
     emit: EmitTarget,
     output: Option<&std::path::Path>,
     print: bool,
     opt_level: u8,
     verify_each: bool,
 ) -> Result<()> {
-    // Tokenize (expanding any `$include` directives).
-    let pp = tokenize_file(path)
-        .with_context(|| format!("failed to tokenize '{}'", path.display()))?;
-
-    // Parse
-    let mut parser = Parser::new(pp.tokens).with_source_files(pp.files);
-    let parse_result = parser.parse_program();
-    let mut program = parse_result.map_err(|errors| {
-        let msgs: Vec<String> = errors.iter().map(|e| parser.format_error(e)).collect();
-        anyhow::anyhow!("{}", msgs.join("\n"))
-    })?;
-
-    let mut typechecker = TypeChecker::new();
-    typechecker.check_program(&mut program).map_err(|errors| {
-        let mut err_msg = String::new();
-        for error in &errors {
-            let _ = writeln!(err_msg, "{}", typechecker.format_error(error));
-        }
-        anyhow::anyhow!(
-            "Type checking failed for '{}':\n{}",
-            path.display(),
-            err_msg.trim_end()
-        )
-    })?;
-
-    // Generate LLVM IR
+    let program = build_program(path, preproc)?;
     let context = LLVMContext::create();
-    let module_name = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("module");
+    let codegen = build_codegen(&context, path, &program, opt_level, verify_each)?;
 
-    let mut codegen = CodeGenerator::new(&context, module_name);
-    codegen
-        .generate(&program)
-        .with_context(|| format!("failed to generate code for '{}'", path.display()))?;
-
-    // Run optimization passes
-    if opt_level > 0 {
-        codegen
-            .optimize(opt_level, verify_each)
-            .with_context(|| format!("failed to optimize code for '{}'", path.display()))?;
-    }
-
-    // Output
     match emit {
         EmitTarget::Ir => {
             if let Some(output_path) = output {
@@ -300,51 +368,15 @@ fn compile_file(
     Ok(())
 }
 
-fn interpret_file(path: &Path, opt_level: u8, program_args: &[String]) -> Result<()> {
-    // Tokenize (expanding any `$include` directives).
-    let pp = tokenize_file(path)
-        .with_context(|| format!("failed to tokenize '{}'", path.display()))?;
-
-    // Parse
-    let mut parser = Parser::new(pp.tokens).with_source_files(pp.files);
-    let parse_result = parser.parse_program();
-    let mut program = parse_result.map_err(|errors| {
-        let msgs: Vec<String> = errors.iter().map(|e| parser.format_error(e)).collect();
-        anyhow::anyhow!("{}", msgs.join("\n"))
-    })?;
-
-    // Type check
-    let mut typechecker = TypeChecker::new();
-    typechecker.check_program(&mut program).map_err(|errors| {
-        let mut err_msg = String::new();
-        for error in &errors {
-            let _ = writeln!(err_msg, "{}", typechecker.format_error(error));
-        }
-        anyhow::anyhow!(
-            "Type checking failed for '{}':\n{}",
-            path.display(),
-            err_msg.trim_end()
-        )
-    })?;
-
-    // Generate LLVM IR
+fn interpret_file(
+    path: &Path,
+    preproc: &PreprocArgs,
+    opt_level: u8,
+    program_args: &[String],
+) -> Result<()> {
+    let program = build_program(path, preproc)?;
     let context = LLVMContext::create();
-    let module_name = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("module");
-
-    let mut codegen = CodeGenerator::new(&context, module_name);
-    codegen
-        .generate(&program)
-        .with_context(|| format!("failed to generate code for '{}'", path.display()))?;
-
-    // Run optimization passes
-    if opt_level > 0 {
-        codegen
-            .optimize(opt_level, false)
-            .with_context(|| format!("failed to optimize code for '{}'", path.display()))?;
-    }
+    let codegen = build_codegen(&context, path, &program, opt_level, false)?;
 
     // argv[0] is the source path by C convention; user args follow.
     let path_str = path.display().to_string();

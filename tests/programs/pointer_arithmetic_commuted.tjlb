@@ -1,0 +1,14 @@
+# expected: 42
+#-
+  Commuted pointer arithmetic: `int + ptr` must behave exactly like
+  `ptr + int` (regression: it used to panic in codegen because only the
+  left operand was checked for pointer-ness).
+-#
+fn main(u32 argc, u8** argv) -> i32 {
+    i64[3] arr = {10, 20, 30}
+    i64* p = 1 + arr
+    i64 a = *p
+    i64 b = *(1 + p)
+    i64 c = *(p - 1)
+    return (a + b + c - 18) as i32
+}

@@ -1,5 +1,0 @@
-# A helper file pulled in via `$include`. No `# expected:` line → the test
-# harness silently skips this one (it isn't a standalone program).
-fn cube(i32 x) -> i32 {
-    return x * x * x
-}

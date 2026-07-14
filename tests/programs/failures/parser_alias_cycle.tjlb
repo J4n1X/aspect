@@ -1,0 +1,11 @@
+# expected: "Undefined type"
+#-
+  Cyclic aliases can never resolve: the alias prescan reaches a fixpoint
+  with both unresolved, and pass 1 reports the dangling target.
+-#
+alias A B
+alias B A
+
+fn main() -> i32 {
+    return 0
+}

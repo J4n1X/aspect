@@ -13,6 +13,12 @@ tjlb-rust/
 │   │   ├── scanner.rs       # Lexer implementation
 │   │   ├── tokens.rs        # Token and type definitions
 │   │   └── errors.rs        # Lexer error types
+│   ├── preprocessor/        # $-directive expansion over the token stream
+│   │   ├── mod.rs           # Driver: line-anchored dispatch
+│   │   ├── defines.rs       # $define/$undefine, -D, platform defines
+│   │   ├── conditional.rs   # $ifdef/$if chains + const evaluator
+│   │   ├── modules.rs       # $module/$import, -I resolution
+│   │   └── errors.rs        # Preprocessor error types
 │   ├── parser/              # AST construction
 │   │   ├── ast.rs           # AST node types
 │   │   ├── expressions.rs   # Expression parsing (Pratt-style)
@@ -31,7 +37,9 @@ tjlb-rust/
 │       └── errors.rs        # Codegen error types
 ├── tests/
 │   ├── integration_tests.rs # Integration test suite
-│   └── programs/            # .tjlb test programs
+│   ├── programs/            # .tjlb test programs
+│   └── modules/             # module fixtures imported by test programs
+├── lib/                     # The standard library (lib/std/**), pass -I lib
 ├── doc/                     # This documentation
 ├── Cargo.toml               # Dependencies and features
 └── compile-file.sh          # Native compilation script
@@ -39,34 +47,36 @@ tjlb-rust/
 
 ## Compilation Pipeline
 
-The compiler runs a 5-stage pipeline:
+The compiler runs a 6-stage pipeline:
 
 ```
 Source (.tjlb)
     │
     ▼
-┌──────────┐   Vec<Token>
-│  Lexer   │ ──────────────┐
-└──────────┘               │
-                           ▼
-                     ┌──────────┐   Program (AST)
-                     │  Parser  │ ──────────────┐
-                     └──────────┘               │
-                                                ▼
-                                          ┌───────────────┐   Ok / Vec<Error>
-                                          │ Type Checker   │ ──────────────┐
-                                          └───────────────┘               │
-                                                                          ▼
-                                                                    ┌──────────┐   Module
-                                                                    │ Codegen  │ ─────────┐
-                                                                    └──────────┘          │
-                                                                                          ▼
-                                                                                    ┌──────────┐
-                                                                                    │ Optimize │
-                                                                                    └──────────┘
-                                                                                          │
-                                                                                          ▼
-                                                                                    LLVM IR (.ll)
+┌──────────┐  Vec<Token>  ┌──────────────┐  expanded Vec<Token>
+│  Lexer   │ ───────────▶ │ Preprocessor │ ──────────────┐
+└──────────┘              └──────────────┘               │
+     ▲                          │ $import loads          │
+     └──────────────────────────┘ more files             ▼
+                                                   ┌──────────┐   Program (AST)
+                                                   │  Parser  │ ──────────────┐
+                                                   └──────────┘               │
+                                                                              ▼
+                                                                      ┌──────────────┐
+                                                                      │ Type Checker │
+                                                                      └──────────────┘
+                                                                              │ Ok / Vec<Error>
+                                                                              ▼
+                                                                        ┌──────────┐   Module
+                                                                        │ Codegen  │ ─────────┐
+                                                                        └──────────┘          │
+                                                                                              ▼
+                                                                                        ┌──────────┐
+                                                                                        │ Optimize │
+                                                                                        └──────────┘
+                                                                                              │
+                                                                                              ▼
+                                                                                        LLVM IR (.ll)
 ```
 
 ### Stage 1: Lexing (`src/lexer/`)
@@ -81,7 +91,21 @@ Tokenizes source text into a flat `Vec<Token>`. Handles:
 
 See [01-lexer.md](01-lexer.md).
 
-### Stage 2: Parsing (`src/parser/`)
+### Stage 2: Preprocessing (`src/preprocessor/`)
+
+Walks the token stream expanding line-anchored `$` directives before the
+parser sees it:
+- `$define`/`$undefine` + `-D` CLI defines + platform defines (`OS_LINUX`, `ARCH_X86_64`, …), identifier-token substitution
+- `$ifdef`/`$ifndef`/`$if`/`$elseif`/`$elseifdef`/`$else`/`$endif` conditional chains with a constant-expression evaluator
+- `$module`/`$import` — module identity and loading, resolved against `-I` search roots; imported files recurse through the lexer and preprocessor
+
+Output is a single expanded token stream plus a file registry (positions
+carry a `file_id`, so downstream errors name the right file) and the
+module/import tables the parser's visibility check consumes.
+
+See [09-syntax-reference.md](09-syntax-reference.md) § Preprocessor and [10-modules.md](10-modules.md).
+
+### Stage 3: Parsing (`src/parser/`)
 
 Recursive descent parser with precedence climbing for expressions. Produces:
 - `Program` containing `Vec<Function>`, `Vec<GlobalVar>`, and `Vec<String>` (string literal table)
@@ -90,7 +114,7 @@ Recursive descent parser with precedence climbing for expressions. Produces:
 
 See [02-parser.md](02-parser.md) and [03-ast.md](03-ast.md).
 
-### Stage 3: Type Checking (`src/typechecker/`)
+### Stage 4: Type Checking (`src/typechecker/`)
 
 Constraint-based type checker in three phases:
 1. Register all function signatures and global variable types
@@ -107,7 +131,7 @@ Type errors are **fatal** — any error aborts compilation. The checker validate
 
 See [05-typechecker.md](05-typechecker.md).
 
-### Stage 4: Code Generation (`src/codegen/`)
+### Stage 5: Code Generation (`src/codegen/`)
 
 Emits LLVM IR via Inkwell (pinned to LLVM 19.1). Key design:
 - Two-pass function compilation: declare all signatures first, then generate bodies (enables forward references)
@@ -117,7 +141,7 @@ Emits LLVM IR via Inkwell (pinned to LLVM 19.1). Key design:
 
 See [06-codegen.md](06-codegen.md).
 
-### Stage 5: Optimization (optional)
+### Stage 6: Optimization (optional)
 
 Runs LLVM's new pass manager with pipeline strings `default<O0>` through `default<O3>`.
 
@@ -149,6 +173,14 @@ cargo run -- interpret <FILE> [-O LEVEL] [-- ARGS...]
 
 # Compile to native executable
 ./compile-file.sh program.tjlb   # produces program.out
+```
+
+Every subcommand also takes the preprocessor flags `-D NAME[=VALUE]`
+(inject a define, repeatable) and `-I DIR` (module search root,
+repeatable). Programs that `$import std/...` need `-I lib`:
+
+```bash
+cargo run -- interpret -I lib demos/hello.tjlb
 ```
 
 ## Library Exports

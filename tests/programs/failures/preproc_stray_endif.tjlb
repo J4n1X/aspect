@@ -1,0 +1,8 @@
+# expected: "stray", "$endif"
+# A `$endif` with no open `$if`/`$ifdef`/`$ifndef` chain is an error.
+
+$endif
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

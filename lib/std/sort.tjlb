@@ -1,0 +1,147 @@
+#-
+  std/sort — generic in-place sorting, C-qsort style.
+
+  The element type is erased: `sort_bytes` sees an opaque base pointer,
+  an element count, an element byte size, and a comparator function
+  pointer. That combination is what makes one sort routine serve every
+  type in a language without generics — the same trick libc's qsort has
+  pulled since 1979, here expressed with tjlb function pointers and the
+  `u0*` opaque pointer type.
+
+      sort_bytes(xs, n, sizeof(i32), &cmp_i32_asc)          # i32[N] decays
+      sort_bytes(people, n, sizeof(Person), &cmp_person)    # Person* passes as-is
+
+  A comparator receives pointers to two ELEMENTS and returns <0 / 0 / >0.
+  The `u0*` arguments are deliberately unusable until cast: for an array
+  of `T` cast to `T*`, for an array of pointers (e.g. strings) cast to a
+  pointer-to-pointer (see `cmp_cstr_asc`).
+
+  Algorithm: recursive quicksort (middle-element pivot, Lomuto partition)
+  dropping to insertion sort below 16 elements. Not stable.
+-#
+$module std/sort
+
+$import std/c/string
+
+alias Comparator fn(u0*, u0*) -> i32
+
+# ── internals (typed u8* for byte arithmetic) ───────────────────────────
+
+# Byte-wise element swap — no temp allocation, works for any element size.
+fn swap_bytes(u8* a, u8* b, u64 size) {
+    for (u64 k = 0; k < size; k += 1) {
+        u8 t = a[k]
+        a[k] = b[k]
+        b[k] = t
+    }
+}
+
+# Insertion sort on elements [lo, hi] (inclusive). Fast for short runs.
+fn insertion_range(u8* base, u64 lo, u64 hi, u64 size, Comparator cmp) {
+    for (u64 i = lo + 1; i <= hi; i += 1) {
+        u64 j = i
+        while j > lo {
+            u8* prev = base + (j - 1) * size
+            u8* cur = base + j * size
+            if cmp(prev, cur) <= 0 { break }
+            swap_bytes(prev, cur, size)
+            j = j - 1
+        }
+    }
+}
+
+# Quicksort on elements [lo, hi] (inclusive). Middle pivot moved to the
+# end, Lomuto partition, self-recursion on both halves.
+fn quicksort_range(u8* base, u64 lo, u64 hi, u64 size, Comparator cmp) {
+    if hi <= lo { return; }
+    if hi - lo < 16 {
+        insertion_range(base, lo, hi, size, cmp)
+        return
+    }
+
+    u64 mid = lo + (hi - lo) / 2
+    swap_bytes(base + mid * size, base + hi * size, size)   # pivot -> end
+    u8* pivot = base + hi * size
+
+    u64 store = lo
+    for (u64 i = lo; i < hi; i += 1) {
+        if cmp(base + i * size, pivot) < 0 {
+            swap_bytes(base + i * size, base + store * size, size)
+            store = store + 1
+        }
+    }
+    swap_bytes(base + store * size, pivot, size)
+
+    if store > lo { quicksort_range(base, lo, store - 1, size, cmp) }
+    quicksort_range(base, store + 1, hi, size, cmp)
+}
+
+# ── entry point ─────────────────────────────────────────────────────────
+
+# Sort `n` elements of `size` bytes starting at `base`, ordered by `cmp`.
+fn sort_bytes(u0* base, u64 n, u64 size, Comparator cmp) {
+    if n < 2 { return; }
+    quicksort_range(base as u8*, 0, n - 1, size, cmp)
+}
+
+# ── stock comparators ───────────────────────────────────────────────────
+
+fn cmp_i32_asc(u0* a, u0* b) -> i32 {
+    i32 x = *(a as i32*)
+    i32 y = *(b as i32*)
+    if x < y { return 0 - 1 }
+    if x > y { return 1 }
+    return 0
+}
+
+fn cmp_i32_desc(u0* a, u0* b) -> i32 {
+    return cmp_i32_asc(b, a)
+}
+
+fn cmp_i64_asc(u0* a, u0* b) -> i32 {
+    i64 x = *(a as i64*)
+    i64 y = *(b as i64*)
+    if x < y { return 0 - 1 }
+    if x > y { return 1 }
+    return 0
+}
+
+fn cmp_u64_asc(u0* a, u0* b) -> i32 {
+    u64 x = *(a as u64*)
+    u64 y = *(b as u64*)
+    if x < y { return 0 - 1 }
+    if x > y { return 1 }
+    return 0
+}
+
+fn cmp_f64_asc(u0* a, u0* b) -> i32 {
+    f64 x = *(a as f64*)
+    f64 y = *(b as f64*)
+    if x < y { return 0 - 1 }
+    if x > y { return 1 }
+    return 0
+}
+
+# Elements are `u8*` (C strings), so a and b are pointers to pointers.
+fn cmp_cstr_asc(u0* a, u0* b) -> i32 {
+    return strcmp(*(a as u8**), *(b as u8**))
+}
+
+# ── typed conveniences ──────────────────────────────────────────────────
+
+fn sort_i32(i32* xs, u64 n) {
+    sort_bytes(xs, n, sizeof(i32), &cmp_i32_asc)
+}
+
+fn sort_i64(i64* xs, u64 n) {
+    sort_bytes(xs, n, sizeof(i64), &cmp_i64_asc)
+}
+
+fn sort_f64(f64* xs, u64 n) {
+    sort_bytes(xs, n, sizeof(f64), &cmp_f64_asc)
+}
+
+# Sort an array of C strings in strcmp order.
+fn sort_cstr(u8** xs, u64 n) {
+    sort_bytes(xs, n, sizeof(u8*), &cmp_cstr_asc)
+}

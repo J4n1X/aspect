@@ -341,7 +341,7 @@ After both phases land, tjlb has:
 - Range-constrained values — bounds checks become contracts at
   boundaries, not bodies.
 - The full existing language: type-structs, methods, fn-pointers,
-  sum types (whenever we add them), `$include`, sizeof, the
+  sum types (whenever we add them), `$import` modules, sizeof, the
   stdlib.
 
 The single-sentence pitch holds: **a small systems language where

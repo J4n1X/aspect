@@ -16,10 +16,10 @@
     * Errors (bad chars, unbalanced parens, division by zero, trailing
       garbage) travel in the result struct, not in an exit().
 
-  Run:   tjlb-parser interpret demos/calc.tjlb
+  Run:   tjlb-parser interpret -I lib demos/calc.tjlb
 -#
 
-$include "std/io/print.tjlb"
+$import std/io
 
 type EvalResult {
     public i64 value
@@ -124,7 +124,7 @@ type Calc {
 
     # ── entry point ─────────────────────────────────────────────────────
 
-    fn eval(u8* src) -> EvalResult {
+    public fn eval(u8* src) -> EvalResult {
         Calc c = Calc { src = src, pos = 0, err = false }
         i64 v = c.parse(1)
         c.skip_ws()

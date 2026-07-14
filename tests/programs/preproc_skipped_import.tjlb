@@ -1,0 +1,13 @@
+# expected: 7
+#-
+  Cross-feature (conditionals x modules): a `$import` inside a skipped
+  conditional branch is inert — the module is never resolved. It doesn't
+  even exist, so reaching resolution would fail the compile.
+-#
+$ifdef NEVER_DEFINED
+$import does/not/exist
+$endif
+
+fn main(u32 argc, u8** argv) -> i32 {
+    return 7
+}

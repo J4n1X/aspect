@@ -1,0 +1,13 @@
+# expected: 16
+# compile_args: "-D", "BUCKETS=16"
+# The `$ifndef` overridable-default pattern, overridden: `-D BUCKETS=16`
+# defines the name first, the guarded `$define` is skipped (so no
+# redefinition error), and the CLI value wins.
+
+$ifndef BUCKETS
+$define BUCKETS 4
+$endif
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return BUCKETS
+}

@@ -1,0 +1,10 @@
+# expected: "redefinition", "MAX_SIZE", "previously defined at"
+# `$define` of an already-defined name is a hard error (uniform rule) —
+# use `$undefine` first; overridable defaults will use the `$ifndef`
+# guard once conditionals land.
+$define MAX_SIZE 1024
+$define MAX_SIZE 2048
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

@@ -1,0 +1,17 @@
+# expected: 1
+# Platform smoke test: the compiler seeds OS_LINUX on Linux (where CI
+# runs), so `$ifdef OS_LINUX` must select the passing branch.
+
+$ifdef OS_LINUX
+fn platform_code() -> i32 {
+    return 1
+}
+$else
+fn platform_code() -> i32 {
+    return 0
+}
+$endif
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return platform_code()
+}

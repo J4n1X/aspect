@@ -16,7 +16,7 @@ source path as `argv[0]` and forwards any `# run_args:` entries as `argv[1..]`.
 Test functions are **generated at compile time** by the `generate_tests!()` proc macro defined in `tjlb-macros/src/generate_tests.rs`. The macro:
 
 1. Scans `tests/programs/` recursively for `*.tjlb` files.
-2. Reads the first 10 lines of each file looking for `# expected:` and `# run_args:` annotations.
+2. Reads the first 10 lines of each file looking for `# expected:`, `# run_args:`, and `# compile_args:` annotations.
 3. Emits one `#[test]` function per annotated file.
 
 At runtime each generated test calls the appropriate helper:
@@ -30,6 +30,7 @@ At runtime each generated test calls the appropriate helper:
 # expected: 42                         # compile & run; assert main's i32 return == 42
 # expected: "frag1", "frag2"           # compile only; assert error contains each fragment
 # run_args: "arg1", "arg2"            # optional: forwarded as argv[1..] to main
+# compile_args: "-I", "lib"           # optional: compiler flags (-D/-I), mirroring the CLI
 ```
 
 Files without a `# expected:` line are silently skipped by the macro.
@@ -40,9 +41,11 @@ Create a `.tjlb` file anywhere under `tests/programs/`, add a `# expected:` line
 
 `tests/programs/` is the **only** scan root. The `demos/` folder is
 deliberately not scanned — demos are showcase programs, not regression
-tests. The shared demo standard library (`demos/std/**`) *is* covered,
-via `tests/programs/stdlib_check.tjlb`, which `$include`s it across the
-tree boundary.
+tests. The standard library (`lib/std/**`) they share *is* covered, via
+`tests/programs/stdlib_check.tjlb`, which `$import`s it with
+`# compile_args: "-I", "lib"`. Module fixtures for import tests live in
+`tests/modules/` (and `tests/modules_alt/` for search-order tests); they
+carry no `# expected:` line and are only loaded via `$import`.
 
 ### Argument Passing
 

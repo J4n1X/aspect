@@ -15,8 +15,8 @@
   harness can sanity-check exit codes.
 -#
 
-$include "std/string/String.tjlb"
-$include "std/io/print.tjlb"
+$import std/string
+$import std/io
 
 fn main(u32 argc, u8** argv) -> i32 {
     String s = String.from_cstring("hello")

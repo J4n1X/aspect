@@ -162,7 +162,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(function)
     }
 
-    /// Generate code for a statement
     pub(crate) fn generate_function(&mut self, func: &Function) -> Result<(), CodegenError> {
         let function = *self.functions.get(&func.proto.name).ok_or_else(|| {
             CodegenError::UndefinedFunction(func.proto.name.clone(), func.proto.pos)
@@ -171,11 +170,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut scope = FunctionScope::new(self, function, func.proto.return_type);
         let cg = &mut scope.cg;
 
-        // Create entry block
         let entry_block = cg.context.append_basic_block(function, "entry");
         cg.builder.position_at_end(entry_block);
 
-        // Enter function scope
         cg.enter_scope();
 
         // Capture the hidden sret out-pointer (param 0) for struct returns.

@@ -1,15 +1,18 @@
 # expected: 0
+# compile_args: "-I", "lib"
 #-
-  stdlib_check.tjlb — regression coverage for the demo standard library
-  (demos/std/**). Demos themselves are showcase programs and are NOT part
-  of the test suite; the library they share is, via this file. Returns
-  the number of failed checks (0 = all good).
+  stdlib_check.tjlb — regression coverage for the standard library
+  (lib/std/**). Demos are showcase programs and are NOT part of the test
+  suite; the library they share is, via this file. Returns the number of
+  failed checks (0 = all good).
 -#
-$include "../../demos/std/math/math.tjlb"
-$include "../../demos/std/rand/rand.tjlb"
-$include "../../demos/std/sort/sort.tjlb"
-$include "../../demos/std/collections/map_str_i64.tjlb"
-$include "../../demos/std/io/print.tjlb"
+$import std/math
+$import std/rand
+$import std/sort
+$import std/collections
+$import std/io
+$import std/c/stdlib    # malloc/free used directly below
+$import std/c/string    # strcmp used directly below
 
 fn check(bool ok, u8* label) -> i32 {
     if ok {

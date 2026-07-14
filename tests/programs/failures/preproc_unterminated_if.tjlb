@@ -1,0 +1,9 @@
+# expected: "unterminated", "$if", "missing"
+# A chain still open at the end of its file is an error naming the opening
+# directive's position.
+
+$if 1
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

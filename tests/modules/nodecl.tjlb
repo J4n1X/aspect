@@ -1,0 +1,6 @@
+# A file loaded for an import must declare its module; this one doesn't —
+# `$import nodecl` must be a hard error.
+
+fn nodecl_value() -> i32 {
+    return 0
+}

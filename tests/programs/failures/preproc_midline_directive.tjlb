@@ -1,0 +1,9 @@
+# expected: "directives must start a line"
+# Directives are line-anchored: `$` must be the first token on its line.
+# A mid-line `$` is an error (this tightens the first-cut behaviour,
+# where directives were recognised anywhere in the stream).
+i32 x = 0 $define MAX_SIZE 1024
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return x
+}

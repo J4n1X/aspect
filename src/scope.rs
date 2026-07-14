@@ -63,6 +63,18 @@ impl<T> ScopeStack<T> {
         self.scopes.iter().rev().find_map(|scope| scope.get(name))
     }
 
+    /// Like [`ScopeStack::lookup`], additionally reporting whether the
+    /// binding found lives in the outermost (global) scope. A local that
+    /// shadows a global reports `false`.
+    #[must_use]
+    pub fn lookup_scoped(&self, name: &str) -> Option<(&T, bool)> {
+        self.scopes
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(depth, scope)| scope.get(name).map(|value| (value, depth == 0)))
+    }
+
     /// Iterate over the scopes, innermost first.
     pub fn iter_scopes(&self) -> impl Iterator<Item = &HashMap<String, T>> {
         self.scopes.iter().rev()

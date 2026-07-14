@@ -5,8 +5,8 @@
   (190 + 20 = 210). Touches push *and* pop *and* iteration via `at`.
 -#
 
-$include "std/vec/vec_i32.tjlb"
-$include "std/io/print.tjlb"
+$import std/vec
+$import std/io
 
 fn main(u32 argc, u8** argv) -> i32 {
     VecI32 v = VecI32.new()

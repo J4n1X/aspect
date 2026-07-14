@@ -1,0 +1,8 @@
+# expected: "Undefined function 'no_such_fn'"
+#-
+  A call to a name that is defined nowhere in the file must still fail at
+  parse time, even with two-pass prototype registration.
+-#
+fn main() -> i32 {
+    return no_such_fn(1)
+}

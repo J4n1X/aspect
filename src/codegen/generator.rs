@@ -75,7 +75,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         let module = context.create_module(module_name);
         let builder = context.create_builder();
 
-        // Initialize target
         Target::initialize_native(&InitializationConfig::default())
             .expect("Failed to initialize native target");
 
@@ -191,7 +190,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             None => err.to_string(),
         }
     }
-    /// Get the LLVM module
     pub fn module(&self) -> &Module<'ctx> {
         &self.module
     }
@@ -224,7 +222,6 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let target_machine = self.get_target_machine();
 
-        // Build the pass pipeline string based on optimization level
         let passes = match level {
             1 => "default<O1>",
             3 => "default<O3>",

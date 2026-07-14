@@ -6,7 +6,6 @@ use crate::codegen::expressions::{walk_expression, EmitMode};
 use crate::codegen::generator::CodeGenerator;
 use crate::codegen::scope::GlobalVarInfo;
 use crate::codegen::{CodegenError, LangTypeExt};
-use crate::lexer::TypeBase;
 use crate::parser::{ExprKind, Expression, GlobalVar, LangType};
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -58,9 +57,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
+    /// Interned-global name of the `index`-th string literal. The single
+    /// authority for the naming scheme shared with `emit_string_ptr`.
+    pub(crate) fn string_literal_name(index: usize) -> String {
+        format!(".str.{index}")
+    }
+
     /// Generate a string literal
     pub(crate) fn generate_string_literal(&mut self, index: usize, value: &str) {
-        let string_name = format!(".str.{index}");
+        let string_name = Self::string_literal_name(index);
         let string_value = self.context.const_string(value.as_bytes(), true);
         let global_string = self.module.add_global(
             string_value.get_type(),
@@ -76,7 +81,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             GlobalVarInfo {
                 ptr: global_string.as_pointer_value(),
                 llvm_type: ptr_ty.into(),
-                lang_type: LangType::new(TypeBase::UInt, 8, 1, false),
+                lang_type: LangType::U8_PTR,
             },
         );
     }

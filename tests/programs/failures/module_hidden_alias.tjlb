@@ -1,0 +1,11 @@
+# expected: "type alias 'HiddenInt' is defined in module 'hidden'", "the root module does not import"
+# compile_args: "-I", "tests/modules"
+# A type alias from a transitively-loaded module is invisible: the entry
+# imports `middle` only, so naming `hidden`'s alias is an error.
+
+$import middle
+
+fn main(u32 argc, u8** argv) -> i32 {
+    HiddenInt x = 2
+    return x as i32
+}

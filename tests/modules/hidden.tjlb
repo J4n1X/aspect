@@ -1,0 +1,24 @@
+# Bottom of the visibility chain: `middle` imports this module and may use
+# everything in it; the test entry files import only `middle`, so every
+# kind of symbol here — function, type-struct, alias, global — must be
+# invisible to them (imports do not trickle down).
+$module hidden
+
+alias HiddenInt i64
+
+type HiddenBox {
+    public i32 stored
+
+    public fn make(i32 v) -> HiddenBox {
+        return HiddenBox { stored = v }
+    }
+    public const fn get(this) -> i32 {
+        return this.stored
+    }
+}
+
+i32 hidden_global = 41
+
+fn hidden_value() -> i32 {
+    return 6
+}

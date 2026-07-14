@@ -14,14 +14,18 @@ Formal grammar and lexical specification for the TJLB language.
    - [Types as tokens](#types-as-tokens)
    - [Literals](#literals)
    - [Operators and punctuation](#operators-and-punctuation)
-3. [Grammar (EBNF)](#grammar-ebnf)
+3. [Preprocessor](#preprocessor)
+   - [Defines](#defines)
+   - [Conditionals](#conditionals)
+   - [Modules](#modules)
+4. [Grammar (EBNF)](#grammar-ebnf)
    - [Top level](#top-level)
    - [Types](#types)
    - [Statements](#statements)
    - [Expressions](#expressions)
-4. [Operator precedence](#operator-precedence)
-5. [Scoping rules](#scoping-rules)
-6. [Notable constraints](#notable-constraints)
+5. [Operator precedence](#operator-precedence)
+6. [Scoping rules](#scoping-rules)
+7. [Notable constraints](#notable-constraints)
 
 ---
 
@@ -233,25 +237,114 @@ Supported escape sequences: `\n` `\r` `\t` `\\` `\"`
 
 ## Preprocessor
 
-Before the parser runs, a small preprocessor stage walks the token stream
-and expands `$<directive>` forms. The dollar sigil was chosen because `#`
-is already taken by line comments. Currently one directive is supported:
+Before the parser runs, a preprocessor stage walks the token stream and
+expands `$<directive>` lines in place. The dollar sigil was chosen because
+`#` is already taken by line comments; `@` is reserved wholesale for the
+metasystem (attributes/transforms) and never interpreted here. The
+preprocessor is **token-level**: it operates on the lexer's output, so
+substitution is word-boundary-safe and can never rewrite string literals.
 
+Directives are **line-anchored**: `$` must be the first token on its line
+(leading whitespace is fine), and everything up to the newline belongs to
+the directive. A `$` anywhere else on a line is an error, as is a
+line-leading `$` inside a block — directives only exist at the top level
+of a file. Unknown directive names error with a did-you-mean suggestion.
+
+The directive families:
+
+| Directives | Purpose |
+|---|---|
+| `$define` / `$undefine` | object-like defines and substitution |
+| `$ifdef` `$ifndef` `$if` `$elseif` `$elseifdef` `$else` `$endif` | conditional compilation |
+| `$module` / `$import` | module identity and loading — see [10-modules.md](10-modules.md) |
+
+### Defines
+
+```tjlb
+$define DEBUG                      # flag define (no value)
+$define MAX_SIZE 1024              # value = rest-of-line token sequence
+$define GREETING "hello"           # any tokens, string literals included
+$undefine DEBUG                    # removes; no-op if not defined
 ```
-$include "path"
+
+- **Object-like only.** There are no function-like macros — parameterised
+  code generation is the metasystem's job; the preprocessor will not grow
+  a second macro language.
+- Substitution is by identifier token: wherever the name appears as an
+  `Identifier`, the define's token sequence is spliced in (substituted
+  tokens keep the use-site position). Substitution is recursive, but a
+  name expands at most once per chain (self-reference guard, like C).
+  Token-level substitution means `u8[MAX_SIZE]` works: the array size is
+  its own token.
+- **Redefinition is an error** — `$undefine` first. `-D` definitions count
+  as prior defines, so a file-level `$define` of a `-D`-injected name is
+  the same error. Files that want overridable defaults write the guard:
+
+  ```tjlb
+  $ifndef MAX_SIZE
+  $define MAX_SIZE 1024
+  $endif
+  ```
+- Defines are global once made: a define is visible in every file
+  processed after it, imported files included.
+
+**Compiler-provided defines**, seeded before anything else:
+
+| Define | When |
+|---|---|
+| `OS_LINUX` / `OS_WINDOWS` / `OS_MACOS` | target OS |
+| `ARCH_X86_64` / `ARCH_AARCH64` | target arch |
+| `TJLB_VERSION_MAJOR` / `TJLB_VERSION_MINOR` | compiler version, integer tokens |
+
+**CLI:** `-D NAME` and `-D NAME=VALUE` (repeatable) inject defines before
+the entry file is processed — the standard build-system hook.
+
+### Conditionals
+
+```tjlb
+$ifdef OS_LINUX
+    extern fn epoll_create1(i32 flags) -> i32
+$elseifdef OS_MACOS
+    extern fn kqueue() -> i32
+$else
+    # portable fallback
+$endif
+
+$if MAX_SIZE > 4096
+    const u64 BUCKETS = 64
+$elseif MAX_SIZE > 512
+    const u64 BUCKETS = 16
+$else
+    const u64 BUCKETS = 4
+$endif
 ```
 
-The string literal names a source file whose tokens are spliced in at the
-directive's position. Paths are resolved **relative to the file containing
-the directive**, mirroring C-family preprocessors. Inclusion is recursive
-(included files may themselves `$include`), and a file's canonicalised
-path is recorded the first time it expands — subsequent references to the
-same file are silent no-ops, so mutually-referential headers don't loop
-without you writing `$ifndef` guards.
+- `$ifdef NAME` / `$ifndef NAME` — true iff NAME is (not) defined. There
+  is no `$elseifndef`; chains spell it `$elseif !defined(NAME)`.
+- `$if EXPR` — EXPR is a **constant integer expression** over integer
+  literals, defined names (substituted first; must expand to constant
+  integer expressions), `defined(NAME)` (1 or 0), the operators
+  `+ - * / % << >> & | ^ ! && || == != < > <= >=`, and parentheses.
+  **Undefined identifiers in an `$if` are an error**, not silently 0 —
+  C's silent-zero rule is a famous bug factory. Division by zero is also
+  an error.
+- Chain form: `$if`/`$ifdef`/`$ifndef`, then any mix of
+  `$elseif`/`$elseifdef`, at most one `$else`, closed by `$endif`.
+  Exactly one branch of a chain is active — the first whose condition
+  holds (or the `$else` if none did).
+- Chains nest arbitrarily. Inside a skipped branch, ordinary tokens are
+  dropped and non-conditional directives are inert (`$define` does not
+  define, `$import` does not resolve, unknown names do not error), but
+  the conditional directives themselves are still tracked so nesting
+  stays matched. `$endif` must always match up; a chain must open and
+  close within one file.
 
-Implementation note: `$include` is processed at the *token* layer, so it
-isn't syntactically restricted to the top level. The recommended placement
-is between top-level items.
+### Modules
+
+`$module <path>` declares the module a file belongs to; `$import <path>`
+makes a module part of the compilation, resolved against the `-I` search
+roots. Modules are the language's load unit and visibility boundary —
+they get their own chapter: [10-modules.md](10-modules.md).
 
 ## Grammar (EBNF)
 
@@ -279,10 +372,14 @@ struct-decl ::= 'type' ident '{'
                   newline* (struct-method (term newline*)?)*
                 '}'
 struct-field  ::= 'public'? type ident                     # fields are private unless `public`
-struct-method ::= 'const'? 'fn' ident '(' method-params ')' return-ann? newline* block
+struct-method ::= 'public'? 'const'? 'fn' ident '(' method-params ')' return-ann? newline* block
 method-params ::= /* empty */
                 | 'this' (',' param-list)?                 # instance method
                 | param-list                               # static method (no `this`)
+# `public` opts a method into external access; like fields, methods are
+# private by default. A `public fn(T) -> R name` *field* (function-pointer
+# type) is told apart from a `public fn name(...)` *method* by the token after
+# `fn` — a name means method, `(` means a fn-pointer field type.
 # `const fn` requires `this`; field access through it propagates const, so
 # any `this.field = ...` is rejected. Fields must come before methods.
 
@@ -374,10 +471,14 @@ static method as `T.m(...)`. A static-form call to an instance method (UFCS-styl
 `T.m(&obj, ...)`) and an instance-form call to a static method (`obj.m(...)`) are both
 rejected at parse time with a precise diagnostic.
 
-**Encapsulation.** Fields are private by default. From outside the type's own methods, a private
-field cannot be read, assigned, or named in a struct literal. Combined with the "every field must
-be named" rule, this means a type-struct with any private field is unconstructable by an external
-literal and must be created via one of its own static methods (the factory pattern).
+**Encapsulation.** Fields *and methods* are private by default; `public` opts either into external
+access. From outside the type's own methods, a private field cannot be read, assigned, or named in a
+struct literal, and a private method cannot be called (in `obj.m()` or `Type.m()` form). Combined
+with the "every field must be named" rule, a type-struct with any private field is unconstructable
+by an external literal and must be created via one of its own `public` static methods (the factory
+pattern). A method's visibility is enforced by the type checker after the parser lowers the call to
+the mangled `Type$method` free function; a private method remains freely callable from any of the
+type's own methods (static or instance), exactly like private-field access.
 
 ### Statements
 

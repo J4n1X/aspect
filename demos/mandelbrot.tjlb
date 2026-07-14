@@ -6,10 +6,11 @@
   cell, and picks a density character by escape speed. Pure f64
   arithmetic in a tight loop — this is the float-codegen showcase.
 
-  Run:   tjlb-parser interpret demos/mandelbrot.tjlb
+  Run:   tjlb-parser interpret -I lib demos/mandelbrot.tjlb
 -#
 
-$include "std/io/print.tjlb"
+$import std/io
+$import std/c/stdio      # putchar
 
 const i32 WIDTH = 76
 const i32 HEIGHT = 28

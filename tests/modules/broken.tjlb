@@ -1,0 +1,8 @@
+# A module deliberately containing an error, used by the
+# `failures/module_imported_error` regression test to confirm that errors
+# inside an imported file attribute to *that* file, not the importer.
+$module broken
+
+fn buggy(i32 x) -> i32 {
+    return x + this_var_does_not_exist
+}

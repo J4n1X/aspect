@@ -41,7 +41,6 @@ pub struct TypeChecker {
 }
 
 impl TypeChecker {
-    /// Create a new type checker.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -65,7 +64,7 @@ impl TypeChecker {
 
     /// Format a single error with the originating source file prepended.
     /// Looks up the file via the error's `pos.file_id` so errors inside an
-    /// `$include`d file are attributed to that file, not the entry one.
+    /// imported file are attributed to that file, not the entry one.
     #[must_use]
     pub fn format_error(&self, err: &TypeCheckError) -> String {
         let Some(pos) = err.position() else {
@@ -132,48 +131,48 @@ impl TypeChecker {
 
     fn check_global_var(&mut self, global: &mut GlobalVar) {
         let var_type = global.var_type;
-        if Self::is_void_value(&var_type) {
+        if var_type.is_void_value() {
             self.errors
                 .push(TypeCheckError::InvalidVoidValue(global.pos));
         }
         if let Some(init_expr) = &mut global.initializer {
-            let init_pos = init_expr.pos;
-            if let ExprKind::ListInitializer(elements) = &mut init_expr.kind {
-                // Validate element count
-                if let Some(expected) = var_type.array_size
-                    && elements.len() > expected as usize
-                {
-                    self.errors.push(TypeCheckError::ListInitLengthMismatch {
-                        expected: expected as usize,
-                        found: elements.len(),
-                        position: init_pos,
-                    });
-                }
-                // Validate each element against the element type
-                let elem_type = var_type.element_type();
-                for elem in elements.iter_mut() {
-                    self.check_expression(elem, &elem_type);
-                }
-            } else {
-                self.check_expression(init_expr, &var_type);
+            self.check_initializer(init_expr, &var_type);
+        }
+    }
+
+    /// Check a declaration initializer against the declared type.
+    ///
+    /// A `ListInitializer` validates its element count and each element
+    /// against the declared element type; any other expression is checked
+    /// directly against `var_type`. Shared by global and local declarations.
+    fn check_initializer(&mut self, init_expr: &mut Expression, var_type: &LangType) {
+        let init_pos = init_expr.pos;
+        if let ExprKind::ListInitializer(elements) = &mut init_expr.kind {
+            if let Some(expected) = var_type.array_size
+                && elements.len() > expected as usize
+            {
+                self.errors.push(TypeCheckError::ListInitLengthMismatch {
+                    expected: expected as usize,
+                    found: elements.len(),
+                    position: init_pos,
+                });
             }
+            let elem_type = var_type.element_type();
+            for elem in elements.iter_mut() {
+                self.check_expression(elem, &elem_type);
+            }
+        } else {
+            self.check_expression(init_expr, var_type);
         }
     }
 
     // ── Function checking ────────────────────────────────────────────────────
 
-    /// True for `u0` used as a *value* type (no pointer depth): illegal
-    /// everywhere except as a function return type. `u0*` (any depth) and
-    /// arrays of `u0*` are fine — but an array of void values is not.
-    fn is_void_value(ty: &LangType) -> bool {
-        ty.base == TypeBase::Void && ty.pointer_depth == 0
-    }
-
     /// Validate a function prototype: no `u0`-valued parameters. Runs for
     /// extern declarations too (they never reach `check_function`).
     fn check_proto(&mut self, proto: &crate::parser::FunctionProto) {
         for (param_type, _) in &proto.params {
-            if Self::is_void_value(param_type) {
+            if param_type.is_void_value() {
                 self.errors
                     .push(TypeCheckError::InvalidVoidValue(proto.pos));
             }
@@ -207,29 +206,12 @@ impl TypeChecker {
                 initializer,
             } => {
                 let var_type = *var_type;
-                if Self::is_void_value(&var_type) {
+                if var_type.is_void_value() {
                     self.errors.push(TypeCheckError::InvalidVoidValue(stmt_pos));
                 }
                 self.define_var(name.clone(), var_type);
                 if let Some(init_expr) = initializer {
-                    let init_pos = init_expr.pos;
-                    if let ExprKind::ListInitializer(elements) = &mut init_expr.kind {
-                        if let Some(expected_count) = var_type.array_size
-                            && elements.len() > expected_count as usize
-                        {
-                            self.errors.push(TypeCheckError::ListInitLengthMismatch {
-                                expected: expected_count as usize,
-                                found: elements.len(),
-                                position: init_pos,
-                            });
-                        }
-                        let elem_type = var_type.element_type();
-                        for elem in elements.iter_mut() {
-                            self.check_expression(elem, &elem_type);
-                        }
-                    } else {
-                        self.check_expression(init_expr, &var_type);
-                    }
+                    self.check_initializer(init_expr, &var_type);
                 }
             }
 
@@ -275,7 +257,7 @@ impl TypeChecker {
                             self.check_expression(expr, &sig.return_type);
                         }
                         None => {
-                            let void = LangType::new(TypeBase::Void, 0, 0, false);
+                            let void = LangType::VOID;
                             if sig.return_type != void {
                                 self.errors.push(TypeCheckError::ReturnTypeMismatch {
                                     expected: sig.return_type,
@@ -361,7 +343,7 @@ impl TypeChecker {
     /// "must be numeric or pointer" rule then rejects `void`.
     fn check_condition(&mut self, cond: &mut Expression) {
         let cond_type = self.synth_expression(cond);
-        if cond_type.base == TypeBase::Void && cond_type.pointer_depth == 0 {
+        if cond_type.is_void_value() {
             self.errors
                 .push(TypeCheckError::InvalidConditionType(cond_type, cond.pos));
         }
@@ -404,7 +386,7 @@ impl TypeChecker {
                 }
                 if matches!(op, BinaryOp::LogicalAnd | BinaryOp::LogicalOr) {
                     // Logical `&&`/`||` yield a boolean regardless of operand type.
-                    let bool_ty = Self::bool_type();
+                    let bool_ty = LangType::BOOL;
                     expr.expr_type = bool_ty;
                     bool_ty
                 } else {
@@ -433,7 +415,7 @@ impl TypeChecker {
                 // sibling's exact type.
                 Self::narrow_literal_to_sibling(left, right_type);
                 Self::narrow_literal_to_sibling(right, left_type);
-                let bool_ty = Self::bool_type();
+                let bool_ty = LangType::BOOL;
                 expr.expr_type = bool_ty;
                 bool_ty
             }
@@ -446,20 +428,16 @@ impl TypeChecker {
             ExprKind::Dereference(inner) => {
                 let inner_type = self.synth_expression(inner);
                 // Arrays and pointers are both valid dereference targets.
-                // Array subscript `arr[i]` is lowered to `*(arr + i)` by the parser,
-                // so array types (pointer_depth == 0 but is_array()) must be accepted here.
-                if inner_type.pointer_depth == 0 && !inner_type.is_array() {
+                // Array subscript `arr[i]` is lowered to `*(arr + i)` by the
+                // parser, so array types must be accepted here.
+                if !inner_type.is_pointer_like() {
                     self.errors
                         .push(TypeCheckError::InvalidDereference(inner_type, pos));
                 }
                 // `u0*` is opaque: its pointee is a void value, so it cannot be
                 // dereferenced (or subscripted) without a cast to a sized
-                // pointer first. `u0**` and arrays of `u0*` deref fine — their
-                // pointee is itself a pointer.
-                if inner_type.base == TypeBase::Void
-                    && inner_type.pointer_depth == 1
-                    && !inner_type.is_array()
-                {
+                // pointer first.
+                if inner_type.is_opaque_ptr() {
                     self.errors.push(TypeCheckError::OpaqueDereference(pos));
                 }
                 default_type
@@ -486,7 +464,7 @@ impl TypeChecker {
             }
 
             ExprKind::Alloc { alloc_type, count } => {
-                if Self::is_void_value(alloc_type) {
+                if alloc_type.is_void_value() {
                     self.errors.push(TypeCheckError::InvalidVoidValue(pos));
                 }
                 let count_pos = count.pos;
@@ -495,7 +473,7 @@ impl TypeChecker {
                     || count_type.pointer_depth > 0
                 {
                     self.errors.push(TypeCheckError::TypeMismatch {
-                        expected: LangType::new(TypeBase::UInt, 64, 0, false),
+                        expected: LangType::U64,
                         found: count_type,
                         position: count_pos,
                     });
@@ -507,7 +485,7 @@ impl TypeChecker {
                 let inner_type = self.synth_expression(inner);
                 // `!p` is a null test and works for any pointer, `u0*`
                 // included; only void *values* are rejected.
-                if inner_type.base == TypeBase::Void && inner_type.pointer_depth == 0 {
+                if inner_type.is_void_value() {
                     self.errors.push(TypeCheckError::InvalidUnaryOperation {
                         operator: "!".to_string(),
                         operand: inner_type,
@@ -515,7 +493,7 @@ impl TypeChecker {
                     });
                 }
                 // Logical negation yields a boolean.
-                let bool_ty = Self::bool_type();
+                let bool_ty = LangType::BOOL;
                 expr.expr_type = bool_ty;
                 bool_ty
             }
@@ -601,7 +579,7 @@ impl TypeChecker {
                     });
                 }
 
-                let struct_ty = LangType::new(TypeBase::Struct(struct_id), 0, 0, false);
+                let struct_ty = LangType::struct_type(struct_id);
                 expr.expr_type = struct_ty;
                 struct_ty
             }
@@ -623,7 +601,7 @@ impl TypeChecker {
                     }
                     _ => {
                         self.errors.push(TypeCheckError::TypeMismatch {
-                            expected: LangType::new(TypeBase::Void, 0, 0, false),
+                            expected: LangType::VOID,
                             found: callee_type,
                             position: pos,
                         });
@@ -704,13 +682,13 @@ impl TypeChecker {
                 type_name,
                 position: pos,
             });
-            return LangType::new(TypeBase::Void, 0, 0, false);
+            return LangType::VOID;
         }
         self.errors.push(TypeCheckError::NotAStruct {
             found: *base_type,
             position: pos,
         });
-        LangType::new(TypeBase::Void, 0, 0, false)
+        LangType::VOID
     }
 
     /// `true` when the function being checked is a method of the given
@@ -719,7 +697,8 @@ impl TypeChecker {
         let Some(current) = self.current_function.as_deref() else {
             return false;
         };
-        let prefix = format!("{}$", self.symbols.struct_info(struct_id).name);
+        let prefix =
+            crate::symbol::module::method_owner_prefix(&self.symbols.struct_info(struct_id).name);
         current.starts_with(&prefix)
     }
 
@@ -734,6 +713,32 @@ impl TypeChecker {
         }
     }
 
+    /// Enforce method encapsulation: a private method is callable only from
+    /// within its own type's methods. `name` is the call's mangled target
+    /// (`Type$method`); a name with no `$` is an ordinary free function and is
+    /// always accessible. The private-method twin of [`Self::resolve_field`]'s
+    /// private-field rule — the two syntactic call forms (`obj.m()`, `T.m()`)
+    /// have both already been lowered to this mangled name by the parser.
+    fn check_method_access(&mut self, name: &str, pos: crate::lexer::Position) {
+        let Some((type_name, method_name)) = name.split_once('$') else {
+            return;
+        };
+        let Some(id) = self.symbols.struct_id(type_name) else {
+            return;
+        };
+        let vis = match self.symbols.struct_info(id).methods.get(method_name) {
+            Some(sig) => sig.vis,
+            None => return,
+        };
+        if vis == Visibility::Private && !self.is_inside_struct_methods(id) {
+            self.errors.push(TypeCheckError::InaccessibleMethod {
+                method: method_name.to_string(),
+                type_name: type_name.to_string(),
+                position: pos,
+            });
+        }
+    }
+
     /// Resolve a function call: validate the callee, arity, and argument types.
     ///
     /// Each argument is *checked* against its declared parameter type, which
@@ -744,6 +749,7 @@ impl TypeChecker {
         args: &mut [Expression],
         pos: crate::lexer::Position,
     ) {
+        self.check_method_access(name, pos);
         if let Some(sig) = self.symbols.lookup_function(name).cloned() {
             if sig.params.len() != args.len() {
                 self.errors.push(TypeCheckError::ArgumentCountMismatch {
@@ -818,7 +824,7 @@ impl TypeChecker {
             // Logical `&&`/`||` are excluded — they yield a boolean, not the
             // target type, so they fall through to the synth arm below.
             ExprKind::Binary { left, op, right }
-                if Self::propagates_into_arithmetic(target)
+                if target.is_plain_numeric()
                     && !matches!(op, BinaryOp::LogicalAnd | BinaryOp::LogicalOr) =>
             {
                 self.check_expression(left, target);
@@ -909,11 +915,6 @@ impl TypeChecker {
         }
     }
 
-    /// The TJLB boolean type: an `i1` logical value stored as `i8`.
-    fn bool_type() -> LangType {
-        LangType::new(TypeBase::Bool, 8, 0, false)
-    }
-
     /// If `operand` is an integer literal that fits the concrete integer type
     /// `sibling`, restamp the literal to that type.
     ///
@@ -923,52 +924,26 @@ impl TypeChecker {
     /// unchanged.
     fn narrow_literal_to_sibling(operand: &mut Expression, sibling: LangType) {
         if let ExprKind::Literal(LiteralValue::Integer(val)) = operand.kind
-            && sibling.pointer_depth == 0
-            && !sibling.is_array()
-            && matches!(sibling.base, TypeBase::SInt | TypeBase::UInt)
+            && sibling.is_plain_int()
             && literal_int_fits(val, &sibling)
         {
             operand.expr_type = sibling;
         }
     }
 
-    /// A target type is propagated into arithmetic operands only when it is a
-    /// plain (non-pointer, non-array) integer or float — the regime in which
-    /// the operands share the operation's result type.
-    fn propagates_into_arithmetic(target: &LangType) -> bool {
-        target.pointer_depth == 0
-            && !target.is_array()
-            && matches!(
-                target.base,
-                TypeBase::SInt | TypeBase::UInt | TypeBase::SFloat
-            )
-    }
-
     // ── Binary op helpers ────────────────────────────────────────────────────
 
     /// Check if two operand types are valid for the given binary operation.
     fn binary_op_types_valid(left: &LangType, right: &LangType, op: &BinaryOp) -> bool {
-        // Pointer arithmetic: ptr ± int or int ± ptr
-        let left_is_ptr = left.pointer_depth > 0 || left.is_array();
-        let right_is_ptr = right.pointer_depth > 0 || right.is_array();
-        let left_is_int = matches!(left.base, TypeBase::SInt | TypeBase::UInt)
-            && left.pointer_depth == 0
-            && !left.is_array();
-        let right_is_int = matches!(right.base, TypeBase::SInt | TypeBase::UInt)
-            && right.pointer_depth == 0
-            && !right.is_array();
-
-        // A `u0*` has an unsized pointee: no arithmetic (GEP cannot scale by
-        // sizeof(u0)). Cast to `u8*` for byte offsets. Depth >= 2 and arrays
-        // of `u0*` are fine — their element is a (sized) pointer.
-        let left_opaque = left.base == TypeBase::Void && left.pointer_depth == 1 && !left.is_array();
-        let right_opaque =
-            right.base == TypeBase::Void && right.pointer_depth == 1 && !right.is_array();
-
-        if matches!(op, BinaryOp::Add | BinaryOp::Sub)
-            && ((left_is_ptr && right_is_int) || (left_is_int && right_is_ptr))
+        // Pointer arithmetic: `ptr ± int` and `int + ptr` (`int - ptr` has no
+        // meaning). A `u0*` has an unsized pointee: no arithmetic (GEP cannot
+        // scale by sizeof(u0)) — cast to `u8*` for byte offsets.
+        let ptr_int = left.is_pointer_like() && right.is_plain_int();
+        let int_ptr = left.is_plain_int() && right.is_pointer_like();
+        if (matches!(op, BinaryOp::Add | BinaryOp::Sub) && ptr_int)
+            || (matches!(op, BinaryOp::Add) && int_ptr)
         {
-            return !(left_opaque || right_opaque);
+            return !(left.is_opaque_ptr() || right.is_opaque_ptr());
         }
 
         // Both same family — either side can widen to the other
@@ -976,10 +951,14 @@ impl TypeChecker {
     }
 
     /// Return the "wider" of two types (for binary-op result typing).
-    /// Falls back to `left` when types are incomparable.
+    /// Pointer arithmetic yields the pointer side regardless of operand
+    /// order; falls back to `left` when types are incomparable.
     fn wider_type(left: &LangType, right: &LangType) -> LangType {
-        if left.pointer_depth > 0 || left.is_array() {
+        if left.is_pointer_like() {
             return *left;
+        }
+        if right.is_pointer_like() {
+            return *right;
         }
         if left.size_bits >= right.size_bits {
             *left
@@ -1246,5 +1225,36 @@ mod tests {
                 .any(|e| matches!(e, TypeCheckError::MissingStructFields { .. })),
             "got {errs:?}"
         );
+    }
+
+    // 16. A private method (no `public`) is not callable from outside the type.
+    #[test]
+    fn private_method_external_call_errors() {
+        let src = "type C {\n    i32 n\n    \
+                   public fn make(i32 v) -> C { return C { n = v } }\n    \
+                   fn secret(this) -> i32 { return this.n }\n}\n\
+                   fn main() -> i32 {\n    C c = C.make(1)\n    return c.secret()\n}\n";
+        let (_p, res) = check(src);
+        let errs = res.expect_err("expected inaccessible-method error");
+        assert!(
+            errs.iter().any(|e| matches!(e,
+                TypeCheckError::InaccessibleMethod { method, type_name, .. }
+                if method == "secret" && type_name == "C")),
+            "got {errs:?}"
+        );
+    }
+
+    // 17. A private method IS callable from within the type's own methods,
+    //     and a public method is callable from outside. Mirrors the private-
+    //     field accessibility rule.
+    #[test]
+    fn private_method_internal_call_ok() {
+        let src = "type C {\n    i32 n\n    \
+                   public fn make(i32 v) -> C { return C { n = v } }\n    \
+                   public fn doubled(this) -> i32 { return this.secret() + this.secret() }\n    \
+                   fn secret(this) -> i32 { return this.n }\n}\n\
+                   fn main() -> i32 {\n    C c = C.make(1)\n    return c.doubled()\n}\n";
+        let (_p, res) = check(src);
+        assert!(res.is_ok(), "expected ok, got {res:?}");
     }
 }
