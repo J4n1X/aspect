@@ -60,10 +60,15 @@ pub fn parse_rule(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Annotation format (in the first 10 lines of the `.ap` file):
 ///
 /// ```text
-/// # expected: 42                          # compile & run; assert exit code == 42
+/// # expected: 42                          # compile & run; assert main's i32 return == 42
 /// # expected: "fragment1", "fragment2"    # compile only; assert error contains each fragment
-/// # run_args: "arg1", "arg2"             # optional: argv passed to lli-19
+/// # run_args: "arg1", "arg2"             # optional: forwarded as argv[1..] to main
+/// # compile_args: "-I", "lib"            # optional: compiler flags (-D/-I), mirroring the CLI
+/// # requires_arch: ARCH_X86_64           # optional: compile this test only on that host arch
 /// ```
+///
+/// Runtime tests JIT in-process via Inkwell's `ExecutionEngine` — no `lli` binary
+/// is involved. Each program runs at both `-O0` and `-O2`, and the two must agree.
 ///
 /// Files without a `# expected:` line are silently skipped.
 #[proc_macro]

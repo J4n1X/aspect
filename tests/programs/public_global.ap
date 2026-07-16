@@ -1,0 +1,22 @@
+# expected: 7
+# Globals support `public`, in which case this symbol will be 
+# available externally for linking with other object files.
+
+type Test {
+    public i32 a
+    public i32 b
+}
+
+public i32 exported_a = 1
+public i32 exported_b = 6
+# These functions here are used to test manually by grabbing the LLVM IR and reading it.
+# This variable should always be defined, it is externally visible.
+public i32 unused_exported_a = 1
+# This one should be removed by DCE.
+i32 unused_b = 2
+
+public Test test = Test { a = 1, b = 2 }
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return exported_a + exported_b
+}

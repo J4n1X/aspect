@@ -1,5 +1,5 @@
 use crate::codegen::CodegenError;
-use crate::lexer::{LangType, TypeBase};
+use crate::lexer::{LangType, Position, TypeBase};
 use crate::parser::ComparisonOp;
 use inkwell::builder::{Builder, BuilderError};
 use inkwell::context::Context;
@@ -29,15 +29,18 @@ pub trait LangTypeExt {
     ///
     /// Array types decay to `ptr` (same as pointers). For the backing array
     /// allocation type use [`LangTypeExt::to_llvm_array`].
-    fn to_llvm<'ctx>(&self, ctx: &'ctx Context) -> Result<BasicTypeEnum<'ctx>, CodegenError>;
+    fn to_llvm<'ctx>(&self, ctx: &'ctx Context, pos: Position)
+        -> Result<BasicTypeEnum<'ctx>, CodegenError>;
 
     /// Convert to the LLVM `[N x T]` array type. Errors if the type is not an array.
-    fn to_llvm_array<'ctx>(&self, ctx: &'ctx Context) -> Result<ArrayType<'ctx>, CodegenError>;
+    fn to_llvm_array<'ctx>(&self, ctx: &'ctx Context, pos: Position)
+        -> Result<ArrayType<'ctx>, CodegenError>;
 
     /// Return the element LLVM type — stripping away array size and pointer depth.
     fn element_to_llvm<'ctx>(
         &self,
         ctx: &'ctx Context,
+        pos: Position,
     ) -> Result<BasicTypeEnum<'ctx>, CodegenError>;
 
     /// Return a `LangType` one pointer-depth less (the pointee type).
@@ -69,7 +72,7 @@ impl LangTypeExt for LangType {
         matches!(self.base, TypeBase::Void) && self.pointer_depth == 0
     }
 
-    fn to_llvm<'ctx>(&self, ctx: &'ctx Context) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+    fn to_llvm<'ctx>(&self, ctx: &'ctx Context, pos: Position) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
         if self.pointer_depth > 0 || self.array_size.is_some() {
             return Ok(ctx.ptr_type(AddressSpace::default()).into());
         }
@@ -85,7 +88,7 @@ impl LangTypeExt for LangType {
                 _ => {
                     return Err(CodegenError::TypeError(
                         format!("Invalid integer size: {}", self.size_bits),
-                        crate::lexer::Position::new(0, 0),
+                        pos,
                     ))
                 }
             },
@@ -95,14 +98,14 @@ impl LangTypeExt for LangType {
                 _ => {
                     return Err(CodegenError::TypeError(
                         format!("Invalid float size: {}", self.size_bits),
-                        crate::lexer::Position::new(0, 0),
+                        pos,
                     ))
                 }
             },
             TypeBase::Void => {
                 return Err(CodegenError::TypeError(
                     "Void type cannot be used as a value type".to_string(),
-                    crate::lexer::Position::new(0, 0),
+                    pos,
                 ))
             }
             // Struct *values* are lowered via `CodeGenerator::lang_type_to_llvm`,
@@ -111,7 +114,7 @@ impl LangTypeExt for LangType {
             TypeBase::Struct(id) => {
                 return Err(CodegenError::TypeError(
                     format!("struct#{id} value must be lowered via lang_type_to_llvm"),
-                    crate::lexer::Position::new(0, 0),
+                    pos,
                 ))
             }
             // `fn(...) -> R` *is* a pointer — opaque `ptr` in LLVM. The
@@ -120,20 +123,21 @@ impl LangTypeExt for LangType {
         })
     }
 
-    fn to_llvm_array<'ctx>(&self, ctx: &'ctx Context) -> Result<ArrayType<'ctx>, CodegenError> {
+    fn to_llvm_array<'ctx>(&self, ctx: &'ctx Context, pos: Position) -> Result<ArrayType<'ctx>, CodegenError> {
         let array_size = self.array_size.ok_or_else(|| {
             CodegenError::TypeError(
                 "Expected array type".to_string(),
-                crate::lexer::Position::new(0, 0),
+                pos,
             )
         })?;
-        let element_type = self.element_to_llvm(ctx)?;
+        let element_type = self.element_to_llvm(ctx, pos)?;
         Ok(element_type.array_type(array_size))
     }
 
     fn element_to_llvm<'ctx>(
         &self,
         ctx: &'ctx Context,
+        pos: Position,
     ) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
         // The element strips only the array dimension; pointer depth is part
         // of the element type. `(i32*)[3]` must allocate `[3 x ptr]`, not
@@ -151,7 +155,7 @@ impl LangTypeExt for LangType {
                 _ => {
                     return Err(CodegenError::TypeError(
                         format!("Invalid integer size: {}", self.size_bits),
-                        crate::lexer::Position::new(0, 0),
+                        pos,
                     ))
                 }
             },
@@ -161,20 +165,20 @@ impl LangTypeExt for LangType {
                 _ => {
                     return Err(CodegenError::TypeError(
                         format!("Invalid float size: {}", self.size_bits),
-                        crate::lexer::Position::new(0, 0),
+                        pos,
                     ))
                 }
             },
             TypeBase::Void => {
                 return Err(CodegenError::TypeError(
                     "Void type cannot be used as a value type".to_string(),
-                    crate::lexer::Position::new(0, 0),
+                    pos,
                 ))
             }
             TypeBase::Struct(id) => {
                 return Err(CodegenError::TypeError(
                     format!("struct#{id} element must be lowered via lang_type_to_llvm"),
-                    crate::lexer::Position::new(0, 0),
+                    pos,
                 ))
             }
             // A function-pointer array element is `ptr` (opaque), same as

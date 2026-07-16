@@ -12,6 +12,11 @@
   so any `T*` passes into `free_ptr` directly and an allocation result
   lands in any pointer variable. The opacity bites exactly where it
   should — a `u0*` cannot be dereferenced without a cast.
+
+  These are libc's allocator, so importing this module links the C
+  runtime. `std/mem/page` sits below it — raw address space, no libc and no
+  CRT — and is a separate module precisely so that a caller who wants only
+  pages does not pay for an allocator it never calls.
 -#
 $module std/mem
 

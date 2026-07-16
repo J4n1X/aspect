@@ -1,0 +1,42 @@
+#-
+  std/io — Windows backend. kernel32 only, no C runtime.
+
+  Windows syscall numbers move between builds, so unlike Linux this layer
+  goes through the documented system DLL rather than the kernel directly.
+  kernel32 is not libc: nothing here pulls in the C runtime.
+-#
+$module std/io
+
+$ifdef OS_WINDOWS
+
+# HANDLE and LPVOID are both plain pointers; BOOL and DWORD are 32-bit.
+# `nStdHandle` is a DWORD, but the constants are conventionally written as
+# small negatives and an i32 -11 has the same 32 bits as a DWORD 0xFFFFFFF5.
+extern fn GetStdHandle(i32 nStdHandle) -> u0*
+extern fn WriteFile(u0* hFile, u0* lpBuffer, u32 nNumberOfBytesToWrite, u32* lpNumberOfBytesWritten, u0* lpOverlapped) -> i32
+
+$define STD_OUTPUT_HANDLE (0 - 11)
+$define STD_ERROR_HANDLE  (0 - 12)
+
+# Windows has HANDLEs, not fds, so this is where the two numbering schemes
+# meet: the module's IO_STDOUT/IO_STDERR are translated here and nowhere else.
+fn io_std_handle(i32 fd) -> u0* {
+    if fd == IO_STDERR { return GetStdHandle(STD_ERROR_HANDLE) }
+    return GetStdHandle(STD_OUTPUT_HANDLE)
+}
+
+fn io_write_bytes(i32 fd, u8 *buf, u64 n) -> i64 {
+    u0 *h = io_std_handle(fd)
+    # A process with no console gets NULL; a failed GetStdHandle gets
+    # INVALID_HANDLE_VALUE, which is (HANDLE)-1 rather than NULL.
+    if h == null || (h as i64) == 0 - 1 { return 0 - 1 }
+    # WriteFile counts bytes in a DWORD, so a >4GB request is clamped and
+    # reported as a short write. `io_write_all` sends the rest.
+    u64 want = n
+    if want > 4294967295 { want = 4294967295 }
+    u32 written = 0
+    if WriteFile(h, buf, want as u32, &written, null) == 0 { return 0 - 1 }
+    return written as i64
+}
+
+$endif

@@ -241,12 +241,9 @@ fn build_codegen<'ctx>(
     codegen
         .generate(program)
         .with_context(|| format!("failed to generate code for '{}'", path.display()))?;
-
-    if opt_level > 0 {
-        codegen
-            .optimize(opt_level, verify_each)
-            .with_context(|| format!("failed to optimize code for '{}'", path.display()))?;
-    }
+    codegen
+        .optimize(opt_level, verify_each)
+        .with_context(|| format!("failed to optimize code for '{}'", path.display()))?;
 
     Ok(codegen)
 }

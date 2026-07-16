@@ -17,7 +17,6 @@ $import std/collections
 $import std/sort
 $import std/c/stdlib    # malloc/free
 $import std/c/string    # strlen
-$import std/c/stdio     # putchar
 
 # for_each callbacks are plain function pointers — no closures — so the
 # collection target lives in globals.
@@ -57,7 +56,7 @@ fn pad_to(u8* s, u64 width) {
     print(s)
     u64 n = strlen(s)
     while n < width {
-        putchar(32)
+        print_char(32)
         n = n + 1
     }
 }

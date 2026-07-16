@@ -1,0 +1,28 @@
+# expected: 7
+# `public` is accepted on both function kinds and changes nothing about how
+# they are called — it only decides whether the symbol leaves the object file.
+
+public fn exported_add(i32 a, i32 b) -> i32 {
+    return a + b
+}
+
+fn private_add(i32 a, i32 b) -> i32 {
+    return a + b
+}
+
+$ifdef ARCH_X86_64
+public asm fn exported_asm(i64 a: rax, i64 b: rdi) -> i64: rax {
+    "add rax, rdi"
+}
+$else
+public fn exported_asm(i64 a, i64 b) -> i64 {
+    return a + b
+}
+$endif
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    if exported_add(1, 2) != 3 { return 1 }
+    if private_add(1, 2) != 3 { return 2 }
+    if exported_asm(1, 2) != 3 { return 3 }
+    return 7
+}

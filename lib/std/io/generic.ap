@@ -1,0 +1,206 @@
+#-
+  std/io — print/println for the primitive types.
+
+  The module is split across the files in this directory, all declaring
+  `$module std/io`, so `$import std/io` pulls in the whole set and the
+  `$ifdef`s pick the platform:
+
+      generic.ap   this file — all formatting, no platform in sight
+      linux.ap     io_write_bytes via the raw write(2) syscall, no libc
+      windows.ap   io_write_bytes via kernel32 WriteFile, no C runtime
+      posix.ap     io_write_bytes via libc write(2) — macOS, and Linux on
+                   an arch linux.ap does not cover
+
+  Everything platform-specific is behind ONE primitive, which each of those
+  files implements exactly once:
+
+      fn io_write_bytes(i32 fd, u8 *buf, u64 n) -> i64
+
+  It writes at most `n` bytes of `buf` to `fd` and returns the number
+  actually written — which may be less than `n` — or a negative value on
+  error. It is the raw platform call and nothing more; the retry policy
+  lives here, in `io_write_all`, so it is written once rather than per OS.
+
+  Formatting never allocates: each printer renders into a stack buffer and
+  emits it with a single `io_write_bytes`, so a `println_i64` costs one
+  write rather than one per digit.
+
+  `printf` is deliberately not used anywhere: it is variadic, which aspect
+  does not support.
+
+  Do not mix this module with `std/c/stdio` on one fd. Nothing here is
+  buffered, libc is, and the two interleave by flush order rather than call
+  order — output arrives scrambled with no error anywhere. `print_char`
+  exists so that `putchar` never has to be reached for.
+-#
+$module std/io
+
+$define IO_STDOUT 1
+$define IO_STDERR 2
+
+# Write all `n` bytes, retrying on short writes. Returns `n`, or negative on
+# error (the platform's error value, or -1 if a write reported no progress —
+# retrying that forever would hang).
+fn io_write_all(i32 fd, u8 *buf, u64 n) -> i64 {
+    u64 done = 0
+    while done < n {
+        i64 w = io_write_bytes(fd, buf + done, n - done)
+        if w < 0 { return w }
+        if w == 0 { return 0 - 1 }
+        done = done + (w as u64)
+    }
+    return n as i64
+}
+
+# ── Rendering ───────────────────────────────────────────────────────────
+#
+# Each `fmt_*` writes at `buf[at]` and returns the offset one past what it
+# wrote, so calls chain. Buffers are the caller's; the sizes below are the
+# worst case for each type (u64 is 20 digits, i64 is 19 plus a sign).
+
+fn fmt_u64(u8 *buf, u64 at, u64 n) -> u64 {
+    if n >= 10 { at = fmt_u64(buf, at, n / 10) }
+    buf[at] = (n % 10 + 48) as u8                  # ASCII '0' = 48
+    return at + 1
+}
+
+# Exactly six digits, zero-padded (C's `%06d`). Digits above the sixth are
+# dropped, as they always have been.
+fn fmt_u64_pad6(u8 *buf, u64 at, u64 n) -> u64 {
+    u64 div = 100000
+    while div > 0 {
+        buf[at] = ((n / div) % 10 + 48) as u8
+        at = at + 1
+        div = div / 10
+    }
+    return at
+}
+
+fn fmt_i64(u8 *buf, u64 at, i64 n) -> u64 {
+    if n >= 0 { return fmt_u64(buf, at, n as u64) }
+    buf[at] = 45                                   # '-'
+    # `n` could be I64_MIN; flip the bits then bump by one to land at the
+    # correct unsigned magnitude without overflowing on the negation.
+    return fmt_u64(buf, at + 1, ((~n) as u64) + 1)
+}
+
+# A finite f64 to six decimal places (matches C's `%f` default).
+#
+# Limitations:
+#   * `|x|` must be representable as `i64` (so roughly < 2^63 ~ 9.2e18).
+#     Beyond that, `x as i64` is UB at the LLVM level.
+#   * NaN and infinities render as `nan` / `inf` / `-inf`. No scientific
+#     notation; very small numbers round to `0.000000`.
+fn fmt_f64(u8 *buf, u64 at, f64 x) -> u64 {
+    # NaN: a value not equal to itself.
+    if x != x {
+        buf[at] = 110 buf[at + 1] = 97 buf[at + 2] = 110      # "nan"
+        return at + 3
+    }
+    # `x < 0.0` is false for -0.0, so the sign bit is read off 1/x: -inf for
+    # -0.0, +inf for +0.0. C's %f prints -0.000000 and so does this.
+    if x < 0.0 || (x == 0.0 && 1.0 / x < 0.0) {
+        buf[at] = 45
+        at = at + 1
+        x = 0.0 - x
+    }
+    # Crude infinity check: anything that overflows i64 is treated as inf.
+    f64 i64_max = 9223372036854775000.0            # ~i64::MAX, generous margin
+    if x > i64_max {
+        buf[at] = 105 buf[at + 1] = 110 buf[at + 2] = 102     # "inf"
+        return at + 3
+    }
+    i64 int_part = x as i64
+    f64 frac = x - (int_part as f64)
+    # Round to six decimals; carry into int_part on 0.9999995-style edges.
+    i64 cents = (frac * 1000000.0 + 0.5) as i64
+    if cents >= 1000000 {
+        int_part = int_part + 1
+        cents = 0
+    }
+    at = fmt_u64(buf, at, int_part as u64)
+    buf[at] = 46                                   # '.'
+    return fmt_u64_pad6(buf, at + 1, cents as u64)
+}
+
+# ── Printing ────────────────────────────────────────────────────────────
+
+fn cstring_len(u8 *s) -> u64 {
+    u64 n = 0
+    while s[n] != 0 { n = n + 1 }
+    return n
+}
+
+# Write `s` with no terminator — useful for building up a line.
+fn print(u8 *s) -> u0 {
+    io_write_all(IO_STDOUT, s, cstring_len(s))
+}
+
+# One byte, no terminator. This is the whole reason libc's `putchar` must not
+# be mixed in: it buffers, this does not, and two buffers on one fd interleave
+# by flush order rather than call order.
+fn print_char(u8 c) -> u0 {
+    u8[1] b
+    b[0] = c
+    io_write_all(IO_STDOUT, b, 1)
+}
+
+# Write `s` followed by a newline. Returns 0, or negative on error.
+fn println(u8 *s) -> i32 {
+    if io_write_all(IO_STDOUT, s, cstring_len(s)) < 0 { return 0 - 1 }
+    u8[1] nl = {10}
+    if io_write_all(IO_STDOUT, nl, 1) < 0 { return 0 - 1 }
+    return 0
+}
+
+# Emit the decimal digits of `n` to stdout, no newline.
+fn print_digits_u64(u64 n) -> u0 {
+    u8[24] buf
+    u64 end = fmt_u64(buf, 0, n)
+    io_write_all(IO_STDOUT, buf, end)
+}
+
+fn print_u64(u64 n) -> u0 { print_digits_u64(n) }
+fn println_u64(u64 n) -> u0 {
+    u8[24] buf
+    u64 end = fmt_u64(buf, 0, n)
+    buf[end] = 10                                  # '\n'
+    io_write_all(IO_STDOUT, buf, end + 1)
+}
+
+fn print_u32(u32 n) -> u0 { print_digits_u64(n as u64) }
+fn println_u32(u32 n) -> u0 { println_u64(n as u64) }
+
+fn print_i32(i32 n) -> u0 { print_i64(n as i64) }
+fn println_i32(i32 n) -> u0 { println_i64(n as i64) }
+
+fn print_i64(i64 n) -> u0 {
+    u8[24] buf
+    u64 end = fmt_i64(buf, 0, n)
+    io_write_all(IO_STDOUT, buf, end)
+}
+fn println_i64(i64 n) -> u0 {
+    u8[24] buf
+    u64 end = fmt_i64(buf, 0, n)
+    buf[end] = 10
+    io_write_all(IO_STDOUT, buf, end + 1)
+}
+
+# Write `n` as exactly six ASCII decimal digits, zero-padded.
+fn print_u64_padded_6(u64 n) -> u0 {
+    u8[8] buf
+    u64 end = fmt_u64_pad6(buf, 0, n)
+    io_write_all(IO_STDOUT, buf, end)
+}
+
+fn print_f64(f64 x) -> u0 {
+    u8[32] buf
+    u64 end = fmt_f64(buf, 0, x)
+    io_write_all(IO_STDOUT, buf, end)
+}
+fn println_f64(f64 x) -> u0 {
+    u8[32] buf
+    u64 end = fmt_f64(buf, 0, x)
+    buf[end] = 10
+    io_write_all(IO_STDOUT, buf, end + 1)
+}

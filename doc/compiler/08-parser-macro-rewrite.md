@@ -11,15 +11,17 @@ living reference for anyone writing or modifying parse rules.
 
 ```
 src/parser/
-  expressions.rs   — Parser struct, Pratt expression engine, top-level rules
+  expressions.rs   — Parser struct, Pratt expression engine, top-level rules, parse_type
   statements.rs    — Statement dispatch table, all statement rules
   ast.rs           — AST node types
   errors.rs        — ParserError enum + position() helper
-  types.rs         — type-parsing helpers
+  types.rs         — re-export of the lexer's LangType / TypeBase (no logic)
 
 aspect-macros/
-  src/lib.rs       — #[parse_rule] attribute macro
-  src/expand.rs    — DSL macro expansions (DslRewriter)
+  src/lib.rs            — #[parse_rule] attribute macro + generate_tests!() proc macro
+  src/expand.rs         — DSL macro expansions (DslRewriter)
+  src/generate_tests.rs — generate_tests!() impl: scans tests/programs/, emits one
+                          #[test] per annotated .ap file (see 07-testing.md)
 ```
 
 ---
@@ -150,9 +152,14 @@ together from `parse_program`.
 ### Context Stack
 
 `Parser.context_stack: Vec<&'static str>` is maintained automatically by
-`#[parse_rule]`. Each rule pushes its name on entry and pops on exit (including
-on error paths, via the closure IIFE pattern). The stack is available for
-inspection if richer error messages are desired in the future.
+`#[parse_rule]`. Each rule pushes a human-readable **label** derived from its
+function name — the `parse_` / `do_parse_` prefix stripped and underscores
+replaced with spaces, so `parse_return_statement` pushes `"return statement"`
+and `do_parse_program` pushes `"program"` — and pops it on exit (including on
+error paths, via the closure IIFE pattern). The labels are phrased for direct
+interpolation into a message ("expected expression in return statement"). The
+stack is available for inspection if richer error messages are desired in the
+future.
 
 ---
 

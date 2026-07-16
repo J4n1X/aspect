@@ -1,6 +1,6 @@
 # AST Reference
 
-The AST types are defined in `src/parser/ast.rs`. The parser produces a `Program` containing functions, global variables, and a string literal table.
+The AST types are defined in `src/parser/ast.rs`. The parser produces a `Program` containing functions, global variables, a string literal table, the cross-phase global symbol table (`symbols`), and the source-file registry (`source_files`).
 
 ## Program
 
@@ -9,8 +9,19 @@ pub struct Program {
     pub functions: Vec<Function>,
     pub global_vars: Vec<GlobalVar>,
     pub string_literals: Vec<String>,
+    /// Cross-phase global symbol table (functions, type-structs, aliases),
+    /// built by the parser and consumed by the type checker and code generator.
+    pub symbols: crate::symbol::module::ModuleSymbols,
+    /// Source-file registry indexed by `Position::file_id` — entry file at id 0,
+    /// each `$import`-pulled file after that. Empty for synthetic programs
+    /// (e.g. checker unit tests that don't go through the preprocessor).
+    pub source_files: Vec<std::path::PathBuf>,
 }
 ```
+
+`symbols` is the registry against which `TypeBase::Struct(id)` and
+`TypeBase::FnPtr(id)` resolve their interned ids — without it, neither struct
+nor function-pointer types can be interpreted.
 
 ## Function
 
@@ -24,9 +35,14 @@ pub struct FunctionProto {
     pub name: String,
     pub params: Vec<(LangType, String)>,  // (type, name) pairs
     pub return_type: LangType,
+    pub vis: Visibility,                  // `public` => external linkage
     pub pos: Position,
 }
 ```
+
+`vis` reuses `symbol::module::Visibility`. It governs *linkage* only —
+whether the symbol leaves the object file — not who may call the function.
+See [06-codegen](06-codegen.md#function-linkage).
 
 A function is exactly one *kind*, and `FunctionBody` is what says which:
 
@@ -74,9 +90,13 @@ pub struct GlobalVar {
     pub var_type: LangType,
     pub name: String,
     pub initializer: Option<Expression>,
+    pub vis: Visibility,          // `public` => external linkage
     pub pos: Position,
 }
 ```
+
+`vis` means the same as on [`FunctionProto`](#function): linkage only.
+A private global gets `private` linkage and is collected when unused.
 
 ## Expression
 
@@ -92,7 +112,7 @@ pub struct Expression {
 
 | Variant | Description | Example |
 |---------|-------------|---------|
-| `Literal(LiteralValue)` | Integer, float, or string literal | `42`, `3.14`, `"hello"` |
+| `Literal(LiteralValue)` | Integer, float, string, or bool literal | `42`, `3.14`, `"hello"`, `true` |
 | `Variable(String)` | Identifier reference | `x` |
 | `Binary { left, op, right }` | Binary operation | `a + b` |
 | `Comparison { left, op, right }` | Comparison operation | `a < b` |
@@ -102,7 +122,15 @@ pub struct Expression {
 | `BitwiseNot(Box<Expression>)` | Bitwise NOT (`~`) | `~mask` |
 | `FunctionCall { name, args }` | Function call | `foo(1, 2)` |
 | `Cast { expr, target_type }` | Type cast (`as`) | `x as i64` |
-| `Alloc { alloc_type, count }` | Array allocation | `i32[10]` |
+| `Alloc { alloc_type, count }` | Runtime-sized stack allocation (`count` is an arbitrary expression) | `i32[n]` |
+| `ListInitializer(Vec<Expression>)` | Brace list | `{ 1, 2, 3 }` |
+| `FieldAccess { base, field }` | Struct field read (auto-derefs a single-level pointer-to-struct) | `p.x` |
+| `StructLiteral { struct_id, fields }` | Struct literal | `Point { x = 1, y = 2 }` |
+| `FunctionRef(String)` | A function as a value, from a bare name or `&foo` | `&double` |
+| `IndirectCall { callee, args }` | Call through a function-pointer value | `op(21)` |
+| `SizeOf(LangType)` | Compile-time size, stamped `u64` | `sizeof(Point)` |
+| `Null` | The untyped null pointer | `null` |
+| `ValueBlock(Vec<Statement>)` | Block in expression position, valued by its inner `return` | `{ return 7 }` |
 
 ### LiteralValue
 
@@ -111,6 +139,7 @@ pub enum LiteralValue {
     Integer(i64),
     Float(f64),
     String(usize),  // Index into Program.string_literals
+    Bool(bool),     // `true` / `false`
 }
 ```
 
@@ -157,6 +186,7 @@ pub struct Statement {
 | `VarDecl { var_type, name, initializer }` | Variable declaration | `i32 x = 10` |
 | `VarAssign { name, value }` | Variable assignment | `x = 20` |
 | `DerefAssign { target, value }` | Dereference assignment | `*ptr = 42` or `arr[i] = val` |
+| `FieldAssign { target, value }` | Struct-field assignment (`target` must be a field-access expression) | `p.x = 9` |
 | `Break` | Break from loop | `break` |
 | `Continue` | Continue loop | `continue` |
 
@@ -166,7 +196,7 @@ Defined in `src/lexer/tokens.rs` and re-exported by the parser:
 
 ```rust
 pub struct LangType {
-    pub base: TypeBase,          // SInt, UInt, SFloat, or Void
+    pub base: TypeBase,          // SInt, UInt, SFloat, Void, Bool, Struct(id), or FnPtr(id)
     pub size_bits: u32,          // 8, 16, 32, 64 (0 for void)
     pub pointer_depth: u32,      // 0 = value, 1 = *, 2 = **
     pub is_const: bool,          // const qualifier
@@ -178,6 +208,14 @@ pub enum TypeBase {
     UInt,    // Unsigned integer (u8, u16, u32, u64)
     SFloat,  // Floating point (f32, f64)
     Void,    // Void (u0)
+    Bool,    // The Aspect boolean: an i1 logical value stored as i8
+             // (`size_bits: 8` is the storage width). The type of
+             // comparisons and `!`.
+    Struct(u32), // A type-struct, identified by an interned id into the
+                 // program's ModuleSymbols struct registry. The id, not the
+                 // name, is stored so `LangType` stays Copy/Eq.
+    FnPtr(u32),  // A function pointer, identified by an interned id into the
+                 // function-signature registry. `fn(args) -> R` *is* the pointer.
 }
 ```
 
@@ -205,9 +243,9 @@ The parser resolves expression types as it parses:
 | String literal | `u8*` (pointer_depth=1, base=UInt, size_bits=8) |
 | Variable | Looked up from symbol table |
 | Function call | Function's return type from symbol table |
-| Comparison | `i32` (typechecker), `i1` at codegen (widened on use) |
-| Logical NOT (`!`) | `i32` (boolean as integer) |
-| Binary op | Left operand's type |
+| Comparison | `bool` — the parser transiently stamps `i32`, but the type checker overwrites it with `LangType::BOOL` (`TypeBase::Bool`, i1 logical value / i8 storage). It coerces implicitly into an integer target, so `i32 c = a < b` is legal; the comparison never propagates its result type into its operands |
+| Logical NOT (`!`) | `bool` — same as a comparison, not `i32` |
+| Binary op | Left operand's type — **except** when the left is a non-pointer and the right is a pointer, in which case the right operand's type wins, so `1 + ptr` is pointer-typed and scaled (commutative pointer arithmetic). See `parse_expr_prec` in `expressions.rs` |
 | Cast | Target type |
 | Alloc | Pointer to alloc_type (`pointer_depth + 1`) |
 | Reference | Operand type with `pointer_depth + 1` |
@@ -220,7 +258,17 @@ The parser resolves expression types as it parses:
 pub struct Position {
     pub line: usize,
     pub column: usize,
+    /// Indexes into `Program::source_files`; entry file is 0.
+    pub file_id: u32,
 }
 ```
 
-Every AST node carries a `Position` for error diagnostics. Display format: `line:column`.
+Every AST node carries a `Position` for error diagnostics. Build one with
+`Position::new(line, column)` (file_id defaults to 0) or
+`Position::with_file(line, column, file_id)` — the latter is what the lexer uses
+for imported files.
+
+Display format is `line:column`. Note `Display` deliberately omits the file: it
+cannot reach the file registry, so callers wanting a filename must resolve
+`file_id` against `Program::source_files` themselves. That is why the field is
+easy to miss even though it appears in every AST dump.

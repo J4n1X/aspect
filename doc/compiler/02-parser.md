@@ -18,12 +18,34 @@ The parser (`src/parser/`) converts a flat `Vec<Token>` into a `Program` AST. It
 pub struct Parser {
     tokens: Vec<Token>,
     current: usize,
+    /// Transient per-function variable scopes (discarded after parsing).
     symbol_table: SymbolTable,
-    string_literals: Vec<String>,
+    /// Cross-phase global symbols (functions, type-structs, aliases); moved
+    /// into the `Program` at the end of `parse_program`.
+    module: ModuleSymbols,
+    /// Deduplicating and insertion-ordered — hence not a `Vec`.
+    string_literals: IndexSet<String>,
+    context_stack: Vec<&'static str>,
+    /// Multi-error accumulator; see Error Handling below.
+    errors: Vec<ParserError>,
+    /// Bodies skipped in pass 1, parsed in pass 2 once every prototype is
+    /// registered — this is what makes forward references work.
+    pending_bodies: Vec<PendingBody>,
+    alias_prescan_sites: HashSet<usize>,
+    /// File registry indexed by `Position::file_id`.
+    source_files: Vec<PathBuf>,
+    /// Module of each file, parallel to `source_files`.
+    file_modules: Vec<String>,
+    /// Module → its *direct* imports; drives the import-visibility check.
+    module_imports: HashMap<String, Vec<String>>,
 }
 ```
 
-The parser owns the token vec, tracks position via `current: usize`, and **builds the symbol table during parsing** (not as a separate phase). The string literal table collects all string constants for later codegen.
+The parser owns the token vec and tracks position via `current: usize`.
+`symbol_table` holds only **transient per-function variable scopes** and is
+discarded once parsing completes; the durable global symbols accumulate in
+`module` and move into `Program::symbols` for the type checker and codegen.
+The string literal table collects all string constants for later codegen.
 
 ## Infrastructure Methods
 
@@ -41,7 +63,7 @@ The parser owns the token vec, tracks position via `current: usize`, and **build
 ## Entry Point
 
 ```rust
-Parser::new(tokens).parse_program() -> Result<Program, ParserError>
+Parser::new(tokens).parse_program() -> Result<Program, Vec<ParserError>>
 ```
 
 `parse_program()` loops until EOF, parsing top-level items:
@@ -55,21 +77,36 @@ diagnostic depending on which keyword happened to come first.
 
 ## Expression Parsing (Precedence Climbing)
 
-Expressions are parsed via a chain of methods ordered by precedence. Each level calls the next-higher-precedence level. Binary expressions use a generic `parse_binary_expr()` helper that loops while operators at the current level match (left-associative).
+Binary and comparison operators are parsed by a single precedence-climbing loop,
+`parse_expr_prec(min_prec)` (`expressions.rs`), over the static `INFIX_OPS` table.
+That table is the **single source of truth** for binding strength, and it includes
+the comparison operators, which `BinaryOp` does not model.
 
 ### Precedence Chain (lowest → highest)
 
-| Precedence | Method | Operators |
-|-----------|--------|-----------|
-| 0 (lowest) | `parse_logical_or()` | `\|\|` |
-| 1 | `parse_logical_and()` | `&&` |
-| 2 | `parse_bitwise_or()` | `\|` |
-| 3 | `parse_bitwise_xor()` | `^` |
-| 4 | `parse_bitwise_and()` | `&` |
-| 5 | `parse_shift()` | `<<`, `>>` |
-| 10 | `parse_additive()` | `+`, `-` |
-| 20 | `parse_multiplicative()` | `*`, `/`, `%` |
-| — | `parse_other()` | Tries `parse_alloc()`, falls back to `parse_cast()` |
+| Precedence | Operators |
+|-----------|-----------|
+| 1 (lowest) | `\|\|` |
+| 2 | `&&` |
+| 3 | `==`, `!=`, `<`, `>`, `<=`, `>=` |
+| 4 | `\|` |
+| 5 | `^` |
+| 6 | `&` |
+| 7 | `<<`, `>>` |
+| 10 | `+`, `-` |
+| 20 | `*`, `/`, `%` |
+
+> **Trap — this is not C.** Comparisons bind **looser** than every bitwise
+> operator (3 vs `\|`=4, `^`=5, `&`=6, shifts=7). In C, `==`/`!=` bind *tighter*
+> than `&`/`^`/`\|`. So `a | b == c` parses as `(a | b) == c` here, not
+> `a | (b == c)`: `1 | 0 == 0` evaluates to `0` in Aspect and `1` in C.
+> Parenthesise any mixed bitwise/comparison expression.
+
+The tighter-than-binary levels are ordinary methods, not table entries:
+
+| Level | Method | Operators |
+|-------|--------|-----------|
+| — | `parse_cast_or_alloc()` | Tries `parse_alloc()`, falls back to `parse_cast()` |
 | — | `parse_cast()` | `as` keyword (left-associative, chains) |
 | — | `parse_unary()` | `-`, `!`, `&`, `*`, `~` (right-associative, recursive) |
 | — | `parse_postfix()` | `()` (function call), `[]` (array index) |
@@ -81,24 +118,35 @@ Several constructs are lowered during parsing:
 
 | Construct | Desugared Form |
 |-----------|---------------|
-| `-x` | `0 - x` (Binary Sub) |
+| `-x` | `0 - x` (Binary Sub) — **except** when `x` is an integer or float literal, which folds into a negative `Literal` instead (so `-128` can narrow to `i8`; `0 - 128` cannot) |
 | `x += 5` | `x = x + 5` |
 | `arr[i]` | `*(arr + i)` (pointer arithmetic + dereference) |
 | `elif cond { ... }` | `else { if cond { ... } }` |
 
 ### Type Parsing
 
-Types are parsed from `LangType` tokens with optional modifiers:
-- `const` prefix
-- Array suffix `[expr]`
-- Pointer suffix `*` (repeatable)
+Types arrive from the lexer **already complete** — the scanner folds `const`, the
+`[N]` array suffix, and repeated `*` into a single `LangType` token (see
+[01-lexer](01-lexer.md)). `parse_type()` (in `expressions.rs`) reads that token; it
+does not apply the modifiers itself.
+
+The array suffix must be an integer **literal**, since it is stored as
+`array_size: Option<u32>` on the token. `i32[n]` for a variable `n` is not a type
+and does not lex as one — it becomes four tokens (`LangType(i32)`, `[`, `n`, `]`)
+and fails to parse in type position.
+
+A runtime-sized allocation is a different construct: the *alloc expression*
+`i32[n]` in expression position, handled by `parse_alloc()` into
+`ExprKind::Alloc { alloc_type, count }`, where `count` is an arbitrary expression.
 
 ## Statement Parsing
 
-`parse_statement()` dispatches on the current token:
+`parse_statement()` loops over the static `STATEMENT_TABLE` of
+`(predicate, handler)` pairs (`statements.rs`), taking the first predicate that
+matches, and falls through to a catch-all when none does:
 
-| Token | Handler |
-|-------|---------|
+| Predicate | Handler |
+|-----------|---------|
 | `{` | `parse_block_statement()` |
 | `return` | `parse_return_statement()` |
 | `if` | `parse_if_statement()` |
@@ -106,11 +154,14 @@ Types are parsed from `LangType` tokens with optional modifiers:
 | `for` | `parse_for_statement()` |
 | `break` | `parse_break_statement()` |
 | `continue` | `parse_continue_statement()` |
-| `LangType` | `parse_var_decl_or_assignment()` |
-| `Identifier` + assignment op | `parse_assignment_statement()` |
-| `Identifier` (no assignment) | `parse_expression_or_indexed_assignment()` |
-| `*` (asterisk) | Deref assignment or expression |
-| Anything else | `parse_expression_statement()` |
+| `LangType` token | `parse_var_decl_or_assignment()` |
+| `starts_named_var_decl` — `myint x`, `Point* p` | `parse_var_decl_or_assignment()` |
+| `starts_fnptr_var_decl` — `fn(i32) -> i32 op = &double` | `parse_var_decl_or_assignment()` |
+| `starts_grouped_var_decl` — `(fn(i32) -> i32)[3] table = ...` | `parse_var_decl_or_assignment()` |
+| Anything else (fallthrough) | `parse_expression_or_assign_statement()` |
+
+There is no `*`-specific row: `*ptr = x` reaches the catch-all like any other
+expression or assignment.
 
 ### Block Statements
 
@@ -118,7 +169,13 @@ Types are parsed from `LangType` tokens with optional modifiers:
 
 ### For Loops
 
-`for (init; condition; increment) { body }` — has its own scope. Special `*_for_loop` variants of expression/declaration/assignment statements exist that do **not** consume terminators, since `;` is used as a section delimiter consumed by the for-loop parser itself.
+`for (init; condition; increment) { body }` — has its own scope. The `;` is a section
+delimiter consumed by the for-loop parser itself, so the sections must be parsed
+*without* consuming a terminator. That is what the `_inner` pair is for:
+`parse_var_decl_inner()` and `parse_expression_or_assign_inner()` parse the bare
+construct, while the public wrappers (`parse_var_decl_or_assignment`,
+`parse_expression_or_assign_statement`) add `term!()` on top. `parse_for_statement`
+calls the `_inner` forms directly.
 
 ### Compound Assignments
 
@@ -129,21 +186,27 @@ All compound assignment operators (`+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=
 The parser builds the symbol table as it encounters declarations:
 
 - **Variable declarations**: Added to the current scope via `symbol_table.add_variable()`
-- **Function declarations**: Added to the flat function table via `symbol_table.add_function()`
-- **Expression parsing**: Looks up variable types and function signatures from the symbol table
+- **Function declarations**: Added to the module's global symbols via `ModuleSymbols::add_function()` (`src/symbol/module.rs`) — *not* `symbol_table`, which holds variables only
+- **Expression parsing**: Looks up variable types and function signatures to stamp `expr_type`. An identifier that resolves to nothing is **not** a parse error — it is stamped `u0` and left for the type checker, which raises `TypeCheckError::UndefinedVariable`. Function *calls* are still validated here (`ParserError::UndefinedFunction`)
 
-This means the parser has semantic awareness — it resolves types and validates existence during parsing rather than as a separate pass.
+So the parser has *partial* semantic awareness: it resolves types eagerly, but defers variable-existence diagnosis to the type checker.
 
 ## Error Handling
 
-Uses `thiserror`-derived `ParserError`. All methods return `Result<T, ParserError>`. Errors propagate via `?` — no recovery/resynchronization.
+Uses `thiserror`-derived `ParserError`. Individual rules return `Result<T, ParserError>`
+and propagate via `?`, but `parse_program` returns `Result<Program, Vec<ParserError>>` —
+the parser **recovers and reports every error it can**. `parse_block_statement` wraps each
+statement in `sync!`, which on failure pushes the error onto `Parser::errors` and calls
+`synchronize()` to skip to the next statement/declaration boundary (it stops *before* a
+statement-starting keyword or `}`; the block loop consumes a token itself when the cursor
+has not advanced, bounding recovery at one error per token).
 
 | Variant | Trigger |
 |---------|---------|
 | `UnexpectedToken(String, Position)` | Unexpected token in context |
 | `ExpectedToken(expected, found, Position)` | Missing expected token |
 | `TypeMismatch(expected, found, Position)` | Type mismatch |
-| `UndefinedVariable(name, Position)` | Variable not in symbol table |
+| `UndefinedVariable(name, Position)` | **Declared but never constructed** — the parser stamps unknown names `u0`; `TypeCheckError::UndefinedVariable` is what users actually see |
 | `UndefinedFunction(name, Position)` | Function not in symbol table |
 | `ArgumentCountMismatch(func, expected, got, Position)` | Wrong arg count |
 | `InvalidDereference(Position)` | Dereferencing non-pointer |
@@ -161,6 +224,6 @@ Uses `thiserror`-derived `ParserError`. All methods return `Result<T, ParserErro
 
 3. **Array-to-pointer decay**: When an array variable is referenced, its type decays from array to pointer (`decay_to_pointer()`).
 
-4. **Function calls as postfix**: Only valid when the callee is a `Variable` (identifier). Indirect calls through function pointers are not supported.
+4. **Function calls as postfix**: a call whose callee is a bare identifier naming a function becomes `ExprKind::FunctionCall` (direct call by name). A call through any other expression of function-pointer type becomes `ExprKind::IndirectCall { callee, args }`, which codegen lowers via `build_indirect_call` after resolving the signature through the callee's `TypeBase::FnPtr(id)`. A bare function name in value position, and `&func`, both produce `ExprKind::FunctionRef`.
 
-5. **`parse_other` disambiguation**: Tries `parse_alloc()` first (type[expr]), falling back to `parse_cast()` (expr as type) via `.or_else()`.
+5. **`parse_cast_or_alloc` disambiguation**: Tries `parse_alloc()` first (type[expr]), falling back to `parse_cast()` (expr as type) via `.or_else()`.

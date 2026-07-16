@@ -5,7 +5,7 @@ use crate::parser::{
     BinaryOp, ComparisonOp, ExprKind, Expression, LiteralValue, ParserError, Statement,
     StatementKind,
 };
-use crate::symbol::module::ModuleSymbols;
+use crate::symbol::module::{ModuleSymbols, Visibility};
 use crate::symbol::table::SymbolTable;
 use aspect_macros::parse_rule;
 
@@ -1170,18 +1170,50 @@ impl Parser {
         skip_nl!();
 
         while !self.is_at_end() {
+            let vis_pos = pos!();
+            let vis = if kw_if!(Public) {
+                Visibility::Public
+            } else {
+                Visibility::Private
+            };
             let kind = self.parse_kind_modifier()?;
             let is_extern = matches!(&kind, Some((Keyword::Extern, _)));
 
+            // `extern` already names a symbol defined elsewhere; marking it
+            // `public` would claim to export something this module never
+            // defines.
+            if is_extern && vis == Visibility::Public {
+                return Err(ParserError::UnexpectedToken(
+                    "extern functions cannot be public — they are defined elsewhere".to_string(),
+                    vis_pos,
+                ));
+            }
+
+            // `public` answers "does this symbol leave the object file", which
+            // only a function this module defines can.
+            let defines_a_fn = matches!(&kind, Some((Keyword::Asm, _)))
+                || (self.check_keyword(&Keyword::Fn) && !self.starts_fnptr_var_decl());
+            let defines_a_global = matches!(
+                self.peek().kind,
+                TokenKind::LangType(_) | TokenKind::Identifier(_)
+            ) || self.starts_fnptr_var_decl() || self.starts_grouped_var_decl();
+
+            if vis == Visibility::Public && !defines_a_fn && !defines_a_global {
+                return Err(ParserError::UnexpectedToken(
+                    "public can only be used with functions or global variables".to_string(),
+                    vis_pos,
+                ));
+            }
+
             if let Some((Keyword::Asm, asm_pos)) = &kind {
-                let func = self.parse_asm_function(*asm_pos)?;
+                let func = self.parse_asm_function(*asm_pos, vis)?;
                 functions.push(func);
             }
             // `fn ident(...)` is a function definition; `fn(...)` (no name
             // between `fn` and `(`) is a function-pointer-typed global. The
             // statement-table dispatch handles the local-decl variant.
             else if self.check_keyword(&Keyword::Fn) && !self.starts_fnptr_var_decl() {
-                let func = self.parse_function(is_extern)?;
+                let func = self.parse_function(is_extern, vis)?;
                 functions.push(func);
             } else if self.check_keyword(&Keyword::Alias) {
                 if is_extern {
@@ -1215,7 +1247,7 @@ impl Parser {
                         self.peek().pos,
                     ));
                 }
-                let global = self.parse_global_var()?;
+                let global = self.parse_global_var(vis)?;
                 global_vars.push(global);
             } else {
                 return Err(ParserError::UnexpectedToken(
@@ -1456,7 +1488,7 @@ impl Parser {
     /// inclusion in `Program::functions`.
     #[parse_rule]
     fn parse_struct_def(&mut self) -> Result<Vec<crate::parser::Function>, ParserError> {
-        use crate::symbol::module::{FieldInfo, Visibility};
+        use crate::symbol::module::FieldInfo;
 
         let pos = pos!();
         kw!(Type);
@@ -1625,6 +1657,9 @@ impl Parser {
             name: mangled.clone(),
             params: params.clone(),
             return_type,
+            // A method's `public` governs access through its type, not object
+            // -file export; nothing outside Aspect calls a mangled method.
+            vis: Visibility::Private,
             pos,
         };
 
@@ -1904,7 +1939,11 @@ impl Parser {
     /// `pos` is the `asm` keyword, already consumed by the caller's
     /// kind-modifier scan.
     #[parse_rule]
-    fn parse_asm_function(&mut self, pos: Position) -> Result<crate::parser::Function, ParserError> {
+    fn parse_asm_function(
+        &mut self,
+        pos: Position,
+        vis: Visibility,
+    ) -> Result<crate::parser::Function, ParserError> {
         use crate::parser::{AsmReg, AsmSpec, Function, FunctionProto};
         use crate::symbol::table::FunctionSymbol;
 
@@ -2012,6 +2051,7 @@ impl Parser {
                 name,
                 params,
                 return_type,
+                vis,
                 pos,
             },
             body: crate::parser::FunctionBody::Asm(AsmSpec {
@@ -2069,7 +2109,11 @@ impl Parser {
     }
 
     #[parse_rule]
-    fn parse_function(&mut self, is_extern: bool) -> Result<crate::parser::Function, ParserError> {
+    fn parse_function(
+        &mut self,
+        is_extern: bool,
+        vis: Visibility,
+    ) -> Result<crate::parser::Function, ParserError> {
         use crate::parser::{Function, FunctionProto};
         use crate::symbol::table::FunctionSymbol;
 
@@ -2095,6 +2139,7 @@ impl Parser {
             name: name.clone(),
             params: params.clone(),
             return_type,
+            vis,
             pos,
         };
 
@@ -2125,7 +2170,7 @@ impl Parser {
     }
 
     #[parse_rule]
-    fn parse_global_var(&mut self) -> Result<crate::parser::GlobalVar, ParserError> {
+    fn parse_global_var(&mut self, vis: Visibility) -> Result<crate::parser::GlobalVar, ParserError> {
         use crate::parser::GlobalVar;
 
         let pos = pos!();
@@ -2149,6 +2194,7 @@ impl Parser {
             name,
             initializer,
             pos,
+            vis
         })
     }
 

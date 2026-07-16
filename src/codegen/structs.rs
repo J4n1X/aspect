@@ -28,11 +28,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.struct_fields.insert(info.id, fields);
         }
 
+        // The only fabricated position left in codegen: `FieldInfo` records no
+        // declaration site, so a bad field type here cannot name its own line.
+        // Fixable by putting a `pos` on `FieldInfo` at parse time.
         for info in program.symbols.structs() {
             let field_types: Result<Vec<BasicTypeEnum<'ctx>>, _> = info
                 .fields
                 .iter()
-                .map(|f| self.lang_type_to_llvm(&f.ty))
+                .map(|f| self.lang_type_to_llvm(&f.ty, Position::new(0, 0)))
                 .collect();
             let field_types = field_types?;
             self.struct_types[&info.id].set_body(&field_types, false);
@@ -45,6 +48,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(crate) fn lang_type_to_llvm(
         &self,
         ty: &LangType,
+        pos: Position,
     ) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
         if ty.pointer_depth == 0
             && ty.array_size.is_none()
@@ -53,12 +57,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             let st = self.struct_types.get(&id).ok_or_else(|| {
                 CodegenError::TypeError(
                     format!("unregistered type-struct id {id}"),
-                    Position::new(0, 0),
+                    pos,
                 )
             })?;
             return Ok((*st).into());
         }
-        ty.to_llvm(self.context)
+        ty.to_llvm(self.context, pos)
     }
 
     /// Lower an array `LangType` to `[N x T]`, resolving type-struct elements
@@ -66,9 +70,10 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(crate) fn lang_type_to_llvm_array(
         &self,
         ty: &LangType,
+        pos: Position,
     ) -> Result<inkwell::types::ArrayType<'ctx>, CodegenError> {
         let array_size = ty.array_size.ok_or_else(|| {
-            CodegenError::TypeError("Expected array type".to_string(), Position::new(0, 0))
+            CodegenError::TypeError("Expected array type".to_string(), pos)
         })?;
         // The element strips only the array dimension; pointer depth stays part
         // of the element type (`(i32*)[3]` allocates `[3 x ptr]`).
@@ -76,7 +81,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             array_size: None,
             ..*ty
         };
-        Ok(self.lang_type_to_llvm(&elem_ty)?.array_type(array_size))
+        Ok(self.lang_type_to_llvm(&elem_ty, pos)?.array_type(array_size))
     }
 
     /// Field layout index and type for `field` of struct `id`.
@@ -202,7 +207,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.emit_address(base)?.0
                 } else {
                     let val = self.generate_expression(base)?;
-                    let struct_ty = self.lang_type_to_llvm(&bt)?;
+                    let struct_ty = self.lang_type_to_llvm(&bt, base.pos)?;
                     let tmp = self.builder.build_alloca(struct_ty, "struct.tmp")?;
                     self.builder.build_store(tmp, val)?;
                     tmp

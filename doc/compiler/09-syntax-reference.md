@@ -26,6 +26,7 @@ Formal grammar and lexical specification for the Aspect language.
 5. [Operator precedence](#operator-precedence)
 6. [Scoping rules](#scoping-rules)
 7. [Notable constraints](#notable-constraints)
+   - [Visibility](#visibility)
    - [`asm fn`](#asm-fn)
 
 ---
@@ -99,8 +100,10 @@ Reserved keywords (not usable as identifiers):
 fn  extern  asm  const  type  struct  alias  public  sizeof
 while  if  else  elif  for  switch
 break  continue  as  return
-true  false
+true  false  null
 ```
+
+`null` is the null pointer constant — see [The opaque pointer `u0*`](#types-as-tokens).
 
 Register names (`rax`, `rdi`, …) are **not** keywords. They are ordinary
 identifiers that only carry meaning after a `:` in an `asm fn` signature or
@@ -200,8 +203,15 @@ hex-digit   ::= [0-9A-Fa-f]
 
 All integer literals are parsed as `i64` internally. The type of the
 resulting expression is inferred from context or defaults to `i32` for
-values that fit, `i64` otherwise. Negative literals do not exist; use
-unary minus: `0 - 128`.
+values that fit, `i64` otherwise.
+
+Negative literals do not exist — `-128` is unary minus applied to the
+literal `128`, as in C. It is ordinary and preferred; `0 - 128` is not
+required and buys nothing.
+
+The one consequence is that `i64`'s minimum cannot be written directly:
+`-9223372036854775808` fails to tokenize, because the literal overflows
+`i64` *before* the minus applies. Write `-9223372036854775807 - 1`.
 
 #### Float literals
 
@@ -210,8 +220,11 @@ float-literal ::= digit+ '.' digit+
 ```
 
 Float literals require digits on both sides of the decimal point.
-`5.` and `.5` are not valid — use `5.0` and `0.5`.  The resulting type is
-always `f64`.
+`5.` and `.5` are not valid — use `5.0` and `0.5`. The resulting type is
+inferred from context: a float literal adopts whichever float type the
+target requires (`f32` or `f64`), defaulting to `f64` when there is no
+target. This is literal-only — a genuine `f64` *value* still needs an
+explicit `as` to narrow to `f32`.
 
 #### String literals
 
@@ -364,11 +377,13 @@ they get their own chapter: [10-modules.md](10-modules.md).
 program ::= (newline* top-decl newline*)*
 
 top-decl ::= extern-fn-decl
-           | asm-fn-decl
-           | fn-decl
-           | global-var-decl
+           | 'public'? asm-fn-decl
+           | 'public'? fn-decl
+           | 'public'? global-var-decl
            | alias-decl
            | struct-decl
+# `public` marks a symbol this file defines as exported. `public extern` and
+# `public` on an alias/type are errors — see "Visibility" below.
 
 extern-fn-decl ::= 'extern' 'fn' ident '(' param-list ')' return-ann term
 
@@ -442,7 +457,9 @@ declared type is an "undefined type" error.
 
 An `alias` is fully transparent: `alias myint i32` makes `myint` an exact stand-in
 for `i32` everywhere (variables, parameters, return types), with no distinct type
-identity in the type checker or generated IR. Aliases must be declared before use.
+identity in the type checker or generated IR. Aliases may be referenced *before*
+their declaration — a name-collection prescan reserves them, the same two-pass
+treatment type-structs get (see below). Alias chains also resolve out of order.
 
 A **type-struct** (`type Name { ... }`) is a named aggregate. Fields are **private
 by default**; prefix a field with `public` to expose it. Type-struct names may be
@@ -571,13 +588,16 @@ expr ::= cast-or-alloc (infix-op cast-or-alloc)*
 cast-or-alloc ::= alloc-expr
                 | cast-expr
 
-alloc-expr ::= type-token '[' expr ']'   # dynamic allocation
+alloc-expr ::= type-token '[' expr ']'   # dynamic allocation; `expr` must not be a
+                                         # bare decimal literal — the lexer folds
+                                         # `T[N]` into one type token. Use a variable
+                                         # or parenthesise: `u8[(1024)]`.
 
 cast-expr ::= unary-expr ('as' type-token)*
 
 unary-expr ::= '&' unary-expr    # reference (address-of)
              | '*' unary-expr    # dereference
-             | '-' unary-expr    # negation  (0 - expr)
+             | '-' unary-expr    # negation — folds into numeric literals; otherwise 0 - expr
              | '!' unary-expr    # logical NOT
              | '~' unary-expr    # bitwise NOT
              | postfix-expr
@@ -643,7 +663,10 @@ i32 clamped = {
   parses as `x + (1 as i64)`, not `(x + 1) as i64`.
 - Postfix operations (calls, subscripts) chain: `arr[i][j]` and
   `f()()` are both valid.
-- Unary minus has no literal form; it is sugar for `0 - expr`.
+- Unary minus on an integer or float **literal** is folded at parse time
+  into a negative literal (`-128` becomes `Literal(Integer(-128))`), so
+  it carries the literal's context-inferred type and can narrow (e.g.
+  into `i8`). On any other operand it desugars to `0 - expr`.
 - `sizeof(T)` is a **compile-time** `u64` that lowers to a single
   constant at codegen via the target data layout. Works for every
   type (primitives, pointers, function pointers, arrays, type-structs
@@ -675,7 +698,8 @@ precedence, making left-to-right order natural).
 | — | `()` `[]` | parsed by `parse_postfix` (tightest) |
 
 Comparison operators produce `i1` (1 = true, 0 = false). When assigned to an integer
-variable the `i1` is zero-extended to the target width. Logical NOT (`!`) produces `i32`.
+variable the `i1` is zero-extended to the target width. Logical NOT (`!`) also produces
+`i1`/`bool`, identically to a comparison.
 All other binary operators preserve the type of the left operand.
 
 Pointer-to-pointer comparisons (`==`, `!=`, `<`, `>`, `<=`, `>=`) are supported; operands
@@ -711,6 +735,40 @@ fn main(u32 argc, u8 **argv) -> i32 {
 ---
 
 ## Notable constraints
+
+### Visibility
+
+`public` on a top-level function or global decides one thing: whether its
+symbol leaves the object file.
+
+```
+public fn exported(i32 x) -> i32 { return x }    # external linkage
+fn helper(i32 x) -> i32 { return x }             # internal linkage
+public i32 counter = 0                           # external linkage
+i32 scratch = 0                                  # private linkage
+```
+
+It is **not** about who may call or read it. A program and every module it
+imports compile to a single LLVM module, so a private function or global is
+reachable from anywhere in the program regardless — `public` only matters to
+code outside Aspect that must find the symbol by name.
+
+Private is the default because it is what makes dead code collectable: LLVM
+may delete an unreachable private symbol, and may never delete an external
+one, since some other object file might reference it. Marking everything
+public would put the entire unused standard library in every binary.
+
+- `main` and `_start` are implicitly public — the C runtime calls one and the
+  linker enters at the other.
+- `public extern fn` is an error: `extern` names a symbol defined elsewhere,
+  so there is nothing here to export.
+- `public` on a **global variable** works the same way: `public i32 counter = 0`
+  gets external linkage, a private one gets `private` linkage and is collected
+  when unused.
+- `public` on an alias or a type is an error — both are compile-time only and
+  have no symbol to export.
+- Inside a type-struct, `public` means something different — access through
+  the type. See [Type-structs](#top-level).
 
 ### `asm fn`
 
@@ -783,8 +841,12 @@ if x > 0 {
 ### Literal integer range
 
 Integer literals are scanned into an `i64`. Specifying a value that
-exceeds `i64::MAX` is a parse error. Negative values have no literal
-form; write `0 - n` instead.
+exceeds `i64::MAX` is a parse error. Negative values are written with
+unary minus (`-n`) — see [Integer literals](#integer-literals). Because
+the parser folds the minus into the literal, `-128` carries the
+literal's context-inferred type and fits `i8`; the binary form
+`0 - 128` is an `i32` expression and will **not** narrow to `i8`
+without an explicit `as`.
 
 ### `as` is explicit and always required for narrowing
 
@@ -799,21 +861,28 @@ mechanism exists in the codegen or typechecker).
 ```
 u64 n = 0
 n += 1        # i32 literal into u64 context — implicit, no cast needed
-i32 s = 0 - 1
+i32 s = -1
 u32 u = s     # i32 -> u32, same width, opposite sign — also implicit
 ```
 
 Narrowing (e.g., `i64` to `i32`, or `i32` to `i8`) always requires `as`.
 Pointer-to-integer and integer-to-pointer conversions also require `as`.
 
-### String literals are `u8*`, not `const u8*`
+### String literals are `u8*`, and `const` is a binding qualifier
 
 The lexer returns string literal tokens whose expression type is `u8*`
-(non-const, pointer depth 1). The type checker does not currently treat
-`u8*` and `const u8*` as compatible, so functions expecting `const u8*`
-parameters may emit a type error when called with a string literal or a
-plain `u8*`. Prefer non-`const` parameter types for externally-declared
-functions.
+(non-const, pointer depth 1).
+
+`const` is **ignored for coercion purposes** — `types_coercible`
+(`src/typechecker/types.rs`) opens with "Exact match (ignoring const)"
+and never consults `is_const` on any compatibility path. So `u8*` and
+`const u8*` are freely interchangeable in both directions, and string
+literals pass to `const u8*` parameters with no cast.
+
+What `const` does do is prevent assignment *through the binding*:
+`const u8 *s` means `s` cannot be reassigned. It confers nothing on the
+pointed-to data — `*s = 90` is allowed and unchecked, the opposite of
+what a C reader expects from `const char *`.
 
 ### Array-to-pointer decay
 
@@ -841,14 +910,33 @@ separators.
 ### Dynamic allocation syntax
 
 `type[count]` as an expression (not a declaration) allocates `count`
-elements of `type` on the heap and returns a pointer:
+elements of `type` as a runtime-sized **stack** allocation (an LLVM
+`alloca`, like a C VLA) and returns a pointer. It is *not* a heap
+allocation — the compiler emits no `malloc` (the string does not appear
+anywhere in `src/`); for heap memory call `malloc` from `std/c/stdlib`.
 
 ```
-u8 *buf = u8[1024]    # heap-allocate 1024 bytes, return u8*
+u64 n = 1024
+u8 *buf = u8[n]       # stack-allocate n bytes, return u8*
 ```
 
-This is separate from the preallocated-array declaration `u8[1024] buf`
-(which allocates on the stack at compile time).
+The count cannot be a bare decimal literal. The lexer eagerly folds
+`T[N]` into a single type token (see [Types as tokens](#types-as-tokens)),
+so `u8 *buf = u8[1024]` leaves no `[` for the alloc rule to consume and
+fails with "Expected expression". Use a variable, a `const`, or
+parentheses — `u8[n]`, `u8[N]`, `u8[(1024)]`.
+
+Because the memory is stack memory, the pointer is invalid once the
+enclosing function returns; do not return it. The compiler does not
+diagnose this.
+
+At file scope the same syntax instead emits a zero-initialized global
+(`@.global_alloc = global [N x T] zeroinitializer`), and there the count
+*must* be a compile-time integer literal — `u8 *g = u8[(8)]`.
+
+This is separate from the preallocated-array declaration `u8[1024] buf`.
+Both live on the stack; the difference is compile-time-sized vs
+runtime-sized.
 
 ---
 

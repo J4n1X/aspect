@@ -261,7 +261,12 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Returns `CodegenError` if the passes fail to run
     pub fn optimize(&self, level: u8, verify_each: bool) -> Result<(), CodegenError> {
         if level == 0 {
-            return Ok(());
+            // `globaldce` runs even here. It is not an optimization in the
+            // sense -O0 disclaims: it deletes only symbols nothing can reach,
+            // so no code you could step through changes. Skipping it would put
+            // the whole unused stdlib in every debug binary — a program that
+            // imports std/io would carry all 375 syscall wrappers.
+            return self.run_pass_pipeline("globaldce", verify_each);
         }
 
         let target_machine = self.get_target_machine();
@@ -297,6 +302,20 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| {
                 CodegenError::InvalidOperation(
                     format!("Failed to run optimization passes: {e}"),
+                    crate::lexer::Position::new(0, 0),
+                )
+            })
+    }
+
+    /// Run a named LLVM pass pipeline over the module.
+    fn run_pass_pipeline(&self, passes: &str, verify_each: bool) -> Result<(), CodegenError> {
+        let pass_options = PassBuilderOptions::create();
+        pass_options.set_verify_each(verify_each);
+        self.module
+            .run_passes(passes, self.get_target_machine(), pass_options)
+            .map_err(|e| {
+                CodegenError::InvalidOperation(
+                    format!("Failed to run pass pipeline '{passes}': {e}"),
                     crate::lexer::Position::new(0, 0),
                 )
             })

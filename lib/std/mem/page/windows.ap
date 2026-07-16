@@ -1,0 +1,98 @@
+#-
+  std/mem/page — Windows backend. kernel32 only, no CRT.
+
+  Windows syscall numbers move between builds, so unlike Linux this layer
+  goes through the documented system DLL rather than the kernel directly.
+  kernel32 is not libc: nothing here pulls in the C runtime.
+
+  64-bit Windows only. Not because kernel32 differs — the export surface is
+  the same contract on x64 and arm64 — but because SYSTEM_INFO below is a
+  64-bit layout: it has a pointer-sized field, and 32-bit Windows would read
+  `alloc_granularity` off the end of the real 36-byte struct. Failing to
+  resolve `page_size` is the honest outcome there; a silently wrong
+  granularity is not.
+
+  Deltas from the mmap backends, which the contract in generic.ap allows for:
+
+  * `page_granularity` really is coarser than `page_size` here (64 KiB vs
+    4 KiB). A reservation base is granularity-aligned and a one-page
+    reserve still consumes 64 KiB of address space.
+  * `page_release` ignores `n_bytes`. MEM_RELEASE demands a size of zero
+    and frees the whole reservation from its base; the parameter is in the
+    signature because munmap needs it. Passing the reserved length is what
+    a caller should write — it is what keeps the call portable.
+
+  VirtualProtect is deliberately absent: commit here is a VirtualAlloc
+  flag, so nothing in this surface needs it.
+-#
+$module std/mem/page
+
+$if defined(OS_WINDOWS) && (defined(ARCH_X86_64) || defined(ARCH_AARCH64))
+
+$define MEM_COMMIT   0x1000
+$define MEM_RESERVE  0x2000
+$define MEM_DECOMMIT 0x4000
+$define MEM_RELEASE  0x8000
+
+$define PAGE_NOACCESS  0x01
+$define PAGE_READWRITE 0x04
+
+# SYSTEM_INFO. The leading DWORD is a union of dwOemId with a pair of
+# WORDs no caller of ours reads. Layout is the 64-bit ABI: 48 bytes,
+# dwPageSize at 4, dwActiveProcessorMask (a DWORD_PTR) at 24, granularity
+# at 40 — see the arch gate above. Fields are public because the accessors
+# below are free functions, not methods.
+type SystemInfo {
+    public u32 oem_id
+    public u32 page_size
+    public u0* min_app_addr
+    public u0* max_app_addr
+    public u64 active_proc_mask
+    public u32 num_processors
+    public u32 processor_type
+    public u32 alloc_granularity
+    public u16 processor_level
+    public u16 processor_revision
+}
+
+extern fn GetSystemInfo(SystemInfo* info) -> u0
+extern fn VirtualAlloc(u0* addr, u64 size, u32 alloc_type, u32 protect) -> u0*
+extern fn VirtualFree(u0* addr, u64 size, u32 free_type) -> i32
+
+fn query_system_info() -> SystemInfo {
+    SystemInfo si = SystemInfo { oem_id = 0, page_size = 0, min_app_addr = null, max_app_addr = null, active_proc_mask = 0, num_processors = 0, processor_type = 0, alloc_granularity = 0, processor_level = 0, processor_revision = 0 }
+    GetSystemInfo(&si)
+    return si
+}
+
+fn page_size() -> u64 {
+    SystemInfo si = query_system_info()
+    return si.page_size as u64
+}
+
+fn page_granularity() -> u64 {
+    SystemInfo si = query_system_info()
+    return si.alloc_granularity as u64
+}
+
+fn page_reserve(u64 n_bytes) -> u0* {
+    return VirtualAlloc(null, n_bytes, MEM_RESERVE, PAGE_NOACCESS)
+}
+
+fn page_commit(u0* p, u64 n_bytes) -> bool {
+    return VirtualAlloc(p, n_bytes, MEM_COMMIT, PAGE_READWRITE) != null
+}
+
+fn page_decommit(u0* p, u64 n_bytes) -> bool {
+    return VirtualFree(p, n_bytes, MEM_DECOMMIT) != 0
+}
+
+fn page_release(u0* p, u64 n_bytes) -> bool {
+    return VirtualFree(p, 0, MEM_RELEASE) != 0
+}
+
+fn page_map(u64 n_bytes) -> u0* {
+    return VirtualAlloc(null, n_bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE)
+}
+
+$endif

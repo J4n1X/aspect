@@ -1,8 +1,8 @@
 # expected: 42
 #-
   Phase 1 demo for the aspect standard library. Exercises `$import`
-  (resolved against the `-I lib` search root), `std/io` (built on
-  `putchar`, no `printf`), and `std/mem` (byte-size malloc/free wrappers
+  (resolved against the `-I lib` search root), `std/io` (no libc: the
+  write(2) syscall directly), and `std/mem` (byte-size malloc/free wrappers
   paired with the new `sizeof(T)` compile-time constant).
   Returns 42 so the test harness can sanity-check the exit code.
 -#

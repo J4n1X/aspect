@@ -11,6 +11,8 @@ $import std/rand
 $import std/sort
 $import std/collections
 $import std/io
+$import std/mem
+$import std/mem/page
 $import std/c/stdlib    # malloc/free used directly below
 $import std/c/string    # strcmp used directly below
 
@@ -24,6 +26,69 @@ fn check(bool ok, u8* label) -> i32 {
     println(label)
     return 1
 }
+
+# std/mem/page exists only where a platform file implements it. Windows is
+# left out of the checks rather than unimplemented: this suite has never run
+# on a Windows host, so gating it in would assert what nobody executes.
+$if defined(OS_LINUX) || defined(OS_MACOS)
+
+fn check_pages() -> i32 {
+    i32 fails = 0
+    u64 psz = page_size()
+    # Not `== 4096`: macOS/arm64 pages are 16 KiB. A power of two no smaller
+    # than 4 KiB is what every target this runs on guarantees.
+    fails += check(psz >= 4096 && (psz & (psz - 1)) == 0, "page_size is a power of two >= 4096")
+    fails += check(page_granularity() >= psz, "page_granularity >= page_size")
+
+    # map -> write the whole range -> read back -> release
+    u64 n = psz * 4
+    u8* p = page_map(n)
+    fails += check(p != null, "page_map")
+    if p != null {
+        u64 i = 0
+        while i < n { p[i] = ((i % 251) + 1) as u8 i = i + 1 }
+        bool pattern_ok = true
+        i = 0
+        while i < n {
+            if p[i] != ((i % 251) + 1) as u8 { pattern_ok = false }
+            i = i + 1
+        }
+        fails += check(pattern_ok, "page_map range is readable+writable")
+        fails += check(page_release(p, n), "page_release")
+    }
+
+    # reserve wide, commit narrow, then grow into the reservation
+    u64 res = psz * 16
+    u8* base = page_reserve(res)
+    fails += check(base != null, "page_reserve")
+    if base != null {
+        fails += check(page_commit(base, psz * 2), "page_commit")
+        base[0] = 99
+        base[psz * 2 - 1] = 98
+        fails += check(page_commit(base, psz * 4), "page_commit grow")
+        fails += check(base[0] == 99, "reservation base does not move on grow")
+        fails += check(page_decommit(base, psz * 4), "page_decommit")
+        fails += check(page_commit(base, psz * 4), "page_commit after decommit")
+        # decommit must drop the backing, not merely revoke access — a
+        # mprotect-only implementation leaves the old 99 here.
+        fails += check(base[0] == 0, "page_decommit drops backing")
+        fails += check(page_release(base, res), "page_release reservation")
+    }
+
+    # a reservation that cannot fit in the address space fails as null
+    u64 huge = 0
+    huge = ~huge
+    huge = huge / 2
+    fails += check(page_reserve(huge) == null, "page_reserve too large -> null")
+    fails += check(page_map(huge) == null, "page_map too large -> null")
+    return fails
+}
+
+$else
+
+fn check_pages() -> i32 { return 0 }
+
+$endif
 
 fn main(u32 argc, u8** argv) -> i32 {
     i32 fails = 0
@@ -135,6 +200,27 @@ fn main(u32 argc, u8** argv) -> i32 {
     fails += check(m.get_or(keybuf, 0 - 1) == 42, "map get after growth")
     fails += check(m.get_or("apple", 0) == 4, "map old key after growth")
     m.destroy()
+
+    # ── std/mem ─────────────────────────────────────────────────────────
+    u8* raw = alloc_bytes(64)
+    fails += check(raw != null, "alloc_bytes")
+    if raw != null {
+        raw[0] = 7
+        raw[63] = 9
+        fails += check(raw[0] == 7 && raw[63] == 9, "alloc_bytes is writable")
+        free_ptr(raw)
+    }
+    u8* zeroed = zalloc_bytes(64)
+    fails += check(zeroed != null, "zalloc_bytes")
+    if zeroed != null {
+        bool all_zero = true
+        for (i32 i = 0; i < 64; i += 1) {
+            if zeroed[i] != 0 { all_zero = false }
+        }
+        fails += check(all_zero, "zalloc_bytes is zeroed")
+        free_ptr(zeroed)
+    }
+    fails += check_pages()
 
     if fails == 0 {
         println("ALL STDLIB CHECKS PASSED")

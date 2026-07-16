@@ -74,7 +74,7 @@ pub trait ValueEmitter<'ctx> {
         ty: &LangType,
         pos: Position,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-        match ty.to_llvm(self.context())? {
+        match ty.to_llvm(self.context(), pos)? {
             BasicTypeEnum::IntType(int_ty) => Ok(int_ty.const_int(val as u64, true).into()),
             _ => Err(CodegenError::TypeError(
                 "integer literal must have integer type".to_string(),
@@ -91,7 +91,7 @@ pub trait ValueEmitter<'ctx> {
         ty: &LangType,
         pos: Position,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-        match ty.to_llvm(self.context())? {
+        match ty.to_llvm(self.context(), pos)? {
             BasicTypeEnum::FloatType(float_ty) => Ok(float_ty.const_float(val).into()),
             _ => Err(CodegenError::TypeError(
                 "float literal must have float type".to_string(),

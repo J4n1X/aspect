@@ -1,0 +1,67 @@
+#-
+  std/mem/page — page-level address space. The front door: this file is the
+  contract, the platform files are the implementations.
+
+      generic.ap   this file — contract only, no code
+      linux.ap     raw mmap/mprotect/munmap syscalls, no libc
+      windows.ap   kernel32 VirtualAlloc/VirtualFree, no C runtime
+      posix.ap     libc mmap/mprotect/munmap — macOS, and Linux on an arch
+                   linux.ap does not cover
+
+  ── The surface ─────────────────────────────────────────────────────────
+      page_size()             bytes per page — the unit of commit
+      page_granularity()      alignment of a reservation base
+      page_reserve(n)         claim address space, no access, no backing
+      page_commit(p, n)       make a reserved range readable+writable
+      page_decommit(p, n)     drop backing, keep the reservation
+      page_release(p, n)      free an entire reservation
+      page_map(n)             reserve+commit in one step
+
+  ── Why this is not part of std/mem ─────────────────────────────────────
+  It sits below `std/mem`'s `alloc_bytes` and does not replace it. It is a
+  separate module rather than another file of std/mem because std/mem's
+  allocator *is* a malloc wrapper: every file of a module is compiled into
+  the program, so sharing one module would make every page-only caller pull
+  in the C runtime for an allocator it never calls. Split, `$import
+  std/mem/page` links no libc on Linux and no CRT on Windows. Importing
+  both modules is fine and costs what std/mem costs.
+
+  ── Why reserve/commit is exposed rather than hidden ────────────────────
+  mmap has a flat model and VirtualAlloc splits reserve from commit. The
+  split is the reason to be down here at all: reserve a large range once,
+  commit into it as you grow, and the addresses never move. Collapsing to
+  a flat `page_map` would throw that away, so the split is exposed on both
+  and mmap emulates it — PROT_NONE to reserve, mprotect to commit.
+
+  Emulation only runs one way: mmap can express everything VirtualAlloc
+  does, but MEM_RELEASE cannot free part of a reservation the way munmap
+  can. So the *lifetime* rule is Windows-shaped — release frees a whole
+  reservation from its base — because that one mmap implements exactly.
+  A surface shaped the other way could not be honoured on Windows at all.
+
+  ── The gap that is NOT papered over ────────────────────────────────────
+  `page_commit` does not mean the same thing on both, and no wrapper can
+  make it. On Windows a commit charges the system commit limit: it fails
+  up front if the memory is not there, and a later write cannot fail for
+  lack of memory. On Linux under default overcommit, mprotect only grants
+  *access* — pages are backed on first touch, so `page_commit` can succeed
+  and the write that follows can still take an OOM kill. Treat success as
+  "the range is now yours to touch", never as "the memory is secured".
+
+  ── Contract ────────────────────────────────────────────────────────────
+  `p` must be page-aligned and `n_bytes` a multiple of `page_size()` for
+  commit/decommit; any pointer from `page_reserve`/`page_map` satisfies
+  the alignment. mmap enforces this (mprotect rejects a misaligned base);
+  Windows would silently round, so the strict rule is the portable one.
+
+  Failure is a `bool`, not a code: errno and Win32 error codes are
+  disjoint namespaces, so a number here could not be read portably. Call
+  `std/linux/syscall` directly when the errno actually matters.
+
+  `page_release` returns true on the mmap backends for a range that was
+  never reserved — munmap defines an empty range as a no-op success —
+  where Windows returns false. It reports that a release happened, not
+  that `p` was ever yours; it is not a probe for whether an address is
+  mapped.
+-#
+$module std/mem/page

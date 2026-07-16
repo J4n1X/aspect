@@ -1,0 +1,21 @@
+#-
+  std/c/unistd.ap — raw libc bindings for unistd.h.
+
+  Bindings live in `std/c/*` rather than in the platform files that call
+  them, as they do for stdio/stdlib/string.
+
+  Note this does NOT protect a caller who has its own `write`: function
+  names are one flat namespace across all modules (modules gate visibility,
+  not identity), so a root-module `write` still shadows this extern and the
+  error surfaces inside whichever std file called it. Nothing on this side
+  can prevent that.
+-#
+$module std/c/unistd
+
+extern fn write(i32 fd, u0* buf, u64 count) -> i64    # bytes written, or -1
+extern fn read(i32 fd, u0* buf, u64 count) -> i64     # bytes read, 0 at EOF, -1 on error
+
+# Bytes per page. `sysconf(_SC_PAGESIZE)` is the POSIX spelling, but its
+# selector is a per-OS constant; this one takes no arguments and is in every
+# libc that matters.
+extern fn getpagesize() -> i32

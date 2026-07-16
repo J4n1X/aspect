@@ -1,13 +1,16 @@
 use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::types::{AnyType, BasicMetadataTypeEnum, BasicType};
+use inkwell::module::Linkage;
 use inkwell::values::{BasicValueEnum, FunctionValue};
 use inkwell::AddressSpace;
 
 use crate::codegen::generator::CodeGenerator;
+use crate::codegen::expressions::EmitMode;
 use crate::codegen::structs::is_struct_value;
 use crate::codegen::{CodegenError, LangTypeExt};
 use crate::lexer::{Position, TypeBase};
-use crate::parser::{Expression, Function, LangType, Statement};
+use crate::parser::{Expression, Function, FunctionBody, LangType, Statement};
+use crate::symbol::module::Visibility;
 
 /// Prepared LLVM call arguments plus the optional `sret` result slot
 /// (its pointer and struct type) that the caller must load after the call.
@@ -18,6 +21,32 @@ type PreparedCallArgs<'ctx> = (
         inkwell::types::BasicTypeEnum<'ctx>,
     )>,
 );
+
+/// Symbols an entry point needs to keep, whatever the source says: `main` is
+/// called by the C runtime and looked up by name by the JIT, `_start` is the
+/// linker's default entry for a freestanding binary.
+const IMPLICITLY_PUBLIC: [&str; 2] = ["main", "_start"];
+
+/// The LLVM linkage a function is declared with. `None` means LLVM's default,
+/// external.
+///
+/// A program and everything it imports compile to a *single* LLVM module, so
+/// internal linkage costs nothing at the call site and buys everything at the
+/// link: `globaldce` may delete an unreachable internal function, and may never
+/// touch an external one — some other object file might call it. Defaulting to
+/// external is what leaves an entire unused stdlib in every binary.
+///
+/// `extern fn` is the exception that must stay external: it is a declaration of
+/// something defined elsewhere, and internal linkage on a body-less declaration
+/// is invalid IR.
+fn linkage_for(func: &Function) -> Option<Linkage> {
+    match func.body {
+        FunctionBody::Extern => None,
+        _ if IMPLICITLY_PUBLIC.contains(&func.proto.name.as_str()) => None,
+        _ if func.proto.vis == Visibility::Public => None,
+        _ => Some(Linkage::Internal),
+    }
+}
 
 /// RAII guard that sets `current_function` / `current_function_return_type`
 /// on creation and clears them on drop.
@@ -65,7 +94,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // sret: caller allocates the result slot and passes it as arg 0.
         let sret_slot = if let Some(rt) = ret_ty.filter(is_struct_value) {
-            let struct_ty = self.lang_type_to_llvm(&rt)?;
+            let struct_ty = self.lang_type_to_llvm(&rt, args.first().map_or(Position::new(0,0), |a| a.pos))?;
             let slot = self.builder.build_alloca(struct_ty, "sret.tmp")?;
             arg_values.push(slot.into());
             Some((slot, struct_ty))
@@ -77,13 +106,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             let target_ty = param_types.get(i);
             if let Some(t) = target_ty.filter(|t| is_struct_value(t)) {
                 // byval: materialise the value into a temp and pass its address.
-                let val = self.generate_coerced_value(arg, Some(t))?;
-                let struct_ty = self.lang_type_to_llvm(t)?;
+                let val = self.generate_coerced_value(arg, Some(t), EmitMode::Runtime)?;
+                let struct_ty = self.lang_type_to_llvm(t, arg.pos)?;
                 let tmp = self.builder.build_alloca(struct_ty, "byval.tmp")?;
                 self.builder.build_store(tmp, val)?;
                 arg_values.push(tmp.into());
             } else {
-                let val = self.generate_coerced_value(arg, target_ty)?;
+                let val = self.generate_coerced_value(arg, target_ty, EmitMode::Runtime)?;
                 arg_values.push(val.into());
             }
         }
@@ -103,6 +132,8 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Declare a function (without body)
+    ///
+    /// Linkage is decided here — see [`linkage_for`].
     pub(crate) fn declare_function(
         &mut self,
         func: &Function,
@@ -125,7 +156,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             if is_struct_value(ty) {
                 llvm_params.push(ptr_ty.into());
             } else {
-                llvm_params.push(ty.to_llvm(self.context)?.into());
+                llvm_params.push(ty.to_llvm(self.context, func.proto.pos)?.into());
             }
         }
 
@@ -133,10 +164,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         let fn_type = if ret_is_struct || ret_ty.is_void() {
             self.context.void_type().fn_type(&llvm_params, false)
         } else {
-            ret_ty.to_llvm(self.context)?.fn_type(&llvm_params, false)
+            ret_ty.to_llvm(self.context, func.proto.pos)?.fn_type(&llvm_params, false)
         };
 
-        let function = self.module.add_function(&func.proto.name, fn_type, None);
+        let function = self
+            .module
+            .add_function(&func.proto.name, fn_type, linkage_for(func));
 
         // Attach sret / byval type attributes and name the real parameters.
         let offset = u32::from(ret_is_struct);
@@ -196,7 +229,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             if is_struct_value(param_type) {
                 // `byval`: the incoming pointer already addresses a caller-made
                 // copy — use it directly as the variable's storage, no re-copy.
-                let struct_ty = cg.lang_type_to_llvm(param_type)?;
+                let struct_ty = cg.lang_type_to_llvm(param_type, func.proto.pos)?;
                 cg.add_variable(
                     param_name.clone(),
                     param_value.into_pointer_value(),
@@ -205,7 +238,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     None,
                 );
             } else {
-                let param_llvm_type = param_type.to_llvm(cg.context)?;
+                let param_llvm_type = param_type.to_llvm(cg.context, func.proto.pos)?;
                 let alloca = cg.builder.build_alloca(param_llvm_type, param_name)?;
                 cg.builder.build_store(alloca, param_value)?;
                 cg.add_variable(
@@ -227,14 +260,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         if !cg.block_has_terminator() {
             if ret_is_struct {
                 // Store a zeroed struct through the sret pointer, return void.
-                let struct_ty = cg.lang_type_to_llvm(&func.proto.return_type)?;
+                let struct_ty = cg.lang_type_to_llvm(&func.proto.return_type, func.proto.pos)?;
                 let sret_ptr = cg.current_sret.expect("sret pointer set for struct return");
                 cg.builder.build_store(sret_ptr, struct_ty.const_zero())?;
                 cg.builder.build_return(None)?;
             } else if func.proto.return_type.is_void() {
                 cg.builder.build_return(None)?;
             } else {
-                let zero = cg.get_zero_value(&func.proto.return_type)?;
+                let zero = cg.get_zero_value(&func.proto.return_type, func.proto.pos)?;
                 cg.builder.build_return(Some(&zero))?;
             }
         }
@@ -322,14 +355,14 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Reconstruct the LLVM function type from the registered signature.
         let param_types: Result<Vec<_>, _> =
-            sig.params.iter().map(|t| self.lang_type_to_llvm(t)).collect();
+            sig.params.iter().map(|t| self.lang_type_to_llvm(t, pos)).collect();
         let param_types = param_types?;
         let param_metas: Vec<BasicMetadataTypeEnum<'ctx>> =
             param_types.iter().map(|t| (*t).into()).collect();
         let fn_ty = if sig.return_type.is_void() {
             self.context.void_type().fn_type(&param_metas, false)
         } else {
-            self.lang_type_to_llvm(&sig.return_type)?
+            self.lang_type_to_llvm(&sig.return_type, pos)?
                 .fn_type(&param_metas, false)
         };
 
@@ -339,7 +372,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             Vec::with_capacity(args.len());
         for (i, arg) in args.iter().enumerate() {
             let target = sig.params.get(i);
-            let val = self.generate_coerced_value(arg, target)?;
+            let val = self.generate_coerced_value(arg, target, EmitMode::Runtime)?;
             arg_values.push(val.into());
         }
 
@@ -369,5 +402,91 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<(), CodegenError> {
         self.build_indirect_call_inner(callee, args, pos)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::codegen::CodeGenerator;
+    use crate::parser::Parser;
+    use crate::target::TargetSpec;
+    use crate::typechecker::TypeChecker;
+    use inkwell::context::Context;
+
+    /// Compile `source` to an LLVM IR string.
+    fn ir_for(source: &str, context: &Context) -> String {
+        let tokens = crate::lexer::tokenize(source.to_string()).expect("lex");
+        let mut parser = Parser::new(tokens);
+        let mut program = parser.parse_program().expect("parse");
+        let mut tc = TypeChecker::new();
+        tc.check_program(&mut program).expect("typecheck");
+        let mut codegen =
+            CodeGenerator::new(context, "linkage_test", &TargetSpec::host()).expect("codegen setup");
+        codegen.generate(&program).expect("generate");
+        codegen.print_ir_to_string()
+    }
+
+    /// The `define` line for `name`, panicking if it was never emitted.
+    fn define_of<'a>(ir: &'a str, name: &str) -> &'a str {
+        ir.lines()
+            .find(|l| l.starts_with("define") && l.contains(&format!("@{name}(")))
+            .unwrap_or_else(|| panic!("no definition of `{name}` in:\n{ir}"))
+    }
+
+    const SRC: &str = r#"
+extern fn puts(u8 *s) -> i32
+
+fn helper() -> i32 { return 1 }
+
+public fn exported() -> i32 { return 2 }
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return helper() + exported() + puts("x")
+}
+"#;
+
+    /// Internal linkage is what lets `globaldce` delete an unreachable
+    /// function. Emitting these as external — LLVM's default, and what
+    /// `add_function(.., None)` gives you — leaves the whole unused stdlib in
+    /// every binary, and no optimization level can recover it: the linkage is
+    /// a promise that some other object file might call in.
+    #[test]
+    fn a_private_function_gets_internal_linkage() {
+        let ctx = Context::create();
+        let ir = ir_for(SRC, &ctx);
+        assert!(
+            define_of(&ir, "helper").contains(" internal "),
+            "expected `helper` to be internal, got: {}",
+            define_of(&ir, "helper")
+        );
+    }
+
+    #[test]
+    fn public_and_the_entry_point_stay_external() {
+        let ctx = Context::create();
+        let ir = ir_for(SRC, &ctx);
+        for name in ["exported", "main"] {
+            assert!(
+                !define_of(&ir, name).contains(" internal "),
+                "`{name}` must stay external, got: {}",
+                define_of(&ir, name)
+            );
+        }
+    }
+
+    /// An `extern fn` is a body-less declaration of something defined
+    /// elsewhere; internal linkage on it is invalid IR, not merely useless.
+    #[test]
+    fn an_extern_declaration_is_never_internalised() {
+        let ctx = Context::create();
+        let ir = ir_for(SRC, &ctx);
+        let decl = ir
+            .lines()
+            .find(|l| l.starts_with("declare") && l.contains("@puts("))
+            .expect("no declaration of `puts`");
+        assert!(
+            !decl.contains(" internal "),
+            "extern declaration must stay external, got: {decl}"
+        );
     }
 }

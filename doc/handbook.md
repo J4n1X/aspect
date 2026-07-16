@@ -105,9 +105,12 @@ Two more subcommands exist for looking under the hood while learning the
 language — useful when you're not sure how something parses:
 
 ```bash
-aspc lex hello.ap     # print the token stream
-aspc parse hello.ap    # print the AST
+aspc lex -I lib hello.ap     # print the token stream
+aspc parse -I lib hello.ap   # print the AST
 ```
+
+These need `-I lib` too: imports are resolved during tokenization, so
+even `lex` has to find `std/io`.
 
 ---
 
@@ -126,7 +129,9 @@ type Point {
     public i32 y    # fields are private by default.
 
     # An instance method — first param is the bare identifier `this`.
-    const fn magnitude_squared(this) -> i32 {
+    # `public` because `distance_from_origin` below is a free function,
+    # i.e. outside the type; methods are private by default too.
+    public const fn magnitude_squared(this) -> i32 {
         return this.x * this.x + this.y * this.y
     }
 
@@ -259,8 +264,23 @@ u8 *s   = "hello\n"    # \n \r \t \\ \" are the supported escapes
 bool ok = true
 ```
 
-There's no negative literal syntax — `0 - 128` is how you write a
-negative number; unary minus is sugar for exactly that.
+Write negative numbers with unary minus: `-128`, `-3.5`. There is no
+negative *literal* at the token level — `-128` lexes as `-` applied to
+`128` — which matters in exactly one place. Because the minus is applied
+after the literal is read, the literal itself must fit the type on its
+own, so `i64` MIN cannot be written directly:
+
+```aspect
+i64 m = -9223372036854775808   # fails to TOKENIZE: 9223372036854775808
+                               # overflows i64 before the minus applies
+i64 m = -9223372036854775807 - 1   # write it this way instead
+```
+
+Do not reach for `0 - 128` to spell a negative number. It is not
+required, and it is actively worse: the parser folds `-128` into a
+single literal that adopts its target's type, so `i8 x = -128` compiles,
+while `0 - 128` is an `i32` *expression* that will not narrow —
+`i8 x = 0 - 128` is a type error.
 
 ### Signedness and widening
 
@@ -370,7 +390,11 @@ throughout the standard library for allocators and type-erased APIs
 - It is *opaque*: you cannot dereference it, subscript it, or do pointer
   arithmetic on it. Cast to a sized pointer first (`p as Point*`, or
   `p as u8*` to treat it as raw bytes).
-- Null checks work directly: `p == null`, `if p { ... }`, `!p`.
+- Null checks work directly: `p == null`, `p != null`, and `!p` (true
+  for null). Note `if p { ... }` — a bare pointer as a condition —
+  currently fails with an internal codegen error rather than working or
+  erroring cleanly; this is a compiler bug, not a rule. Write
+  `if p != null { ... }` until it is fixed.
 - `u0**` (depth 2) does *not* get the depth-crossing treatment `u0*`
   gets — but it's an ordinary pointer otherwise, so it coerces with any
   other depth-2 pointer (`Point**`, `i32**`, …) under the general
@@ -390,10 +414,36 @@ free(xs)                             # any pointer coerces back into free's u0*
 Two different things share bracket syntax — don't confuse them:
 
 ```aspect
-u8[256] buf          # STACK array: 256 bytes, allocated at compile time
-u8 *heap = u8[256]   # HEAP allocation: same size, but as an expression —
-                      # equivalent to malloc(256), returns u8*
+u8[256] buf          # DECLARATION: array of 256 bytes, size fixed at compile time
+u64 n = 256
+u8 *dyn = u8[n]      # EXPRESSION: allocates n bytes, returns u8*
 ```
+
+Both allocate on the **stack**. Neither is a heap allocation: the
+expression form lowers to an LLVM `alloca` with a runtime count — a C
+VLA — and Aspect has no heap-allocation primitive of its own. The real
+difference is compile-time-sized vs runtime-sized. For heap memory, call
+`malloc` from `std/c/stdlib` (see the `u0*` example above).
+
+The consequence to watch: memory from `u8[n]` dies when the enclosing
+function returns. Returning that pointer is a use-after-return, and the
+compiler does not diagnose it.
+
+```aspect
+fn broken(u64 n) -> u8* {
+    u8 *buf = u8[n]
+    return buf        # DANGLING — buf's stack frame is gone
+}
+```
+
+One wrinkle worth knowing before it bites you: the count in the
+expression form cannot be a bare integer literal. `u8[256]` lexes as a
+single *type* token (`u8` with array size 256), not as an allocation, so
+`u8 *p = u8[256]` fails with "Expected expression". Use a variable, a
+`const`, or parentheses: `u8[n]`, `u8[N]`, `u8[(256)]`.
+
+At file scope the expression form becomes a zero-initialized global
+instead, and there the count must be a literal (`u8 *g = u8[(8)]`).
 
 A preallocated array decays to a pointer in any expression context — pass
 it directly to a function expecting `T*`, no `&` and no cast needed.
@@ -625,6 +675,36 @@ Things worth knowing:
 - Only pinned operands are supported — the compiler won't pick a register
   for you — and `extern` and `asm` can't be combined.
 
+### `public` — exporting a symbol
+
+By default a function's symbol does not leave the object file. That costs you
+nothing — your program and everything it imports are compiled together, so any
+function can call any other regardless — and it buys a lot: the compiler can
+delete functions nothing reaches, so importing `std/linux/syscall` for one
+call does not carry its other 34 wrappers into your binary.
+
+`public` opts out, for the rare case where something *outside* Aspect has to
+find the symbol by name:
+
+```aspect
+public fn callable_from_c(i32 x) -> i32 {
+    return x * 2
+}
+```
+
+You almost never need it. `main` and `_start` are already implicitly public.
+
+Globals take it too — `public i32 counter = 0` is exported, a plain one is
+private and collected when unused.
+
+`public extern fn` is an error — `extern` names a function defined elsewhere,
+so there is nothing to export. So is `public` on an alias or a type: both are
+compile-time only and have no symbol.
+
+Note this is a different `public` from the one inside a type-struct, which
+governs access *through the type* ([§9](#9-type-structs)). Same keyword, two
+jobs: one is about the linker, the other about encapsulation.
+
 ### Forward references and mutual recursion
 
 Declaration order doesn't matter for functions, type-structs, methods,
@@ -851,7 +931,10 @@ fn main(u32 argc, u8** argv) -> i32 {
 A token-level pass runs before parsing and expands line-anchored `$`
 directives — chosen instead of `#` because `#` is already comments, and
 `@` is reserved for the (planned) metasystem. A `$` must be the first
-token on its line.
+token on its line, and directives exist only at the **top level of a
+file** — a line-leading `$` inside any block is an error. Unlike C, you
+cannot `$ifdef` inside a function body; hoist the conditional to file
+scope and gate whole declarations instead.
 
 ### Defines
 
@@ -908,11 +991,11 @@ Two directives, `$module` and `$import`, form the language's load unit
 and visibility boundary.
 
 ```aspect
-# in lib/std/io/print.ap:
+# in lib/std/io/linux.ap — one of the four files declaring $module std/io:
 $module std/io
-$import std/c/stdio
+$import std/linux/syscall
 
-fn println(u8* s) -> i32 { return puts(s) }
+fn io_write_bytes(i32 fd, u8* buf, u64 n) -> i64 { return sys_write(fd, buf, n) }
 ```
 
 ```aspect
@@ -920,7 +1003,7 @@ fn println(u8* s) -> i32 { return puts(s) }
 $import std/io
 
 fn main(u32 argc, u8** argv) -> i32 {
-    return println("hello")
+    return println("hello")     # from lib/std/io/generic.ap — same module
 }
 ```
 
@@ -966,10 +1049,11 @@ example of that rule biting.
 
 | Import | Provides |
 |---|---|
-| `std/c/stdio`, `std/c/stdlib`, `std/c/string` | Raw `extern fn` libc bindings, at header granularity |
-| `std/io` | `print`/`println` for strings and every integer width, plus `f64` |
-| `std/mem` | Byte-count allocation wrappers (`alloc_bytes`, `zalloc_bytes`, `free_ptr`) — pair with `sizeof(T)` |
-| `std/math` | `min`/`max`/`clamp`/`abs` per width, `gcd`/`lcm`, `ipow`, `isqrt_u64`, `sqrt_f64`, `floor`/`ceil`/`round`, `PI`/`TAU`/`E` |
+| `std/c/mman`, `std/c/stdio`, `std/c/stdlib`, `std/c/string`, `std/c/unistd` | Raw `extern fn` libc bindings, at header granularity |
+| `std/io` | `print`/`println` for strings and for `i32`/`i64`/`u32`/`u64`, plus `f64`; `print_char` for one byte. There is no printer for the 8- and 16-bit widths — widen first (`print_u64(b as u64)`). Unbuffered — do not mix with `std/c/stdio` on one fd |
+| `std/mem` | Byte-count allocation wrappers (`alloc_bytes`, `zalloc_bytes`, `free_ptr`) — pair with `sizeof(T)`. libc's allocator, so importing it links the C runtime |
+| `std/mem/page` | Page-level address space below `std/mem` (`page_size`/`page_granularity`/`page_reserve`/`page_commit`/`page_decommit`/`page_release`/`page_map`). A separate module so a page-only caller links no libc and no CRT |
+| `std/math` | `min`/`max`/`clamp` for `i64`/`u64`/`f64` only; `abs_i64` and `fabs` (the f64 one is *not* spelled `abs_f64`); `gcd_u64`/`lcm_u64`, `ipow_u64`/`ipow_i64`, `isqrt_u64`, `sqrt_f64`, `floor_f64`/`ceil_f64`/`round_f64`, `PI`/`TAU`/`E`. No 32-bit variants: narrower types widen implicitly going in, and need an `as` coming out |
 | `std/rand` | `Rng` (xorshift64\*): `next_u64`, `below`, `range_i64`, `next_f64`, `chance` — deterministic per seed |
 | `std/sort` | Type-erased `sort_bytes(base, n, size, cmp)`, stock comparators, typed wrappers `sort_i32`/`sort_i64`/`sort_f64`/`sort_cstr` |
 | `std/string` | Growable heap `String` |
@@ -1043,18 +1127,23 @@ to erase the element type behind `u0*` and a size/comparator passed at
 the call site — exactly libc's `qsort` trick:
 
 ```aspect
-alias Comparator fn(u0*, u0*) -> i32
+$import std/sort        # brings both `sort_bytes` and the `Comparator` alias
 
 fn cmp_person_by_age(u0* a, u0* b) -> i32 {
     Person* pa = a as Person*
     Person* pb = b as Person*
-    if pa.age < pb.age { return 0 - 1 }
+    if pa.age < pb.age { return -1 }
     if pa.age > pb.age { return 1 }
     return 0
 }
 
 sort_bytes(crew, 6, sizeof(Person), &cmp_person_by_age)
 ```
+
+`Comparator` (`alias Comparator fn(u0*, u0*) -> i32`) is declared by
+`std/sort` and arrives with the import — do not redeclare it. Type names
+share one flat namespace, so a second `alias Comparator` is a
+`Duplicate type 'Comparator'` error.
 
 See `lib/std/sort.ap` and `demos/sort_demo.ap`.
 
@@ -1118,9 +1207,15 @@ An array of function pointers indexed by a tag, called through the
 subscript — the same shape real bytecode interpreters use:
 
 ```aspect
-(fn(VM*))[OP_COUNT] ops = {&op_halt, &op_push, &op_add, ...}
+(fn(VM*))[3] ops = {&op_halt, &op_push, &op_add}
 ops[opcode](vm)
 ```
+
+The size has to be an integer literal (or a `$define`d name, which
+substitutes textually to one). A `const` global does **not** work as an
+array size: `(fn(VM*))[OP_COUNT] ops = ...` with `const i64 OP_COUNT`
+is a parse error. That is why `demos/vm.ap` writes `[10]` even though it
+declares `const i64 OP_COUNT = 10` and uses it for the bounds check.
 
 See `demos/vm.ap` for a full stack-machine interpreter built this way.
 
@@ -1191,10 +1286,20 @@ Aspect:
   (`xs[i] += 1`). Both are parse errors ("compound assignment requires a
   variable"); spell it out instead: `this.x = this.x + 1`,
   `xs[i] = xs[i] + 1`.
-- **String literals are `u8*`, not `const u8*`.** The type checker
-  doesn't currently treat the two as compatible, so a function expecting
-  `const u8*` can reject a string literal. Prefer plain (non-`const`)
-  pointer parameters for functions meant to take strings.
+- **`const` qualifies the binding, not the pointee.** This is the
+  opposite of what a C reader expects. `const u8* s` means *`s` cannot be
+  reassigned* — it says nothing about the bytes `s` points at, and
+  `*s = 90` is allowed and unchecked:
+
+  ```aspect
+  const u8* s = buf
+  s = other      # error: Cannot assign to const variable 's'
+  *s = 90        # allowed — const gives the pointed-to data no protection
+  ```
+
+  `const` is ignored entirely for coercion, so `u8*` and `const u8*` are
+  interchangeable in both directions and string literals pass to
+  `const u8*` parameters with no cast.
 - **Forgetting `-I lib`.** Any program that `$import`s `std/...` needs
   the stdlib's root on the module search path, or resolution fails.
 - **Imports aren't transitive.** Importing a module that itself imports
@@ -1227,6 +1332,10 @@ Aspect:
 - **How the compiler itself is built**, if you're curious or want to
   contribute: [`doc/compiler/00-overview.md`](compiler/00-overview.md)
   onward.
-- **What's planned but not built yet** (inline assembly, direct
-  syscalls, a metasystem for code generation, methods-as-values): `TODO.md`
-  at the repository root.
+- **What's planned but not built yet** (a metasystem for code
+  generation, methods as fn-pointer values, a struct by-value C ABI, and
+  dropping the libc dependency compiler-wide): `TODO.md` at the
+  repository root. Note inline assembly is *built* — see `asm fn` above —
+  and raw Linux/x86-64 syscalls are already available today via
+  `std/linux/syscall`; what remains open is making the compiler itself
+  libc-free.

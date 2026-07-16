@@ -15,7 +15,6 @@
 $import std/io
 $import std/rand
 $import std/c/stdlib    # calloc/free
-$import std/c/stdio     # putchar
 
 extern fn usleep(u32 usec) -> i32
 
@@ -88,12 +87,12 @@ type Board {
         for (i64 y = 0; y < this.h; y += 1) {
             for (i64 x = 0; x < this.w; x += 1) {
                 if this.at(x, y) == 1 {
-                    putchar(35)              # '#'
+                    print_char(35)              # '#'
                 } else {
-                    putchar(46)              # '.'
+                    print_char(46)              # '.'
                 }
             }
-            putchar(10)
+            print_char(10)
         }
     }
 
@@ -132,8 +131,8 @@ type Board {
 # ANSI: clear screen, cursor home. Escape bytes emitted directly since
 # string literals have no \e escape.
 fn clear_screen() {
-    putchar(27) print("[2J")
-    putchar(27) print("[H")
+    print_char(27) print("[2J")
+    print_char(27) print("[H")
 }
 
 fn show_generation(Board* b, i64 gen) {

@@ -21,12 +21,20 @@ This is the top-level convenience function. Internally it creates a `Scanner` an
 ## Scanner
 
 The `Scanner` maintains:
-- `input: String` — the full source text
-- `current: usize` — byte offset
-- `line: usize`, `column: usize` — 1-based position tracking
-- `tokens: VecDeque<Token>` — output buffer
+- `input: Vec<char>` — the source decoded to characters
+- `current: usize` — character index into `input` (not a byte offset)
+- `line: usize`, `column: usize` — 1-based position tracking. These count
+  characters, so a multi-byte UTF-8 character advances the column by 1,
+  not by its byte length
+- `file_id: u32` — stamped onto every emitted token's `Position`; set by the
+  preprocessor so multi-file diagnostics can name the right file, and 0
+  (the entry file) for the bare `tokenize` API
 
 `scan_all()` loops: `skip_whitespace()` → `scan_token()` until EOF, then appends an `Eof` token.
+It builds and returns a fresh `Vec<Token>`; the scanner holds no output buffer of its own.
+
+A sibling entry point, `tokenize_with_file_id(input: String, file_id: u32)`, sets `file_id`
+explicitly for imported files.
 
 ### Navigation Methods
 
@@ -75,9 +83,15 @@ The `Scanner` maintains:
 |---------|---------|
 | `fn` | Function declaration |
 | `extern` | External (C) function declaration |
+| `asm` | Inline-assembly function declaration (`asm fn`) |
 | `const` | Const modifier (also part of `const <type>` LangType) |
-| `type` | Type alias (reserved) |
-| `struct` | Struct definition (reserved) |
+| `type` | Type-struct / alias definition — struct definitions are spelled `type Name { ... }` |
+| `struct` | Reserved, but unused — see `type` |
+| `alias` | Type alias (`alias myint i32`) |
+| `public` | External linkage on a function or global; also opts a field/method out of the private default (see [06-codegen](06-codegen.md#function-linkage-functionsrs)) |
+| `sizeof` | Compile-time size of a type; yields `u64` |
+| `null` | The null pointer constant |
+| `true` / `false` | Boolean literals |
 | `while` | While loop |
 | `if` / `else` / `elif` | Conditional branching |
 | `for` | For loop |
@@ -95,7 +109,12 @@ Parsed as `LangType` tokens (not keywords):
 | Signed integers | `i8`, `i16`, `i32`, `i64` |
 | Unsigned integers | `u8`, `u16`, `u32`, `u64` |
 | Floats | `f32`, `f64` |
-| Void | `u0` |
+| Boolean | `bool` — an i1 logical value stored as i8 (`size_bits` is the storage width, 8). The type of comparisons and `!` |
+| Void | `u0` — the special case mapping to `TypeBase::Void` |
+
+The integer and float rows list the widths in common use, not the accepted set:
+`langtype_from_str` admits `i`/`u`/`f` followed by any positive multiple of 8, so
+`i128` lexes as a valid LangType token even where later phases cannot lower it.
 
 Types can be modified with:
 - `const` prefix: `const i32`
@@ -110,6 +129,14 @@ Comments are consumed inside `skip_whitespace()` and are completely invisible to
 
 - **Line comments** (`#`): consume until `\n` or EOF
 - **Block comments** (`#-` ... `-#`): consume until the closing `-#` sequence; not nestable; unterminated block comments produce `LexerError::UnterminatedBlockComment`
+
+> **Known bug**: `UnterminatedBlockComment` is constructed by `skip_block_comment()` but
+> never escapes the scanner. Its only caller, `skip_whitespace()`, returns unit and
+> discards it (`if self.skip_comment().is_err() { break; }`), so an unterminated `#-`
+> lexes *successfully* — the rest of the file is silently eaten as comment text. The
+> user sees either a positionless downstream `Unexpected end of input` or, if the
+> truncation leaves balanced braces, no error at all. Fix is to make `skip_whitespace`
+> return `Result` and propagate; the variant is unreachable until then.
 
 ## Operator Disambiguation
 

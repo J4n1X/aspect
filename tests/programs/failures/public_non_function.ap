@@ -1,0 +1,9 @@
+# expected: "public can only be used with functions"
+# `public` decides whether a symbol leaves the object file. An alias is a
+# compile-time typedef — it has no symbol to export.
+
+public alias Word u64
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

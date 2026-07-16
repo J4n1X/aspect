@@ -1,6 +1,6 @@
 # expected: 0
 #-
-  Demo of `print_f64` / `println_f64` from `std/io/print`. Also stress-
+  Demo of `print_f64` / `println_f64` from `std/io`. Also stress-
   tests the `!=` fix: with the ordered (`one`) predicate that used to
   back float `!=`, `nan != nan` was *false*, so `if x != x { ... }`
   silently failed to detect NaN. We now use the unordered (`une`)

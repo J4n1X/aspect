@@ -16,22 +16,35 @@ final type directly instead of re-deriving it. See
 |------|---------|
 | `checker.rs` | `TypeChecker` struct — single-pass checking |
 | `types.rs` | Pure helper functions for type coercibility and literal compatibility |
-| `errors.rs` | `TypeCheckError` enum (15 variants) |
+| `errors.rs` | `TypeCheckError` enum (34 variants) |
 
 ## TypeChecker Struct
 
 ```rust
 pub struct TypeChecker {
-    functions: HashMap<String, FunctionSig>,  // Known function signatures
-    scopes: Vec<HashMap<String, LangType>>,   // Variable type scopes (stack)
-    globals: HashMap<String, LangType>,       // Global variable types
-    current_function: Option<String>,         // Current function being checked
-    source_file: String,                      // Source file path for diagnostics
-    errors: Vec<TypeCheckError>,              // Accumulated errors
+    /// The program's shared symbol table, taken from `Program` for the duration
+    /// of `check_program` and restored on exit (so any registry refinement the
+    /// checker performs is preserved, without a divergent copy).
+    symbols: ModuleSymbols,
+    scopes: ScopeStack<LangType>,
+    globals: HashMap<String, LangType>,
+    current_function: Option<String>,
+    /// File registry inherited from the parsed `Program` so error messages
+    /// can name the file the error actually came from.
+    source_files: Vec<std::path::PathBuf>,
+    /// Stack of enclosing value-block result types, innermost last. A `return`
+    /// binds to the top entry instead of the function.
+    value_block_types: Vec<Option<LangType>>,
+    /// The target being compiled for. Only `asm fn` consults it: register names
+    /// are validated against this target's register model. Defaults to the host.
+    target: TargetSpec,
+    errors: Vec<TypeCheckError>,
 }
 ```
 
-The typechecker has its own **independent** scope system, separate from the parser's `SymbolTable`.
+The typechecker's **variable** scope stack is its own, independent of the parser's
+`SymbolTable`. `ModuleSymbols`, by contrast, is *shared* with the `Program` — taken
+on entry to `check_program` and restored on exit — rather than copied.
 
 ## Entry Points
 
@@ -40,15 +53,23 @@ The typechecker has its own **independent** scope system, separate from the pars
 TypeChecker::new()
 
 // Set source file for diagnostics (returns self for chaining)
-TypeChecker::new().with_source_file(path: String)
+TypeChecker::new().with_source_file(path: impl Into<String>)
+
+// Set the compilation target — this is how `--target` reaches the `asm fn`
+// register validation below (returns self for chaining)
+TypeChecker::new().with_target(target: TargetSpec)
 
 // Run the checker; mutates the AST (stamps expr_type) and returns all errors at once
 checker.check_program(&mut program) -> Result<(), Vec<TypeCheckError>>
 
 // Format an error with source-file prefix
 checker.format_error(&error) -> String
-// Output: "path/to/file.ap:12:5: error: ..."
+// Output: "path/to/file.ap:12:5: Type mismatch: expected 'u8' but found 'i32' at 12:5"
 ```
+
+`format_error` emits `{path}:{line}:{column}: {error}` — there is no `error: `
+segment. When the error carries no position (e.g. `MissingReturn`), or the
+`file_id` does not resolve, it falls back to the bare `Display` with no file prefix.
 
 ## Checking Phases
 
@@ -80,9 +101,17 @@ error, not a silent accept).
 
 Every collision check compares the register *family*, never the spelling:
 `rax` and `eax` are one physical register, and LLVM diagnoses nothing if two
-operands name it — it silently drops one. Rejected: unknown registers,
-`rsp`/`rbp`, two operands in one family, a clobber that is also an operand,
-and an operand register too narrow for its declared type.
+operands name it — it silently drops one. Rejected: unknown registers; the
+reserved `rsp`/`rbp` families; **two parameters** in one family; a clobber that
+is also an operand; a repeated clobber (including a repeated `memory`); an
+operand whose type needs a different register class (e.g. `f64` pinned to a GP
+register); a type that cannot live in a register at all; and an operand register
+too narrow for its declared type.
+
+The **return** register is deliberately *not* checked against the parameters —
+that is what makes the in-out form `asm fn add2(i64 a: rax, i64 b: rbx) -> i64: rax`
+legal (see `tests/programs/asm_arith.ap`). The converse of the too-narrow rule is
+also legal: a narrower type in a wider register spelling (`i32 x: rax`) is fine.
 
 ## Bidirectional Checking
 
@@ -145,11 +174,14 @@ All functions are pure (no side effects):
 1. **Exact match** → `true`
 2. **Array-to-pointer decay**: `i32[10]` is coercible to `i32*`
 3. **Void values**: `u0` (pointer depth 0 after decay) is only compatible with `u0`.
-   `u0*` is an ordinary pointer for coercion purposes and follows the pointer
-   rules below — so `T* <-> u0*` is implicit in both directions. What makes
-   `u0*` special is *use*, not assignment: dereferencing/subscripting it and
-   pointer arithmetic on it are rejected (`OpaqueDereference`, invalid binary
-   op) until it is cast to a sized pointer type.
+   `u0*` (pointer depth **exactly 1**) is the **universal object pointer**: a
+   pointer of *any* depth coerces to and from it implicitly — C's `void*` rule.
+   This check runs *before* rule 4, so `i32** -> u0*` and `u0* -> i32**` are both
+   legal despite the depth mismatch. Deeper void pointers (`u0**`, …) are *not*
+   special and follow rules 4–5 normally. What makes `u0*` special is otherwise
+   *use*, not assignment: dereferencing/subscripting it and pointer arithmetic on
+   it are rejected (`OpaqueDereference`, invalid binary op) until it is cast to a
+   sized pointer type.
 4. **Pointer depth mismatch** (after decay) → `false`
 5. **Integer widening** (non-pointer, non-array): `size_bits(from) <= size_bits(to)` → `true`
    - Both `SInt↔UInt` families are treated as integers here (widening is allowed even across sign)
@@ -170,11 +202,22 @@ This means `u8 x = 255` is valid but `u8 x = 256` is a type error at compile tim
 | Cast | Valid? |
 |------|--------|
 | Pointer ↔ Integer (SInt/UInt) | Yes |
-| Float ↔ Pointer | No |
+| Float ↔ Pointer | No — but see the bug below |
 | Pointer → Pointer (any depth) | Yes |
 | Integer → Float | Yes (explicit) |
 | Float → Integer | Yes (explicit) |
 | Integer → Integer | Yes |
+
+> **Known bug — Float ↔ Pointer is not actually rejected.** `cast_valid` gates the
+> ptr↔scalar arm on `matches!(to.base, SInt|UInt) || matches!(from.base, SInt|UInt)`,
+> but a pointer's `.base` is its *pointee's* base — so `u8*` (`base: UInt`) and `i32*`
+> (`base: SInt`) satisfy the integer test and slip through. The rule only fires when the
+> pointee is not an integer (`u0*`, `f64*`). Consequences: `f64 as u8*` passes the
+> checker and then **panics** codegen (`value_emitter.rs`, "expected the IntValue
+> variant"), and `i32* as f64` passes and silently **type-puns** — the emitted IR stores
+> the raw pointer into a `double` slot with no `ptrtoint`/`sitofp`. Fix is to inspect the
+> non-pointer side only, e.g. in the `(from.pointer_depth > 0) != (to.pointer_depth > 0)`
+> branch pick the scalar operand and test *its* base.
 
 ## Error Diagnostics
 
@@ -221,4 +264,42 @@ Returns `Result<(), Vec<TypeCheckError>>` — collects **all** errors before rep
 | `AssignmentToConst` | Assigning to const variable |
 | `AssignmentTypeMismatch` | RHS type not coercible to LHS |
 | `ListInitLengthMismatch` | Too many elements in list initializer |
+
+### Type-struct
+
+| Error Variant | Trigger |
+|--------------|---------|
+| `NotAStruct` | Field access on a non-type-struct |
+| `UnknownField` | No such field on the type-struct |
+| `MissingStructFields` | Struct literal omits a field (all must be named) |
+| `InaccessibleField` | Field is private and not accessible here |
+| `InaccessibleMethod` | Method is private and not accessible here |
+
+### Value blocks
+
+| Error Variant | Trigger |
+|--------------|---------|
+| `ValueBlockMissingReturn` | Not every path of a value block returns |
+| `ValueBlockVoidReturn` | Value block returns no value |
+
+### Void
+
+| Error Variant | Trigger |
+|--------------|---------|
+| `InvalidVoidValue` | `u0` used as a value type |
+| `OpaqueDereference` | Dereferencing `u0*` — cast to a sized pointer first |
+
+### `asm fn`
+
+| Error Variant | Trigger |
+|--------------|---------|
+| `AsmUnsupportedTarget` | `asm fn` not supported for the `--target` |
+| `AsmUnknownRegister` | Register name unknown for the target |
+| `AsmDuplicateRegister` | Two parameters pinned to one register family |
+| `AsmClobberIsOperand` | Clobbered register is also pinned to an operand |
+| `AsmDuplicateClobber` | Register (or `memory`) clobbered twice |
+| `AsmReservedRegister` | `rsp`/`rbp` pinned or clobbered |
+| `AsmUnpinnableType` | Type cannot live in a register |
+| `AsmRegisterClassMismatch` | Type needs a different register class (e.g. `f64` in a GP register) |
+| `AsmRegisterTooNarrow` | Register too narrow for the declared type |
 

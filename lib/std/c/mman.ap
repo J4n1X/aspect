@@ -1,0 +1,41 @@
+#-
+  std/c/mman.ap — raw libc bindings for sys/mman.h.
+
+  For targets reached through libc. Linux/x86-64 goes to the kernel directly
+  via `std/linux/syscall`, which declares the same PROT_*/MAP_* names itself;
+  the two are never imported together because the platform files that pull
+  them in are gated on disjoint conditions. Importing both by hand collides
+  on those names — there are no include guards here, so use one or the other.
+
+  `mmap` reports failure as MAP_FAILED, which is (void*)-1 and not null — a
+  null check alone would take a failure for a valid mapping at address 0.
+  The raw syscall's `-errno` convention is a different thing entirely; libc
+  has already unpacked it into this return plus `errno`.
+-#
+$module std/c/mman
+
+extern fn mmap(u0* addr, u64 length, i32 prot, i32 flags, i32 fd, i64 offset) -> u0*
+extern fn mprotect(u0* addr, u64 length, i32 prot) -> i32
+extern fn munmap(u0* addr, u64 length) -> i32
+
+$define PROT_NONE  0
+$define PROT_READ  1
+$define PROT_WRITE 2
+$define PROT_EXEC  4
+
+$define MAP_SHARED  1
+$define MAP_PRIVATE 2
+$define MAP_FIXED   16
+
+# The one flag whose value is not shared: Linux took 0x20, the BSDs 0x1000.
+$ifdef OS_LINUX
+$define MAP_ANONYMOUS 32
+$endif
+$ifdef OS_MACOS
+$define MAP_ANONYMOUS 4096
+$endif
+
+# True for the (void*)-1 that mmap returns on failure.
+fn map_failed(u0* p) -> bool {
+    return (p as i64) == 0 - 1
+}

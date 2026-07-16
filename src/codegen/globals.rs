@@ -1,7 +1,9 @@
+use inkwell::module::Linkage;
 use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicValueEnum, FloatValue, IntValue, PointerValue};
 use inkwell::AddressSpace;
 
+use crate::lexer::Position;
 use crate::codegen::expressions::{walk_expression, EmitMode};
 use crate::codegen::generator::CodeGenerator;
 use crate::codegen::scope::GlobalVarInfo;
@@ -16,19 +18,25 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<(), CodegenError> {
         let (global_type, _is_array) = if global.var_type.is_array() {
             // Cache-aware: resolves type-struct elements too.
-            (self.lang_type_to_llvm_array(&global.var_type)?.into(), true)
+            (self.lang_type_to_llvm_array(&global.var_type, global.pos)?.into(), true)
         } else {
-            (self.lang_type_to_llvm(&global.var_type)?, false)
+            (self.lang_type_to_llvm(&global.var_type, global.pos)?, false)
         };
 
         let global_var =
             self.module
                 .add_global(global_type, Some(AddressSpace::default()), &global.name);
 
+        if global.vis == crate::symbol::module::Visibility::Public {
+            global_var.set_linkage(Linkage::External);
+        } else {
+            global_var.set_linkage(Linkage::Private);
+        }
+
         if let Some(init_expr) = &global.initializer {
             if let ExprKind::ListInitializer(elements) = &init_expr.kind {
                 // Array literal initializer -> ConstantArray
-                let const_array = self.generate_constant_array_value(&global.var_type, elements)?;
+                let const_array = self.generate_constant_array_value(&global.var_type, elements, global.pos)?;
                 global_var.set_initializer(&const_array);
             } else {
                 let init_value = walk_expression(init_expr, self, EmitMode::Constant)?;
@@ -90,9 +98,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         &mut self,
         var_type: &LangType,
         elements: &[Expression],
+        pos: Position,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         let elem_lang_type = var_type.element_type();
-        let elem_llvm_type = elem_lang_type.to_llvm(self.context)?;
+        let elem_llvm_type = elem_lang_type.to_llvm(self.context, pos)?;
         let array_size = var_type.array_size.unwrap_or(0) as usize;
 
         // Generate constant values for provided elements. Permitted forms:
@@ -146,7 +155,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             _ => Err(CodegenError::InvalidOperation(
                 format!("unsupported element type for constant array: {elem_llvm_type}"),
-                crate::lexer::Position::new(0, 0),
+                pos,
             )),
         }
     }

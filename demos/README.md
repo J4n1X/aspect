@@ -48,9 +48,10 @@ Real modules under [`../lib/std/`](../lib/std/), pulled in with
 
 | Import | Provides |
 |--------|----------|
-| `std/c/stdio`, `std/c/stdlib`, `std/c/string` | Raw libc externs at header granularity. |
-| `std/io` | `print`/`println` for strings, all integer widths, `f64`. No `printf` (no varargs). |
-| `std/mem` | Byte-count allocation wrappers; pair with `sizeof(T)`. |
+| `std/c/mman`, `std/c/stdio`, `std/c/stdlib`, `std/c/string`, `std/c/unistd` | Raw libc externs at header granularity. |
+| `std/io` | `print`/`println` for strings, all integer widths, `f64`; `print_char` for one byte. No `printf` (no varargs). Unbuffered — do not mix with `std/c/stdio` on one fd. |
+| `std/mem` | Byte-count allocation wrappers; pair with `sizeof(T)`. libc's allocator, so importing it links the C runtime. |
+| `std/mem/page` | Page-level address space below `std/mem`: reserve/commit/decommit/release/map. Separate module so a page-only caller links no libc and no CRT. |
 | `std/math` | min/max/clamp/abs per width, gcd/lcm, `ipow`, exact `isqrt_u64`, Newton `sqrt_f64`, floor/ceil/round, `PI`/`TAU`/`E`. |
 | `std/rand` | `Rng` type-struct (xorshift64\*): `next_u64`, `below`, `range_i64`, `next_f64`, `chance`. Deterministic per seed. |
 | `std/sort` | Type-erased `sort_bytes(base, n, size, cmp)` (quicksort + insertion), stock comparators, typed wrappers `sort_i32`/`sort_i64`/`sort_f64`/`sort_cstr`. |

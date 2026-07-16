@@ -1,0 +1,26 @@
+#-
+  std/io — POSIX backend, on libc. The fallback for every target that has
+  no raw-syscall backend here: macOS, and Linux on an arch other than
+  x86-64.
+
+  macOS has no stable syscall ABI (the numbers move between releases, and
+  Apple only supports going through libSystem), so there libc is the floor
+  and dropping it is not on the table. On another Linux arch it is only the
+  syscall *numbers* that are missing — `std/linux/syscall` is x86-64 — so
+  this is a libc-backed stopgap that keeps the target building, not a
+  statement that the arch cannot do better. Give it a syscall table and
+  linux.ap covers it.
+-#
+$module std/io
+
+$if defined(OS_MACOS) || (defined(OS_LINUX) && !defined(ARCH_X86_64))
+
+$import std/c/unistd
+
+# POSIX write(2). Not `putchar`: the primitive takes an fd, and putchar can
+# only ever reach stdout — IO_STDERR would silently land on the wrong stream.
+fn io_write_bytes(i32 fd, u8 *buf, u64 n) -> i64 {
+    return write(fd, buf, n)
+}
+
+$endif

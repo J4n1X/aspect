@@ -28,7 +28,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             StatementKind::FieldAssign { target, value } => {
                 self.generate_field_assign(target, value)
             }
-            StatementKind::Return(expr) => self.generate_return(expr.as_ref()),
+            StatementKind::Return(expr) => self.generate_return(expr.as_ref(), stmt.pos),
             StatementKind::If {
                 condition,
                 then_block,
@@ -99,11 +99,11 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<(), CodegenError> {
         let llvm_type = if var_type.is_array() {
             // Cache-aware: resolves type-struct elements (`Pair[2]`) too.
-            self.lang_type_to_llvm_array(var_type)?.into()
+            self.lang_type_to_llvm_array(var_type, pos)?.into()
         } else {
             // `lang_type_to_llvm` resolves type-struct values through the cache;
             // it falls back to `to_llvm` for scalars/pointers.
-            self.lang_type_to_llvm(var_type)?
+            self.lang_type_to_llvm(var_type, pos)?
         };
 
         // Allocate in the entry block for mem2reg compatibility
@@ -131,7 +131,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ..
             }) = initializer
             {
-                return self.generate_list_initializer(alloca, var_type, elements);
+                return self.generate_list_initializer(alloca, var_type, elements, pos);
             }
             return Ok(());
         }
@@ -144,7 +144,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         if let Some(init_expr) = initializer
             && let Some(folded) = self.try_fold_constant_expression(init_expr)
         {
-            let target_llvm = var_type.to_llvm(self.context)?;
+            let target_llvm = self.lang_type_to_llvm(var_type, pos)?;
             let coerced = if folded.get_type() == target_llvm {
                 folded
             } else {
@@ -172,7 +172,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.add_variable(name.to_string(), alloca, llvm_type, *var_type, None);
 
         if let Some(init_expr) = initializer {
-            let init_value = self.generate_coerced_value(init_expr, Some(var_type))?;
+            let init_value = self.generate_coerced_value(init_expr, Some(var_type), EmitMode::Runtime)?;
             self.builder.build_store(alloca, init_value)?;
         } else {
             self.builder.build_store(alloca, llvm_type.const_zero())?;
@@ -195,7 +195,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             (v.ptr(), v.lang_type())
         };
 
-        let value_llvm = self.generate_coerced_value(value, Some(&var_lang_type))?;
+        let value_llvm = self.generate_coerced_value(value, Some(&var_lang_type), EmitMode::Runtime)?;
         self.builder.build_store(var_ptr, value_llvm)?;
         Ok(())
     }
@@ -210,7 +210,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let ptr = self.generate_expression(ptr_expr)?;
                 // Coerce to the pointee type so that e.g. storing a literal i32
                 // into a `u8 *` slot emits an i8 store, not a 4-byte i32 store.
-                let value_llvm = self.generate_coerced_value(value, Some(&target.expr_type))?;
+                let value_llvm = self.generate_coerced_value(value, Some(&target.expr_type), EmitMode::Runtime)?;
                 self.builder
                     .build_store(ptr.into_pointer_value(), value_llvm)?;
                 Ok(())
@@ -229,7 +229,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         value: &Expression,
     ) -> Result<(), CodegenError> {
         let (field_ptr, field_ty) = self.emit_address(target)?;
-        let value_llvm = self.generate_coerced_value(value, Some(&field_ty))?;
+        let value_llvm = self.generate_coerced_value(value, Some(&field_ty), EmitMode::Runtime)?;
         self.builder.build_store(field_ptr, value_llvm)?;
         Ok(())
     }
@@ -237,6 +237,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(crate) fn generate_return(
         &mut self,
         expr: Option<&Expression>,
+        pos: crate::lexer::Position,
     ) -> Result<(), CodegenError> {
         // A `return` inside a value-block yields the innermost block, not the
         // function: store into the block's result slot and branch to its exit
@@ -246,10 +247,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             let expr = expr.ok_or_else(|| {
                 CodegenError::InvalidOperation(
                     "value block `return` must carry a value".to_string(),
-                    crate::lexer::Position::new(0, 0),
+                    pos,
                 )
             })?;
-            let value = self.generate_coerced_value(expr, Some(&result_type))?;
+            let value = self.generate_coerced_value(expr, Some(&result_type), EmitMode::Runtime)?;
             self.builder.build_store(slot, value)?;
             self.builder.build_unconditional_branch(exit_bb)?;
             // Park subsequent (unreachable) statements in a dead block, the
@@ -267,11 +268,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             let expr = expr.ok_or_else(|| {
                 CodegenError::InvalidOperation(
                     "struct-returning function must return a value".to_string(),
-                    crate::lexer::Position::new(0, 0),
+                    pos,
                 )
             })?;
             let ret_type = self.current_function_return_type;
-            let value = self.generate_coerced_value(expr, ret_type.as_ref())?;
+            let value = self.generate_coerced_value(expr, ret_type.as_ref(), EmitMode::Runtime)?;
             self.builder.build_store(sret_ptr, value)?;
             self.builder.build_return(None)?;
             return Ok(());
@@ -279,7 +280,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         if let Some(expr) = expr {
             let ret_type = self.current_function_return_type;
-            let value = self.generate_coerced_value(expr, ret_type.as_ref())?;
+            let value = self.generate_coerced_value(expr, ret_type.as_ref(), EmitMode::Runtime)?;
             self.builder.build_return(Some(&value))?;
         } else {
             self.builder.build_return(None)?;
@@ -312,7 +313,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let function = self
             .current_function
             .ok_or(CodegenError::UnexpectedStatement(pos))?;
-        let llvm_type = self.lang_type_to_llvm(&result_type)?;
+        let llvm_type = self.lang_type_to_llvm(&result_type, pos)?;
 
         // Result slot in the entry block (mem2reg-friendly), mirroring
         // `generate_var_decl`'s alloca placement.
@@ -371,7 +372,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Generate condition
         let cond_value = self.generate_expression(condition)?;
-        let cond_int = self.value_to_bool(cond_value)?;
+        let cond_int = self.value_to_bool(condition.pos, cond_value)?;
 
         let then_bb = self.context.append_basic_block(function, "then");
         let else_bb = self.context.append_basic_block(function, "else");
@@ -430,7 +431,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Generate condition
         self.builder.position_at_end(cond_bb);
         let cond_value = self.generate_expression(condition)?;
-        let cond_int = self.value_to_bool(cond_value)?;
+        let cond_int = self.value_to_bool(condition.pos, cond_value)?;
         self.builder
             .build_conditional_branch(cond_int, body_bb, end_bb)?;
 
@@ -486,7 +487,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder.position_at_end(cond_bb);
         let cond_value = if let Some(cond_expr) = condition {
             let cond_val = self.generate_expression(cond_expr)?;
-            self.value_to_bool(cond_val)?
+            self.value_to_bool(cond_expr.pos, cond_val)?
         } else {
             self.context.bool_type().const_all_ones()
         };
@@ -522,6 +523,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Convert a value to a boolean (i1) for conditionals
     pub(crate) fn value_to_bool(
         &self,
+        pos: crate::lexer::Position,
         value: BasicValueEnum<'ctx>,
     ) -> Result<IntValue<'ctx>, CodegenError> {
         if value.is_int_value() {
@@ -546,7 +548,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         } else {
             Err(CodegenError::TypeError(
                 "Cannot convert value to boolean".to_string(),
-                crate::lexer::Position::new(0, 0),
+                pos,
             ))
         }
     }
@@ -563,8 +565,9 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(crate) fn get_zero_value(
         &self,
         ty: &crate::lexer::LangType,
+        pos: crate::lexer::Position,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-        let llvm_type = ty.to_llvm(self.context)?;
+        let llvm_type = ty.to_llvm(self.context, pos)?;
         Ok(llvm_type.const_zero())
     }
 

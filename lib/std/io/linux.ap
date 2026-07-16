@@ -1,0 +1,31 @@
+#-
+  std/io — Linux backend. No libc: byte output is the write(2) syscall.
+
+  Linux/x86-64 only, matching `std/linux/syscall` — syscall numbers are
+  per-arch. Another Linux arch falls back to posix.ap and keeps libc.
+
+  `std/linux/syscall` is imported here and nowhere else in the module.
+  Imports are non-transitive, so `sys_write` stays private: code that does
+  `$import std/io` cannot call it. The same goes for its constants —
+  STDOUT, SEEK_SET, O_RDONLY and the SYS_* table are ordinary `const`
+  globals, not `$define`s, so they do not leak either: `$import std/io`
+  then naming STDOUT is a visibility error, not a collision. Import
+  std/linux/syscall directly if you want them.
+-#
+$module std/io
+
+$ifdef OS_LINUX
+$ifdef ARCH_X86_64
+
+$import std/linux/syscall
+
+# fds are what the kernel already speaks, so IO_STDOUT/IO_STDERR pass
+# straight through. A short write is the kernel's prerogative (a pipe with a
+# full buffer, a signal mid-write); reporting it honestly is the contract —
+# `io_write_all` is what retries.
+fn io_write_bytes(i32 fd, u8 *buf, u64 n) -> i64 {
+    return sys_write(fd, buf, n)
+}
+
+$endif
+$endif

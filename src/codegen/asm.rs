@@ -17,7 +17,6 @@
 //! answer, so it is compiler-decided, like `sideeffect`.
 
 use inkwell::attributes::{Attribute, AttributeLoc};
-use inkwell::module::Linkage;
 use inkwell::values::BasicMetadataValueEnum;
 use inkwell::InlineAsmDialect;
 
@@ -65,7 +64,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             CodegenError::UndefinedFunction(func.proto.name.clone(), func.proto.pos)
         })?;
 
-        function.set_linkage(Linkage::Internal);
+        // Linkage was decided at declaration; forcing it here would silently
+        // demote a `public asm fn`.
         let kind_id = Attribute::get_named_enum_kind_id("alwaysinline");
         function.add_attribute(
             AttributeLoc::Function,

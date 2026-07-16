@@ -1,4 +1,4 @@
-use crate::lexer::{LangType, Position};
+use crate::{lexer::{LangType, Position}, symbol::module::Visibility};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LiteralValue {
@@ -198,6 +198,12 @@ pub struct FunctionProto {
     pub name: String,
     pub params: Vec<(LangType, String)>,
     pub return_type: LangType,
+    /// Whether the symbol leaves the object file. Private (the default) means
+    /// internal linkage — still callable from anywhere in the program, since a
+    /// program and everything it imports are one LLVM module, but invisible to
+    /// foreign code and therefore collectable when unreachable. `public` is
+    /// only for symbols something outside Aspect must find.
+    pub vis: crate::symbol::module::Visibility,
     pub pos: Position,
 }
 
@@ -260,6 +266,7 @@ pub struct GlobalVar {
     pub var_type: LangType,
     pub name: String,
     pub initializer: Option<Expression>,
+    pub vis: Visibility,
     pub pos: Position,
 }
 

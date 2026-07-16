@@ -1,19 +1,17 @@
 # Symbol Table
 
-The symbol table (`src/symbol/table.rs`) manages scoped variable lookups and a flat function registry. It is built during parsing and used by the parser for type resolution.
+The symbol table (`src/symbol/table.rs`) manages scoped **variable** lookups during parsing. It has no function registry: functions, type-structs, and aliases live in `ModuleSymbols` (`src/symbol/module.rs`), which rides on the `Program` across phases. `SymbolTable` is transient — it holds only the lexical variable scopes the parser needs while parsing function bodies, and is discarded once parsing completes.
 
 ## Structure
 
 ```rust
 pub struct SymbolTable {
-    var_scopes: Vec<HashMap<String, VarSymbol>>,  // Stack of variable scopes
-    functions: HashMap<String, FunctionSymbol>,     // Flat function table (global)
-    current_scope: usize,                           // Current nesting depth
+    /// Lexical scopes mapping variable names to their symbols.
+    var_scopes: ScopeStack<VarSymbol>,
 }
 ```
 
-- Variables use a **stack of hashmaps** — each scope level gets its own `HashMap`.
-- Functions are stored in a **single flat `HashMap`** — they are always global.
+Scoping is delegated to the generic `ScopeStack<T>` in `src/scope.rs` — a stack of hashmaps, one per scope level, shared by the lexer, parser, typechecker, and codegen.
 
 ## Variable Symbols
 
@@ -21,7 +19,6 @@ pub struct SymbolTable {
 pub struct Symbol {
     pub name: String,
     pub symbol_type: LangType,  // Full type info
-    pub scope_level: usize,     // Scope depth at declaration
     pub pos: Position,          // Source location
 }
 ```
@@ -45,33 +42,48 @@ pub struct FunctionSymbol {
 
 | Method | Behavior |
 |--------|----------|
-| `enter_scope()` | Increment `current_scope`, push new `HashMap` |
-| `exit_scope()` | Pop topmost `HashMap`, decrement `current_scope` (refuses to go below 0) |
+| `enter_scope()` | Push a new innermost `HashMap` onto `var_scopes` |
+| `exit_scope()` | Pop the innermost `HashMap`; the global scope is never popped (`ScopeStack::exit` guards on `len() > 1`) |
 
-Initial state has one scope (index 0) — the global scope. Block statements and for-loops create new scopes.
+Initial state has one scope — the global scope. Block statements and for-loops create new scopes.
 
 ## Variable Operations
 
-### `add_variable(name, symbol) -> Result<(), String>`
+### `add_variable(name: String, symbol_type: LangType, pos: Position) -> Result<(), SymbolError>`
 
 Inserts into the **current (topmost) scope only**. Returns an error if a variable with the same name already exists **in that same scope**. Shadowing of outer scopes is allowed since they're in different hashmaps.
 
 ### `lookup_variable(name) -> Option<&VarSymbol>`
 
-Searches from **innermost scope to outermost** (iterates `var_scopes` in reverse). Returns `None` if not found in any scope.
+Searches from **innermost scope to outermost**. Returns `None` if not found in any scope.
 
-## Function Operations
+### `lookup_variable_scoped(name) -> Option<(&VarSymbol, bool)>`
 
-### `add_function(name, symbol) -> Result<(), String>`
+As above, additionally reporting whether the binding is a *global* (outermost scope). The import-visibility check applies to globals only — locals and parameters are same-function by construction.
+
+## `SymbolError`
+
+`DuplicateVariable` / `FunctionAlreadyDefined` / `SignatureMismatch`. These carry no
+position; the caller attaches one via `ParserError::from_symbol`.
+
+Note `FunctionAlreadyDefined` and `SignatureMismatch` both render as
+`ParserError::FunctionRedefinition`, so a signature mismatch reports "Redefinition of
+function 'f'" — the distinction below is invisible in the diagnostic.
+
+## Function Operations (on `ModuleSymbols`, not `SymbolTable`)
+
+These live in `src/symbol/module.rs`.
+
+### `ModuleSymbols::add_function(func: FunctionSymbol) -> Result<(), SymbolError>`
 
 Handles three cases:
 1. **Duplicate body**: existing function has a body and new one also has a body → error
 2. **Forward declaration → definition**: existing has no body, new one does → validates `params` and `return_type` match exactly; error if they don't
 3. **First declaration or bodyless re-declaration**: inserts/overwrites
 
-### `lookup_function(name) -> Option<&FunctionSymbol>`
+### `ModuleSymbols::lookup_function(name) -> Option<&FunctionSymbol>`
 
-Simple lookup in the flat `functions` HashMap.
+Simple lookup in the flat `functions` HashMap. `ModuleSymbols` also holds type-structs and aliases.
 
 ## Scope Example
 
@@ -90,7 +102,7 @@ fn example() {
 
 The parser creates and populates the symbol table during parsing:
 - `parse_var_decl_or_assignment()` calls `add_variable()`
-- `parse_function()` calls `add_function()`
+- `parse_function()` calls `ModuleSymbols::add_function()` (via `self.module`)
 - `parse_block_statement()` calls `enter_scope()` / `exit_scope()`
 - `parse_for_statement()` calls `enter_scope()` / `exit_scope()`
 - Expression parsing calls `lookup_variable()` for identifier types and `lookup_function()` for call return types

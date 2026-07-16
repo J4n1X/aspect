@@ -4,7 +4,7 @@
 
 Integration tests live in `tests/integration_tests.rs` and are split into two suites:
 
-1. Runtime tests: compile valid `.ap` programs from `tests/programs/` through the full pipeline and JIT-execute them in-process via `CodeGenerator::jit_execute_main`. The `i32` returned by `main` is the asserted result.
+1. Runtime tests: compile valid `.ap` programs from `tests/programs/` through the full pipeline and JIT-execute them in-process via `CodeGenerator::jit_execute_main` — twice, at `-O0` and `-O2`. The `i32` returned by `main` is the asserted result, and the two levels must agree.
 2. Compile-failure tests: compile invalid `.ap` programs from `tests/programs/failures/` and assert that compilation fails with stage-appropriate diagnostics.
 
 There is no stdout comparison. Programs must define the canonical
@@ -16,12 +16,12 @@ source path as `argv[0]` and forwards any `# run_args:` entries as `argv[1..]`.
 Test functions are **generated at compile time** by the `generate_tests!()` proc macro defined in `aspect-macros/src/generate_tests.rs`. The macro:
 
 1. Scans `tests/programs/` recursively for `*.ap` files.
-2. Reads the first 10 lines of each file looking for `# expected:`, `# run_args:`, and `# compile_args:` annotations.
+2. Reads the first 10 lines of each file looking for `# expected:`, `# run_args:`, `# compile_args:`, and `# requires_arch:` annotations.
 3. Emits one `#[test]` function per annotated file.
 
 At runtime each generated test calls the appropriate helper:
 
-- **Runtime test**: `compile_and_run[_with_args]` → tokenize → parse → typecheck → codegen → `jit_execute_main` → assert returned `i32`.
+- **Runtime test**: `compile_and_run[_with_args]` → tokenize → parse → typecheck → codegen → run at **-O0** and again at **-O2** (optimizer with `verify_each`) → assert both returned the expected `i32` **and that the two agree**. A -O0/-O2 disagreement is reported as its own failure ("is optimization-level dependent"), not resolved in favour of either: `-O0` and `-O1+` take materially different paths (an `asm fn` stays a real call at `-O0` and is folded in by `alwaysinline` at `-O1+`), so neither level alone covers the corpus.
 - **Failure test**: `assert_compile_error_contains` → runs the compile pipeline, asserts it returns an `Err` whose message contains all expected fragments.
 
 ### Annotation format
@@ -31,7 +31,14 @@ At runtime each generated test calls the appropriate helper:
 # expected: "frag1", "frag2"           # compile only; assert error contains each fragment
 # run_args: "arg1", "arg2"            # optional: forwarded as argv[1..] to main
 # compile_args: "-I", "lib"           # optional: compiler flags (-D/-I), mirroring the CLI
+# requires_arch: ARCH_X86_64          # optional: bare, unquoted; compile this test only on that host arch
 ```
+
+`# requires_arch:` gates the generated test with `#[cfg(target_arch = ...)]`. It exists
+because an `$ifdef`-gated *failure* test compiles clean on the wrong arch, which then
+trips the "expected compilation to fail" assertion — so the gating has to happen outside
+the Aspect source. An unrecognised arch name leaves the test **ungated** rather than
+silently disabling it (`cfg_target_arch_for` returns `None` → no gate).
 
 Files without a `# expected:` line are silently skipped by the macro.
 
@@ -60,62 +67,30 @@ Used by `array_access.ap`, which passes `"array_access_test"` as `argv[1]`.
 
 ## Test Programs
 
-| # | File | Expected Exit | Description |
-|---|------|:---:|-------------|
-| 1 | `return_42.ap` | 42 | Minimal: `main()` returns `42` |
-| 2 | `arithmetic.ap` | 27 | Integer arithmetic with parens: `(10 + 5) * 2 - 3` |
-| 3 | `pointer_arithmetic.ap` | 123 | Pointer add/subtract, cast to int |
-| 4 | `fibonacci.ap` | 13 | Recursive `fib(7)` |
-| 5 | `loops.ap` | 60 | While loop (sum 1..5=15) + for loop (×2 twice) |
-| 6 | `conditionals.ap` | 50 | If/else with `max()` helper: `max(15,20) + max(30,25)` |
-| 7 | `global_vars.ap` | 103 | Global variable mutation via helper function |
-| 8 | `pointers.ap` | 42 | Pass-by-pointer: `modify(&value)` → `32 + 10` |
-| 9 | `bitwise.ap` | 28 | `&`, `\|`, `^` on 12 and 10: `8 + 14 + 6` |
-| 10 | `array_access.ap` | 17 | Extern `strlen` on `argv[1]` (`"array_access_test"` = 17 chars) |
-| 11 | `break_continue.ap` | 22 | Break/continue in for and while loops |
-| 12 | `logical_ops.ap` | 121 | `&&`, `\|\|`, `!` operators |
-| 13 | `bitwise_not.ap` | 42 | `~5 = -6`, then `(~5 + 6) + 42` |
-| 14 | `variable_shadowing.ap` | 10 | Block-scoped shadowing: inner `x=20` doesn't affect outer `x=10` |
+The corpus is `tests/programs/*.ap`, one program per feature. To list it with the
+value each asserts:
 
-## Features Exercised
+```bash
+grep -H '^# expected:' tests/programs/*.ap
+```
 
-| Feature | Programs |
-|---------|----------|
-| Basic return | All |
-| Integer arithmetic | `arithmetic`, `loops`, `break_continue` |
-| Recursive functions | `fibonacci` |
-| If/else | `conditionals`, `logical_ops`, `break_continue` |
-| While loops | `loops`, `break_continue` |
-| For loops | `loops`, `break_continue` |
-| Break/continue | `break_continue` |
-| Logical operators | `logical_ops` |
-| Bitwise operators | `bitwise`, `bitwise_not` |
-| Pointers | `pointers`, `pointer_arithmetic` |
-| Pointer arithmetic | `pointer_arithmetic` |
-| Global variables | `global_vars` |
-| Extern C functions | `array_access` |
-| Command-line args | `array_access` |
-| Type casts | `pointer_arithmetic`, `array_access` |
-| Variable shadowing | `variable_shadowing` |
-| Block scoping | `variable_shadowing` |
+Programs are named after the feature they cover (`struct_*`, `module_*`, `preproc_*`,
+`asm_*`, `fnptr_*`, `value_block*`, `void_*`, …), so the listing *is* the coverage map.
+It is deliberately not duplicated here: a hand-maintained table drifted 44 programs
+behind the corpus, in the very document that tells you how to add a program to it.
 
 ## Compile-Failure Suite
 
-Failure fixtures are stored in `tests/programs/failures/`.
+Failure fixtures live in `tests/programs/failures/`, one per diagnostic. To list them
+with the fragments each asserts:
 
-Current coverage:
+```bash
+grep -H '^# expected:' tests/programs/failures/*.ap
+```
 
-| Stage | File | Expected diagnostic fragment(s) |
-|---|---|---|
-| Lexer | `lexer_unterminated_string.ap` | `unterminated string` |
-| Lexer | `lexer_invalid_escape_sequence.ap` | `invalid escape sequence` |
-| Parser | `parser_missing_initializer_expression.ap` | `expected expression` |
-| Type checker | `type_assignment_to_const.ap` | `cannot assign to const variable` |
-| Type checker | `type_argument_count_mismatch.ap` | `expects 2 arguments`, `got 1` |
-| Type checker | `type_return_type_mismatch.ap` | `type mismatch`, `i32`, `f64` |
-| Type checker | `type_invalid_dereference.ap` | `cannot dereference non-pointer type` |
-| Type checker | `type_list_initializer_too_long.ap` | `list initializer has`, `array only has room for 2` |
-| Type checker | `literal_overflow.ap` | `type mismatch`, `u8`, `i32` |
+Fixtures are grouped by filename prefix: `lexer_`, `parser_`, `preproc_`, `type_`,
+`module_`, `asm_`, `public_`, `void_`, `value_block_`. A fixture with no `# expected:`
+line is silently skipped by the macro — it generates no test at all.
 
 ## Running Tests
 

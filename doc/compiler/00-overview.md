@@ -25,23 +25,43 @@ aspect/
 │   │   ├── statements.rs    # Statement parsing
 │   │   ├── types.rs         # Re-export of lexer types
 │   │   └── errors.rs        # Parser error types
-│   ├── symbol/              # Symbol table
-│   │   └── table.rs         # Scoped variable/function symbol table
+│   ├── symbol/              # Symbol tables
+│   │   ├── table.rs         # Transient parse-time variable scopes
+│   │   └── module.rs        # ModuleSymbols: functions/type-structs/aliases, rides on Program
 │   ├── typechecker/         # Semantic validation
 │   │   ├── checker.rs       # Constraint-based type checker
 │   │   ├── types.rs         # Constraint definitions
 │   │   └── errors.rs        # Type error types
-│   └── codegen/             # LLVM IR emission
-│       ├── generator.rs     # Core IR generation logic
-│       ├── types.rs         # LangType → LLVM type translation
-│       └── errors.rs        # Codegen error types
+│   ├── codegen/             # LLVM IR emission
+│   │   ├── generator.rs     # CodeGenerator struct + orchestration (not the bulk of IR gen)
+│   │   ├── expressions.rs   # walk_expression: the unified expression walker
+│   │   ├── statements.rs    # Statement generators
+│   │   ├── value_emitter.rs # ValueEmitter trait + RuntimeEmitter + ConstantEmitter
+│   │   ├── functions.rs     # declare/generate_function, FunctionScope RAII
+│   │   ├── structs.rs       # Type-struct registration, lowering, lvalue path
+│   │   ├── asm.rs           # `asm fn` lowering
+│   │   ├── globals.rs       # Globals, string literals, list initializers
+│   │   ├── scope.rs         # ScopeStack, LocalVar, GlobalVarInfo, VarRef
+│   │   ├── types.rs         # LangType → LLVM type translation
+│   │   └── errors.rs        # Codegen error types
+│   ├── asm.rs               # Target register model shared by checker and codegen
+│   ├── target.rs            # Target-triple detection; backs --target
+│   ├── scope.rs             # Generic ScopeStack<T> shared across phases
+│   └── lib.rs               # Library exports
+├── aspect-macros/           # Workspace member: proc macros (see 08-parser-macro-rewrite.md)
+│   └── src/
+│       ├── lib.rs           # #[parse_rule] + generate_tests!()
+│       ├── expand.rs        # DSL macro expansions (DslRewriter)
+│       └── generate_tests.rs# Test-suite generation from tests/programs/
 ├── tests/
 │   ├── integration_tests.rs # Integration test suite
-│   ├── programs/            # .ap test programs
-│   └── modules/             # module fixtures imported by test programs
+│   ├── programs/            # .ap test programs (+ programs/failures/)
+│   ├── modules/             # module fixtures imported by test programs
+│   └── modules_alt/         # second search root, for -I search-order tests
 ├── lib/                     # The standard library (lib/std/**), pass -I lib
 ├── doc/                     # This documentation
-├── Cargo.toml               # Dependencies and features
+├── build.rs                 # Build script
+├── Cargo.toml               # Workspace + dependencies and features
 └── compile-file.sh          # Native compilation script
 ```
 
@@ -149,10 +169,17 @@ Runs LLVM's new pass manager with pipeline strings `default<O0>` through `defaul
 
 | Crate | Purpose |
 |-------|---------|
-| `inkwell` 0.9.0 (feature `llvm19-1`) | Safe Rust bindings to LLVM 19.1 |
-| `clap` 4.6.1 (feature `derive`) | CLI argument parsing |
+| `inkwell` 0.9 (`default-features = false`, features `llvm19-1` + `target-x86`) | Safe Rust bindings to LLVM 19.1 |
+| `clap` 4.6 (feature `derive`) | CLI argument parsing |
 | `anyhow` 1.0 | Contextual error handling |
-| `thiserror` 2.0.17 | Derive for custom error enums |
+| `thiserror` 2.x | Derive for custom error enums |
+| `indexmap` 2 | `IndexSet` for the string-literal table (insertion-ordered, dedup) |
+| `aspect-macros` (path) | In-repo proc macros: `#[parse_rule]`, `generate_tests!()` — see [08-parser-macro-rewrite](08-parser-macro-rewrite.md) |
+
+Dev-dependencies: `pretty_assertions` 1.4.
+
+Versions are given to the precision that matters; see `Cargo.toml` for the exact
+pins, which drift with `cargo update`.
 
 External tools required on `PATH`: only `llc-19` (LLVM static compiler), and only for the optional native-compilation script `compile-file.sh`. JIT execution (`interpret` subcommand, integration test runner) goes through Inkwell's ExecutionEngine in-process — no `lli` binary needed.
 
@@ -165,8 +192,9 @@ cargo run -- lex <FILE>
 # Parse and print AST
 cargo run -- parse <FILE>
 
-# Compile (emit IR by default)
-cargo run -- compile <FILE> [-e ir|obj|exe] [-o OUTPUT] [--print] [-O LEVEL]
+# Compile (emit IR by default; `-e exe` is accepted by the CLI but NOT yet
+# implemented — it hard-errors. Use compile-file.sh for a native binary)
+cargo run -- compile <FILE> [-e ir|obj] [-o OUTPUT] [--print] [-O LEVEL] [--verify-each]
 
 # JIT-compile and execute in-process; trailing args become argv[1..]
 cargo run -- interpret <FILE> [-O LEVEL] [-- ARGS...]
@@ -175,9 +203,15 @@ cargo run -- interpret <FILE> [-O LEVEL] [-- ARGS...]
 ./compile-file.sh program.ap   # produces program.out
 ```
 
-Every subcommand also takes the preprocessor flags `-D NAME[=VALUE]`
-(inject a define, repeatable) and `-I DIR` (module search root,
-repeatable). Programs that `$import std/...` need `-I lib`:
+Every subcommand also takes `-D NAME[=VALUE]` (inject a define, repeatable),
+`-I DIR` (module search root, repeatable), and `--target TRIPLE` (defaults to
+the host triple; seeds the `OS_*`/`ARCH_*` defines that drive `$ifdef` in
+*every* subcommand, and additionally selects the LLVM target machine for
+`compile`/`interpret`). `--target` is what decides which per-platform stdlib
+backend a build sees — `lib/std/io/linux.ap` vs `lib/std/io/posix.ap` — and is
+implemented in `src/target.rs`.
+
+Programs that `$import std/...` need `-I lib`:
 
 ```bash
 cargo run -- interpret -I lib demos/hello.ap
@@ -185,7 +219,12 @@ cargo run -- interpret -I lib demos/hello.ap
 
 ## Library Exports
 
-`src/lib.rs` re-exports all modules (`lexer`, `parser`, `symbol`, `codegen`, `typechecker`) so integration tests and external consumers can invoke the pipeline directly without going through the CLI.
+`src/lib.rs` re-exports every module — `lexer`, `preprocessor`, `parser`, `symbol`,
+`typechecker`, `codegen`, plus the supporting `target`, `scope`, and `asm` — so
+integration tests and external consumers can invoke the pipeline directly without
+going through the CLI. `tests/integration_tests.rs` is the worked example:
+`Preprocessor` → `Parser` → `TypeChecker` → `CodeGenerator`, with `TargetSpec`
+supplying the target.
 
 ## Critical Design Decisions
 

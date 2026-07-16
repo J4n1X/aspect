@@ -20,7 +20,6 @@ $import std/io
 $import std/sort
 $import std/rand
 $import std/c/string    # strcmp/strlen
-$import std/c/stdio     # putchar
 
 type Person {
     public u8* name
@@ -50,7 +49,7 @@ fn print_people(Person* people, u64 n) {
         print(people[i].name)
         u64 len = strlen(people[i].name)
         while len < 10 {
-            putchar(32)
+            print_char(32)
             len = len + 1
         }
         println_i64(people[i].age)

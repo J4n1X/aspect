@@ -10,7 +10,6 @@
 -#
 
 $import std/io
-$import std/c/stdio      # putchar
 
 const i32 WIDTH = 76
 const i32 HEIGHT = 28
@@ -57,17 +56,17 @@ fn main(u32 argc, u8** argv) -> i32 {
             i32 iter = escape_time(cr, ci)
             if iter == MAX_ITER {
                 interior = interior + 1
-                putchar(palette[palette_len - 1] as i32)
+                print_char(palette[palette_len - 1])
             } else {
                 # Escape times cluster at the low end, so a straight
                 # iter/MAX scale would leave the ramp mostly unused;
                 # a clamped iter/3 spreads the gradient over the edge.
                 i32 idx = iter / 3
                 if idx > palette_len - 2 { idx = palette_len - 2 }
-                putchar(palette[idx] as i32)
+                print_char(palette[idx])
             }
         }
-        putchar(10)
+        print_char(10)
     }
 
     println("")

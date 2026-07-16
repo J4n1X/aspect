@@ -11,11 +11,11 @@ Both live in the preprocessor (`src/preprocessor/modules.rs`); the
 visibility rule is enforced later, at parse-time symbol resolution.
 
 ```aspect
-# in lib/std/io/print.ap:
+# in lib/std/io/linux.ap — one of the four files declaring $module std/io:
 $module std/io
-$import std/c/stdio
+$import std/linux/syscall
 
-fn println(u8* s) -> i32 { return puts(s) }
+fn io_write_bytes(i32 fd, u8* buf, u64 n) -> i64 { return sys_write(fd, buf, n) }
 ```
 
 ```aspect
@@ -23,7 +23,7 @@ fn println(u8* s) -> i32 { return puts(s) }
 $import std/io
 
 fn main(u32 argc, u8** argv) -> i32 {
-    return println("hello")
+    return println("hello")     # from lib/std/io/generic.ap — same module
 }
 ```
 
@@ -125,12 +125,16 @@ Both resolution forms are exercised:
 
 | Import | Form | Files | Its own imports |
 |---|---|---|---|
+| `std/c/mman` | file | `lib/std/c/mman.ap` | — |
 | `std/c/stdio` | file | `lib/std/c/stdio.ap` | — |
 | `std/c/stdlib` | file | `lib/std/c/stdlib.ap` | — |
 | `std/c/string` | file | `lib/std/c/string.ap` | — |
-| `std/io` | directory | `lib/std/io/print.ap` | `std/c/stdio` |
+| `std/c/unistd` | file | `lib/std/c/unistd.ap` | — |
+| `std/io` | directory | `lib/std/io/generic.ap`, `lib/std/io/linux.ap`, `lib/std/io/windows.ap`, `lib/std/io/posix.ap` | `std/linux/syscall` (Linux/x86-64), `std/c/unistd` (other POSIX) |
+| `std/linux/syscall` | file | `lib/std/linux/syscall.ap` | — |
 | `std/math` | file | `lib/std/math.ap` | — |
-| `std/mem` | directory | `lib/std/mem/alloc.ap` | `std/c/stdlib` |
+| `std/mem` | directory | `lib/std/mem/generic.ap` | `std/c/stdlib` |
+| `std/mem/page` | directory | `lib/std/mem/page/generic.ap`, `lib/std/mem/page/linux.ap`, `lib/std/mem/page/windows.ap`, `lib/std/mem/page/posix.ap` | `std/linux/syscall` (Linux/x86-64), `std/c/mman` + `std/c/unistd` (other POSIX) |
 | `std/rand` | file | `lib/std/rand.ap` | — |
 | `std/sort` | file | `lib/std/sort.ap` | `std/c/string` |
 | `std/string` | directory | `lib/std/string/String.ap` | `std/c/stdlib`, `std/c/string` |
@@ -140,6 +144,15 @@ Both resolution forms are exercised:
 Note the consequence of enforced non-transitivity: `$import std/sort`
 gives you `sort_bytes` and `sort_cstr`, but **not** `strcmp` — if your
 file calls `strcmp` itself, it writes `$import std/c/string` itself.
+
+`std/linux/syscall` is the raw Linux/x86-64 syscall layer (`sys_write`, `STDOUT`,
+`O_RDONLY`, `SEEK_SET`, …), built on `asm fn` with no libc. `std/io` and
+`std/mem/page` import it for their Linux backends. Non-transitivity applies to it
+like everything else, and uniformly: `$import std/io` gives you neither
+`sys_write` **nor** `STDOUT` — both report "is defined in module
+`std/linux/syscall`, which the root module does not import". Its constants are
+ordinary `const` globals, not `$define`s (the module contains none), so nothing
+about it leaks textually. Want it? Import it yourself.
 
 The `std/c/*` modules are raw libc `extern fn` bindings, importable at
 header granularity like their C namesakes. The directory-form modules

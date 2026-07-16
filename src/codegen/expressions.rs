@@ -13,12 +13,12 @@ use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::values::{BasicValue, BasicValueEnum, PointerValue};
 use inkwell::{AddressSpace, IntPredicate};
 
+use crate::codegen::CodegenError;
 use crate::codegen::generator::CodeGenerator;
 use crate::codegen::types::{
-    float_cmp_pred, int_cmp_pred, widen_floats_to_match, widen_ints_to_match, LangTypeExt,
+    LangTypeExt, float_cmp_pred, int_cmp_pred, widen_floats_to_match, widen_ints_to_match,
 };
 use crate::codegen::value_emitter::{ConstantEmitter, RuntimeEmitter, ValueEmitter};
-use crate::codegen::CodegenError;
 use crate::lexer::{LangType, Position, TypeBase};
 use crate::parser::{BinaryOp, ExprKind, Expression, LiteralValue};
 
@@ -117,7 +117,7 @@ fn emit_pointer_arithmetic<'ctx>(
     let int = int_val.into_int_value();
     // `lang_type_to_llvm` (not the context-only `to_llvm`) so the GEP scales
     // correctly when the pointee is a type-struct.
-    let pointee_type = cg.lang_type_to_llvm(&ptr_expr.expr_type.pointee())?;
+    let pointee_type = cg.lang_type_to_llvm(&ptr_expr.expr_type.pointee(), ptr_expr.pos)?;
 
     match op {
         BinaryOp::Add => unsafe {
@@ -165,9 +165,11 @@ pub(crate) fn walk_expression<'ctx>(
             }
             LiteralValue::String(index) => cg.emit_string_ptr(*index, mode),
             // Boolean literal: an i1 value (zero-extended to i8 when stored).
-            LiteralValue::Bool(b) => {
-                Ok(cg.context.bool_type().const_int(u64::from(*b), false).into())
-            }
+            LiteralValue::Bool(b) => Ok(cg
+                .context
+                .bool_type()
+                .const_int(u64::from(*b), false)
+                .into()),
         },
 
         // ── Variable load ─────────────────────────────────────────────────
@@ -347,7 +349,7 @@ pub(crate) fn walk_expression<'ctx>(
                     && matches!(inner.expr_type.base, TypeBase::Struct(_))
                 {
                     let val = walk_expression(inner, cg, mode)?;
-                    let struct_ty = cg.lang_type_to_llvm(&inner.expr_type)?;
+                    let struct_ty = cg.lang_type_to_llvm(&inner.expr_type, inner.pos)?;
                     let tmp = cg.builder.build_alloca(struct_ty, "ref.tmp")?;
                     cg.builder.build_store(tmp, val)?;
                     return Ok(tmp.into());
@@ -371,7 +373,7 @@ pub(crate) fn walk_expression<'ctx>(
             }
             // Cache-aware lowering: `*(Pair*)` loads a struct value, which the
             // context-only `to_llvm` cannot resolve.
-            let pointee_type = cg.lang_type_to_llvm(&inner_expr.expr_type.pointee())?;
+            let pointee_type = cg.lang_type_to_llvm(&inner_expr.expr_type.pointee(), inner_expr.pos)?;
             Ok(cg
                 .builder
                 .build_load(pointee_type, ptr.into_pointer_value(), "deref")?)
@@ -389,7 +391,7 @@ pub(crate) fn walk_expression<'ctx>(
             target_type,
         } => {
             let val = walk_expression(inner, cg, mode)?;
-            let target_llvm = target_type.to_llvm(cg.context)?;
+            let target_llvm = target_type.to_llvm(cg.context, expr.pos)?;
             emitter(cg, mode).emit_cast(val, target_llvm, &inner.expr_type, target_type, inner.pos)
         }
 
@@ -464,40 +466,71 @@ pub(crate) fn walk_expression<'ctx>(
             if field_ty.is_array() {
                 return Ok(field_ptr.into());
             }
-            let field_llvm = cg.lang_type_to_llvm(&field_ty)?;
+            let field_llvm = cg.lang_type_to_llvm(&field_ty, expr.pos)?;
             Ok(cg.builder.build_load(field_llvm, field_ptr, "field")?)
         }
 
         // ── Struct literal `Name { f = v, ... }` (runtime only) ───────────
         ExprKind::StructLiteral { struct_id, fields } => {
-            require_runtime(mode, "struct literal", expr.pos)?;
+            //require_runtime(mode, "struct literal", expr.pos)?;
             let struct_ty = *cg.struct_types.get(struct_id).ok_or_else(|| {
                 CodegenError::TypeError(
                     format!("unregistered type-struct id {struct_id}"),
                     expr.pos,
                 )
             })?;
-            // Build the aggregate value field-by-field via insertvalue.
-            let mut agg = struct_ty.get_undef();
-            for (fname, fexpr) in fields {
-                let (idx, field_ty) = cg.struct_field(*struct_id, fname).ok_or_else(|| {
-                    CodegenError::TypeError(
-                        format!("unknown field '{fname}' on type-struct id {struct_id}"),
-                        expr.pos,
-                    )
-                })?;
-                let fval = cg.generate_coerced_value(fexpr, Some(&field_ty))?;
-                agg = cg
-                    .builder
-                    .build_insert_value(
-                        agg,
-                        fval,
-                        u32::try_from(idx).expect("field index out of range"),
-                        "structlit",
-                    )?
-                    .into_struct_value();
+
+            match mode {
+                EmitMode::Constant => {
+                    let layout = cg.struct_fields[struct_id].clone();
+                    let mut vals = Vec::with_capacity(layout.len());
+                    for (fname, fty) in &layout {
+                        match fields.iter().find(|(n, _)| n == fname) {
+                            Some((_, fexpr)) => {
+                                vals.push(cg.generate_coerced_value(fexpr, Some(fty), mode)?)
+                            }
+                            None => {
+                                return Err(CodegenError::TypeError(
+                                    format!(
+                                        "missing field '{fname}' in struct literal for type-struct id {struct_id}"
+                                    ),
+                                    expr.pos,
+                                ));
+                            }
+                        }
+                    }
+                    Ok(struct_ty.const_named_struct(&vals).into())
+                }
+                EmitMode::Runtime => {
+                    // Build the aggregate value field-by-field via insertvalue.
+                    // TODO: If we can ensure the initializer is constant, we can build a constant value
+                    // and store it directly, which is more efficient than insertvalue.
+                    let mut agg = struct_ty.get_undef();
+                    for (fname, fexpr) in fields {
+                        // TODO: This is insanely inefficient. We should have a function that gives us this ordered in a Vector.
+                        let (idx, field_ty) =
+                            cg.struct_field(*struct_id, fname).ok_or_else(|| {
+                                CodegenError::TypeError(
+                                    format!(
+                                        "unknown field '{fname}' on type-struct id {struct_id}"
+                                    ),
+                                    expr.pos,
+                                )
+                            })?;
+                        let fval = cg.generate_coerced_value(fexpr, Some(&field_ty), mode)?;
+                        agg = cg
+                            .builder
+                            .build_insert_value(
+                                agg,
+                                fval,
+                                u32::try_from(idx).expect("field index out of range"),
+                                "structlit",
+                            )?
+                            .into_struct_value();
+                    }
+                    Ok(agg.into())
+                }
             }
-            Ok(agg.into())
         }
 
         // ── Function reference: bare function name as a value. Function
@@ -540,9 +573,7 @@ pub(crate) fn walk_expression<'ctx>(
         // (the Constant-mode Err makes `try_fold` fall back to the
         // runtime path for initializers).
         ExprKind::ValueBlock(stmts) => match mode {
-            EmitMode::Runtime => {
-                cg.generate_value_block(stmts, expr.expr_type, expr.pos)
-            }
+            EmitMode::Runtime => cg.generate_value_block(stmts, expr.expr_type, expr.pos),
             EmitMode::Constant => Err(CodegenError::InvalidOperation(
                 "value block is not a compile-time constant".to_string(),
                 expr.pos,
@@ -588,12 +619,20 @@ impl<'ctx> CodeGenerator<'ctx> {
     ///
     /// Integer/float literals assigned to a concrete target type are checked for
     /// overflow at this stage and emitted directly at the target width.
+    /// Coerce `expr` to `target`, emitting in `mode`.
+    ///
+    /// In `Constant` mode a non-constant operand fails here — callers rely on
+    /// that failure to fall back to runtime. Coercing at runtime where a
+    /// constant is required puts instructions inside a constant aggregate,
+    /// which only the IR verifier catches.
     pub(crate) fn generate_coerced_value(
         &mut self,
         expr: &Expression,
         target: Option<&LangType>,
+        mode: EmitMode,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-        // Fast path: literal assigned to a scalar target — emit at target type with overflow check.
+        // Fast path: literal assigned to a scalar target — emit at target type
+        // with overflow check.
         if let Some(target_ty) = target
             && target_ty.pointer_depth == 0
             && !target_ty.is_array()
@@ -603,7 +642,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             return self.generate_literal_typed(lit, target_ty, expr.pos);
         }
 
-        let val = self.generate_expression(expr)?;
+        let val = walk_expression(expr, self, mode)?;
 
         // Auto-widen to target if types differ. Struct values are aggregates —
         // they are never scalar-cast; the value is stored/copied as-is.
@@ -612,9 +651,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             && !target_ty.is_array()
             && !matches!(target_ty.base, TypeBase::Struct(_))
         {
-            let target_llvm = target_ty.to_llvm(self.context)?;
+            let target_llvm = target_ty.to_llvm(self.context, expr.pos)?;
             if val.get_type() != target_llvm {
-                return emitter(self, EmitMode::Runtime).emit_cast(
+                return emitter(self, mode).emit_cast(
                     val,
                     target_llvm,
                     &expr.expr_type,
@@ -636,7 +675,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         match lit {
             LiteralValue::Integer(val) => {
-                let llvm_type = ty.to_llvm(self.context)?;
+                let llvm_type = ty.to_llvm(self.context, pos)?;
                 match llvm_type {
                     BasicTypeEnum::IntType(int_ty) => {
                         let bits = int_ty.get_bit_width();
@@ -680,7 +719,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
             LiteralValue::Float(val) => {
-                let llvm_type = ty.to_llvm(self.context)?;
+                let llvm_type = ty.to_llvm(self.context, pos)?;
                 match llvm_type {
                     BasicTypeEnum::FloatType(float_ty) => Ok(float_ty.const_float(*val).into()),
                     _ => Err(CodegenError::TypeError(
@@ -689,10 +728,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     )),
                 }
             }
-            LiteralValue::Bool(b) => match ty.to_llvm(self.context)? {
-                BasicTypeEnum::IntType(int_ty) => {
-                    Ok(int_ty.const_int(u64::from(*b), false).into())
-                }
+            LiteralValue::Bool(b) => match ty.to_llvm(self.context, pos)? {
+                BasicTypeEnum::IntType(int_ty) => Ok(int_ty.const_int(u64::from(*b), false).into()),
                 _ => Err(CodegenError::TypeError(
                     "boolean literal must have integer type".to_string(),
                     pos,
@@ -707,9 +744,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         array_ptr: PointerValue<'ctx>,
         var_type: &LangType,
         elements: &[Expression],
+        pos: Position,
     ) -> Result<(), CodegenError> {
         let elem_lang_type = var_type.element_type();
-        let elem_llvm_type = elem_lang_type.to_llvm(self.context)?;
+        let elem_llvm_type = elem_lang_type.to_llvm(self.context, pos)?;
         let array_size = var_type.array_size.unwrap_or(0);
         let array_llvm_type = elem_llvm_type.array_type(array_size);
 
@@ -729,7 +767,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         });
 
         if all_const {
-            let const_val = self.generate_constant_array_value(var_type, elements)?;
+            let const_val = self.generate_constant_array_value(var_type, elements, pos)?;
             self.builder.build_store(array_ptr, const_val)?;
             return Ok(());
         }
@@ -748,7 +786,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     &format!("list_init.{i}"),
                 )?
             };
-            let value = self.generate_coerced_value(elem_expr, Some(&elem_lang_type))?;
+            let value = self.generate_coerced_value(elem_expr, Some(&elem_lang_type), EmitMode::Runtime)?;
             self.builder.build_store(elem_ptr, value)?;
         }
 
@@ -780,7 +818,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             // Global alloc: count must be a compile-time integer literal.
             match count.kind {
                 ExprKind::Literal(LiteralValue::Integer(val)) => {
-                    let llvm_type = alloc_type.to_llvm(self.context)?;
+                    let llvm_type = alloc_type.to_llvm(self.context, count.pos)?;
                     let array_size = u32::try_from(val).map_err(|_| {
                         CodegenError::InvalidOperation(
                             "global allocation size too large".to_string(),
@@ -800,7 +838,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         } else {
             // Local alloc: evaluate count at runtime.
             let count_int = self.generate_expression(count)?.into_int_value();
-            let llvm_type = alloc_type.to_llvm(self.context)?;
+            let llvm_type = alloc_type.to_llvm(self.context, count.pos)?;
             let alloca = self
                 .builder
                 .build_array_alloca(llvm_type, count_int, "alloca")
