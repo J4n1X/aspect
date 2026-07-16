@@ -13,6 +13,10 @@ A compiler for the Aspect programming language, written in Rust. Aspect is a sta
 - **C interoperability** through extern function declarations
 - **Multiple optimization levels** (O0-O3)
 
+## Getting Started
+
+If you wanna learn how to use the language, you can jump right in and read the [Programmer's Handbook](doc/handbook.md)
+
 ## Requirements
 
 - Rust (2024 edition)
@@ -163,7 +167,10 @@ cargo test
 
 ## Documentation
 
-For language syntax and features as well as the function and makeup of the compiler, see the doc directory. (DISCLAIMER: The documentation is almost entirely AI generated and may contain errors, as most AI things do.)
+- [`doc/handbook.md`](doc/handbook.md) — learn the language: syntax, types, structs, memory, the standard library, and common idioms.
+- [`doc/compiler/`](doc/compiler/00-overview.md) — how the compiler itself is built, stage by stage.
+
+(DISCLAIMER: The documentation is almost entirely AI generated and may contain errors, as most AI things do.)
 
 ## License
 
