@@ -1,0 +1,44 @@
+# expected: 0
+# compile_args: "-I", "lib"
+#-
+  Float operands in SSE registers, via the accelerated std/math paths.
+  Returns the number of failed checks.
+
+  x86-only: gated so the suite stays honest on other arches, where these
+  resolve to the Newton/comparison fallbacks instead.
+-#
+$import std/math
+
+$ifdef ARCH_X86_64
+fn main(u32 argc, u8 **argv) -> i32 {
+    i32 fails = 0
+
+    # SQRTSD, correctly rounded in hardware.
+    if sqrt_f64(144.0) != 12.0 { fails += 1 }
+    if sqrt_f64(0.0) != 0.0 { fails += 1 }
+    if sqrt_f64(2.25) != 1.5 { fails += 1 }
+
+    # A negative input is NaN, which compares false against itself.
+    f64 nan = sqrt_f64(0.0 - 1.0)
+    if nan == nan { fails += 1 }
+
+    # MINSD/MAXSD.
+    if min_f64(3.0, 5.0) != 3.0 { fails += 1 }
+    if min_f64(5.0, 3.0) != 3.0 { fails += 1 }
+    if max_f64(3.0, 5.0) != 5.0 { fails += 1 }
+    if max_f64(5.0, 3.0) != 5.0 { fails += 1 }
+
+    # Sign-bit clear, including the -0.0 case the comparison form gets wrong:
+    # 1.0/(+0.0) is +inf, 1.0/(-0.0) is -inf.
+    if fabs(0.0 - 7.5) != 7.5 { fails += 1 }
+    if fabs(7.5) != 7.5 { fails += 1 }
+    f64 neg_zero = (0.0 - 1.0) * 0.0
+    if 1.0 / fabs(neg_zero) < 0.0 { fails += 1 }
+
+    return fails
+}
+$else
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}
+$endif

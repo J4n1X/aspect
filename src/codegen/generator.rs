@@ -13,7 +13,7 @@ use std::os::raw::c_char;
 
 use crate::codegen::scope::ScopeStack;
 use crate::codegen::CodegenError;
-use crate::parser::{LangType, Program};
+use crate::parser::{FunctionBody, LangType, Program};
 use crate::target::TargetSpec;
 
 pub struct CodeGenerator<'ctx> {
@@ -199,11 +199,18 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
-        // Second pass: Generate function bodies
+        // Second pass: Generate function bodies. An `asm fn` has no statement
+        // body — its body *is* its instructions — so it takes the inline-asm
+        // lowering instead. This dispatch is load-bearing: `generate_function`
+        // would walk the empty body and synthesise a `ret 0`, silently
+        // producing a function that ignores its own assembly.
         for func in &program.functions {
-            if !func.proto.is_extern
-                && let Err(e) = self.generate_function(func)
-            {
+            let result = match &func.body {
+                FunctionBody::Asm(spec) => self.generate_asm_function(func, spec),
+                FunctionBody::Aspect(stmts) => self.generate_function(func, stmts),
+                FunctionBody::Extern => Ok(()),
+            };
+            if let Err(e) = result {
                 anyhow::bail!(
                     "{}: failed to generate function '{}'",
                     self.format_error(&e),

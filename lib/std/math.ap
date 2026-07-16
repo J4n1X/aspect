@@ -64,6 +64,18 @@ fn clamp_u64(u64 v, u64 lo, u64 hi) -> u64 {
 
 # ── f64 ─────────────────────────────────────────────────────────────────
 
+$ifdef ARCH_X86_64
+# MINSD/MAXSD are defined as `(a < b) ? a : b` and `(a > b) ? a : b`, which is
+# exactly what the fallbacks below spell out — same NaN and ±0.0 behaviour,
+# one instruction.
+asm fn min_f64(f64 a: xmm0, f64 b: xmm1) -> f64: xmm0 {
+    "minsd xmm0, xmm1"
+}
+
+asm fn max_f64(f64 a: xmm0, f64 b: xmm1) -> f64: xmm0 {
+    "maxsd xmm0, xmm1"
+}
+$else
 fn min_f64(f64 a, f64 b) -> f64 {
     if a < b { return a }
     return b
@@ -73,6 +85,7 @@ fn max_f64(f64 a, f64 b) -> f64 {
     if a > b { return a }
     return b
 }
+$endif
 
 fn clamp_f64(f64 v, f64 lo, f64 hi) -> f64 {
     if v < lo { return lo }
@@ -80,10 +93,27 @@ fn clamp_f64(f64 v, f64 lo, f64 hi) -> f64 {
     return v
 }
 
+$ifdef ARCH_X86_64
+# Clear the sign bit outright. No single SSE2 instruction does this (ANDPD
+# would need a mask constant), so it detours through a GPR — hence the `rax`
+# clobber.
+asm fn fabs(f64 v: xmm0) -> f64: xmm0
+    clobbers(rax)
+{
+    "movq rax, xmm0"
+    "btr rax, 63"
+    "movq xmm0, rax"
+}
+$else
+# The `v == 0.0` arm is not redundant: it normalises -0.0 to +0.0, which the
+# `v < 0.0` test alone misses (-0.0 < 0.0 is false). Without it this would
+# return -0.0 and disagree with the sign-bit-clearing version above.
 fn fabs(f64 v) -> f64 {
     if v < 0.0 { return 0.0 - v }
+    if v == 0.0 { return 0.0 }
     return v
 }
+$endif
 
 # ── integer number theory ───────────────────────────────────────────────
 
@@ -138,6 +168,15 @@ fn isqrt_u64(u64 n) -> u64 {
 
 # ── f64 roots and rounding ──────────────────────────────────────────────
 
+$ifdef ARCH_X86_64
+# SQRTSD is correctly-rounded in hardware and baseline SSE2, so it beats the
+# Newton fallback on both accuracy and speed. It also handles the edge cases
+# the fallback special-cases by hand: sqrt(-x) is NaN, sqrt(-0.0) is -0.0,
+# sqrt(inf) is inf.
+asm fn sqrt_f64(f64 x: xmm0) -> f64: xmm0 {
+    "sqrtsd xmm0, xmm0"
+}
+$else
 # Newton–Raphson. Converges quadratically; the fixed-point test (`next ==
 # guess`) ends the loop exactly, the iteration cap is a safety net for
 # denormal-edge oscillation. Negative input returns NaN, like libm.
@@ -158,6 +197,7 @@ fn sqrt_f64(f64 x) -> f64 {
     }
     return guess
 }
+$endif
 
 # Valid for |x| < 2^63 (the i64 round-trip window); beyond that x is
 # returned unchanged, which is correct — such doubles are already integral.

@@ -1,0 +1,10 @@
+# expected: "needs a general-purpose register"
+# The mirror of asm_float_in_gpr: an integer cannot live in an SSE register.
+
+asm fn f(i64 x: xmm0) -> i64: rax {
+    "nop"
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

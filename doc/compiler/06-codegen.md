@@ -10,6 +10,7 @@ The codegen module (`src/codegen/`) emits LLVM IR via Inkwell (pinned to LLVM 19
 | `expressions.rs` | `walk_expression` unified expression walker + `CodeGenerator` expression entry-points |
 | `statements.rs` | `generate_statement` and all statement generators |
 | `functions.rs` | `declare_function`, `generate_function`, `FunctionScope` RAII |
+| `asm.rs` | `asm fn` lowering: `constraint_string`, `generate_asm_function` |
 | `globals.rs` | `generate_global_variable`, `generate_string_literal`, `generate_constant_array_value`, `generate_list_initializer` |
 | `scope.rs` | `ScopeStack`, `LocalVar`, `GlobalVarInfo`, `VarRef` |
 | `types.rs` | `LangTypeExt` trait + LLVM type helpers + operation helpers |
@@ -164,6 +165,50 @@ Uses `FunctionScope` RAII to set/clear `current_function` + `current_function_re
 5. Emit all body statements
 6. If current block lacks terminator: `ret void` or `ret <zero>`
 7. Exit scope; `FunctionScope::drop()` clears both fields automatically
+
+Which of the two body generators runs is decided by an exhaustive match on
+`FunctionBody` (see [03-ast](03-ast.md)): `Aspect` bodies go to
+`generate_function`, `Asm` to `generate_asm_function`, `Extern` emits nothing
+beyond its pass-1 declaration.
+
+## `asm fn` Lowering (`asm.rs`)
+
+An `asm fn` becomes a **real** LLVM function — internal, `alwaysinline` —
+whose body is a single inline-asm call plus a return:
+
+```llvm
+define internal i64 @syscall3(i64 %nr, i64 %a1, i64 %a2, i64 %a3) alwaysinline {
+entry:
+  %asm.ret = call i64 asm sideeffect inteldialect "syscall",
+        "={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory},~{dirflag},~{fpsr},~{flags}"
+        (i64 %nr, i64 %a1, i64 %a2, i64 %a3)
+  ret i64 %asm.ret
+}
+```
+
+That is the whole trick: because it is a genuine function, pass 1 declares it
+from its `proto` with no special casing, and Aspect call sites stay ordinary
+calls that the existing type checker, symbol table and `build_abi_call` handle
+unchanged. `asm fn` is a *declaration* form, not an expression form. At `-O0`
+it remains a real call; at `-O1`+ `alwaysinline` folds it to the bare
+instruction.
+
+`constraint_string` builds the constraint from the `AsmSpec` — output, then
+inputs in parameter order, then clobbers, the order LangRef mandates. Two
+things are compiler-decided and cannot be opted out of:
+
+- **`sideeffect`** is always set, or LLVM deletes the asm whenever its result
+  is unused.
+- **`~{dirflag},~{fpsr},~{flags}`** is always appended, as clang does for
+  every x86 asm block. Almost any instruction can touch EFLAGS, and
+  `sideeffect` does *not* protect against it: without `~{flags}`, a caller
+  holding a live comparison across the asm keeps its `cmp` above the block and
+  branches on flags the asm destroyed — a silent wrong answer at `-O2` only.
+
+An input naming the same register as the output (the in-out `rax` syscall
+case) stays an ordinary untied `{rax}`; the numeric-tie form (`0`) exists to
+constrain the register *allocator*, and nothing is left to allocate once both
+ends are pinned by name.
 
 ## Statement Codegen (`statements.rs`)
 

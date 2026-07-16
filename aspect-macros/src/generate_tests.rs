@@ -15,6 +15,19 @@ struct Annotation {
     expected: Expected,
     run_args: Vec<String>,
     compile_args: Vec<String>,
+    requires_arch: Option<String>,
+}
+
+/// Map an `ARCH_*` name — the same spelling [`TargetSpec::arch_define`] seeds
+/// for `$ifdef` — to the `cfg(target_arch = ..)` value naming the same
+/// machine. `None` for an unrecognised name, which is treated as "no gate"
+/// rather than silently disabling the test.
+fn cfg_target_arch_for(arch_define: &str) -> Option<&'static str> {
+    match arch_define {
+        "ARCH_X86_64" => Some("x86_64"),
+        "ARCH_AARCH64" => Some("aarch64"),
+        _ => None,
+    }
 }
 
 // ── Annotation parsing ────────────────────────────────────────────────────────
@@ -38,18 +51,27 @@ fn parse_string_list(s: &str) -> Vec<String> {
     result
 }
 
-/// Scan the first 10 lines of `path` for `# expected:`, `# run_args:`, and
-/// `# compile_args:` annotations. Returns `None` if no `# expected:`
-/// annotation is found (file is skipped).
+/// Scan the first 10 lines of `path` for `# expected:`, `# run_args:`,
+/// `# compile_args:`, and `# requires_arch:` annotations. Returns `None` if
+/// no `# expected:` annotation is found (file is skipped).
 ///
 /// `# compile_args:` holds extra compiler flags for the invocation, as a
 /// quoted-string list mirroring the CLI word-for-word — e.g.
 /// `# compile_args: "-D", "DEBUG=1", "-I", "lib"`.
+///
+/// `# requires_arch: ARCH_X86_64` (bare, unquoted) compiles the generated
+/// test only on that host architecture. A program that *runs* can gate itself
+/// with `$ifdef ARCH_X86_64` and compute the same answer in the `$else`
+/// branch, but a program asserting a *compile error* cannot: gating it away
+/// leaves a program that compiles clean, so the test would fail by expecting
+/// an error that no longer exists. Such a test has to be gated from outside,
+/// which is what this does.
 fn parse_annotation(path: &Path) -> Option<Annotation> {
     let source = fs::read_to_string(path).ok()?;
     let mut expected: Option<Expected> = None;
     let mut run_args: Vec<String> = Vec::new();
     let mut compile_args: Vec<String> = Vec::new();
+    let mut requires_arch: Option<String> = None;
 
     for line in source.lines().take(10) {
         let trimmed = line.trim();
@@ -67,6 +89,8 @@ fn parse_annotation(path: &Path) -> Option<Annotation> {
             run_args = parse_string_list(rest.trim());
         } else if let Some(rest) = trimmed.strip_prefix("# compile_args:") {
             compile_args = parse_string_list(rest.trim());
+        } else if let Some(rest) = trimmed.strip_prefix("# requires_arch:") {
+            requires_arch = Some(rest.trim().to_string());
         }
     }
 
@@ -74,6 +98,7 @@ fn parse_annotation(path: &Path) -> Option<Annotation> {
         expected: e,
         run_args,
         compile_args,
+        requires_arch,
     })
 }
 
@@ -164,8 +189,21 @@ pub fn generate_tests_impl(_input: TokenStream) -> TokenStream {
             let test_ident = make_test_ident(relative_to_base, prefix);
 
             let compile_args: Vec<&str> = ann.compile_args.iter().map(String::as_str).collect();
+
+            // `# requires_arch:` gates the whole test on the host arch. An
+            // unrecognised name leaves the test ungated rather than silently
+            // compiling it out — a typo should not make a test disappear.
+            let arch_gate: TokenStream2 = ann
+                .requires_arch
+                .as_deref()
+                .and_then(cfg_target_arch_for)
+                .map_or_else(TokenStream2::new, |arch| {
+                    quote! { #[cfg(target_arch = #arch)] }
+                });
+
             let test_fn: TokenStream2 = match ann.expected {
             Expected::ExitCode(code) if ann.run_args.is_empty() && compile_args.is_empty() => quote! {
+                #arch_gate
                 #[test]
                 fn #test_ident() {
                     let result = compile_and_run(#path_str)
@@ -176,6 +214,7 @@ pub fn generate_tests_impl(_input: TokenStream) -> TokenStream {
             Expected::ExitCode(code) => {
                 let args: Vec<&str> = ann.run_args.iter().map(String::as_str).collect();
                 quote! {
+                    #arch_gate
                     #[test]
                     fn #test_ident() {
                         let result = compile_and_run_with_args(
@@ -188,6 +227,7 @@ pub fn generate_tests_impl(_input: TokenStream) -> TokenStream {
                 }
             }
             Expected::ErrorFragments(frags) => quote! {
+                #arch_gate
                 #[test]
                 fn #test_ident() {
                     assert_compile_error_contains(

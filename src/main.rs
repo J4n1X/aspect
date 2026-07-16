@@ -5,7 +5,7 @@ use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use aspect::codegen::CodeGenerator;
 use aspect::preprocessor::{PreprocessedSource, Preprocessor};
-use aspect::parser::{Parser, Program};
+use aspect::parser::{FunctionBody, Parser, Program};
 use aspect::target::TargetSpec;
 use aspect::typechecker::TypeChecker;
 
@@ -204,7 +204,7 @@ fn parse_program_from(path: &Path, preproc: &PreprocArgs) -> Result<Program> {
 fn build_program(path: &Path, preproc: &PreprocArgs) -> Result<Program> {
     let mut program = parse_program_from(path, preproc)?;
 
-    let mut typechecker = TypeChecker::new();
+    let mut typechecker = TypeChecker::new().with_target(preproc.target_spec());
     typechecker.check_program(&mut program).map_err(|errors| {
         let mut err_msg = String::new();
         for error in &errors {
@@ -311,14 +311,21 @@ fn parse_file(path: &Path, preproc: &PreprocArgs) -> Result<()> {
         }
         println!(") -> {}", func.proto.return_type);
 
-        if func.proto.is_extern {
-            println!("    [extern]");
-        } else {
-            println!("    body: {} statements", func.body.len());
-            if !func.body.is_empty() {
-                println!("    statements:");
-                for (i, stmt) in func.body.iter().enumerate() {
-                    println!("      [{i}]: {stmt:#?}");
+        match &func.body {
+            FunctionBody::Extern => println!("    [extern]"),
+            FunctionBody::Asm(asm) => {
+                println!("    [asm]");
+                for line in &asm.lines {
+                    println!("      {line}");
+                }
+            }
+            FunctionBody::Aspect(stmts) => {
+                println!("    body: {} statements", stmts.len());
+                if !stmts.is_empty() {
+                    println!("    statements:");
+                    for (i, stmt) in stmts.iter().enumerate() {
+                        println!("      [{i}]: {stmt:#?}");
+                    }
                 }
             }
         }

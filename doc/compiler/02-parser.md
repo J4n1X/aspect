@@ -45,8 +45,13 @@ Parser::new(tokens).parse_program() -> Result<Program, ParserError>
 ```
 
 `parse_program()` loops until EOF, parsing top-level items:
-- Functions (`fn` keyword or `extern fn` keyword)
+- Functions (`fn`, `extern fn`, or `asm fn`)
 - Global variables (type token followed by identifier)
+
+Each iteration first calls `parse_kind_modifier()`, which consumes the leading
+`extern`/`asm` and reports naming two of them as one error regardless of
+order. Keeping that scan separate from the dispatch is what stops the
+diagnostic depending on which keyword happened to come first.
 
 ## Expression Parsing (Precedence Climbing)
 

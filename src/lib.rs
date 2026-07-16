@@ -3,6 +3,7 @@
 //! A compiler for the Aspect programming language, a C-like language with
 //! specific syntax rules and constraints.
 
+pub mod asm;
 pub mod codegen;
 pub mod lexer;
 pub mod parser;

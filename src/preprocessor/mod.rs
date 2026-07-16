@@ -254,10 +254,23 @@ impl Preprocessor {
     pub fn preprocess(&mut self, entry: &Path) -> Result<PreprocessedSource, PreprocessError> {
         self.process_file(entry)?;
         // Per-file Eofs are dropped during the walk; cap with a single one.
-        // The closing EOF has no real source location — fileless
-        // `Position::new`.
+        //
+        // The closing EOF inherits the last real token's position rather than
+        // inventing one. It is what the parser reports when input runs out
+        // mid-construct ("Expected '}' but found 'EOF'"), and a synthetic
+        // `Position::new(0, 0)` made every such diagnostic point at line 0,
+        // column 0 of no file — a location that cannot exist and that no
+        // editor can navigate to. The last token is the closest real source
+        // location to where the input actually ended, so an unterminated block
+        // now points at its final token. Only a completely empty translation
+        // unit has no last token; it falls back to the start of the entry file.
+        // (`process_file` registers the entry file first, so it is id 0.)
+        let eof_pos = self
+            .tokens
+            .last()
+            .map_or_else(|| Position::with_file(1, 1, 0), |t| t.pos);
         self.tokens
-            .push(Token::new(TokenKind::Eof, Position::new(0, 0), String::new()));
+            .push(Token::new(TokenKind::Eof, eof_pos, String::new()));
         Ok(self.build_output())
     }
 

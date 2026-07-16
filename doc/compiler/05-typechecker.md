@@ -66,6 +66,24 @@ Walks each function body in a single pass:
   one of the two modes described below (`synth_expression` or `check_expression`)
 - Errors are pushed into a `Vec<TypeCheckError>` and all returned at the end
 
+An exhaustive match on `FunctionBody` picks what a function even gets: an
+`Extern` body has nothing to walk, and an `Asm` body has no statements —
+it has a register contract, checked by `check_asm_function` instead.
+
+### `asm fn` register validation (`check_asm_function`)
+
+Validated here rather than in the parser because it depends on the
+**compilation target**, which the parser doesn't know. The register model
+lives in `src/asm.rs` — pure data, no LLVM, so it works for a target this
+binary has no backend for (`rax` under `--target aarch64-*` must be a clean
+error, not a silent accept).
+
+Every collision check compares the register *family*, never the spelling:
+`rax` and `eax` are one physical register, and LLVM diagnoses nothing if two
+operands name it — it silently drops one. Rejected: unknown registers,
+`rsp`/`rbp`, two operands in one family, a clobber that is also an operand,
+and an operand register too narrow for its declared type.
+
 ## Bidirectional Checking
 
 Every expression is visited in exactly one of two modes:

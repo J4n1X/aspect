@@ -1,0 +1,16 @@
+# expected: "already pinned to parameter 'a'"
+# requires_arch: ARCH_X86_64
+#-
+  The aliasing case: `rax` and `eax` are one physical register under two
+  spellings. A spelling-only duplicate check would pass this and let LLVM
+  silently drop an operand, so collisions are compared by register family.
+-#
+
+asm fn f(i64 a: rax, i32 b: eax) -> i64: rdx
+{
+    "nop"
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return f(1, 2) as i32
+}

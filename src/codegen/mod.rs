@@ -1,3 +1,4 @@
+pub mod asm;
 pub mod errors;
 pub mod expressions;
 pub mod functions;

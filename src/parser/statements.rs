@@ -78,8 +78,22 @@ impl Parser {
                 if self.check(&TokenKind::CloseBrace) || self.is_at_end() {
                     break;
                 }
+                // Forward progress is this loop's own responsibility, not
+                // `synchronize`'s. `synchronize` deliberately stops *before* a
+                // statement-starting keyword so the next iteration can parse
+                // it — but when that keyword is what failed (a declaration-only
+                // form such as `fn`/`asm fn` written in statement position, which
+                // no statement rule accepts), the cursor has not moved and the
+                // same token would fail identically forever, pushing one error
+                // per iteration until the process OOMs. Consuming the stuck
+                // token bounds the loop at one error per token. Not fixable in
+                // `synchronize`: keeping those keywords in its stop-list is what
+                // makes recovery land on the *next* statement in the common case.
+                let before = self.current;
                 if let Some(s) = sync!(parse_statement) {
                     stmts.push(s);
+                } else if self.current == before {
+                    self.advance();
                 }
             }
             stmts

@@ -134,6 +134,95 @@ pub enum TypeCheckError {
 
     #[error("Cannot dereference 'u0*' — cast it to a sized pointer type first at {0}")]
     OpaqueDereference(Position),
+
+    /// An `asm fn` declared for a target whose register model we do not
+    /// have. Caught here rather than in codegen: this binary is built with
+    /// only the x86 backend, so a non-x86 triple never reaches codegen at all.
+    #[error("asm fn '{name}' is not supported for target '{triple}' at {position}")]
+    AsmUnsupportedTarget {
+        name: String,
+        triple: String,
+        position: Position,
+    },
+
+    /// A register name that is not in the target's register table.
+    #[error("Unknown register '{register}' for target '{arch}' at {position}")]
+    AsmUnknownRegister {
+        register: String,
+        arch: String,
+        position: Position,
+    },
+
+    /// Two parameters pinned to the same physical register. Compared by
+    /// register *family*, so `rax` and `eax` collide: they are one register,
+    /// and LLVM would silently drop one of the two operands.
+    #[error("Register '{register}' is already pinned to parameter '{param}' at {position}")]
+    AsmDuplicateRegister {
+        register: String,
+        param: String,
+        position: Position,
+    },
+
+    /// A clobbered register that is also pinned to an operand. Compared by
+    /// family; an operand's register cannot simultaneously be destroyed.
+    #[error("Clobbered register '{register}' is also pinned to an operand at {position}")]
+    AsmClobberIsOperand { register: String, position: Position },
+
+    /// The same physical register clobbered twice.
+    #[error("Register '{register}' is already clobbered at {position}")]
+    AsmDuplicateClobber { register: String, position: Position },
+
+    /// The stack- or frame-pointer family, which the calling convention and
+    /// frame lowering depend on continuously.
+    #[error(
+        "Register '{register}' is reserved (stack/frame pointer) and cannot be pinned or clobbered at {position}"
+    )]
+    AsmReservedRegister { register: String, position: Position },
+
+    /// An operand whose type cannot live in a general-purpose register.
+    /// `found` arrives pre-rendered so a type-struct names itself rather than
+    /// printing as the interned `struct#<id>` that `LangType`'s `Display`
+    /// is limited to.
+    #[error("Type '{found}' cannot be pinned to a register at {position}")]
+    AsmUnpinnableType { found: String, position: Position },
+
+    /// An operand pinned to a register from the wrong bank — an `f64` in a
+    /// general-purpose register, or an integer in an SSE one. LLVM cannot
+    /// lower either and does not diagnose it, so the frontend must.
+    #[error(
+        "Type '{found}' needs {expected}, but '{register}' is {actual} at {position}"
+    )]
+    AsmRegisterClassMismatch {
+        found: String,
+        register: String,
+        expected: &'static str,
+        actual: &'static str,
+        position: Position,
+    },
+
+    /// An operand pinned to a register spelling too narrow to hold it.
+    ///
+    /// LLVM sizes the physical register from the operand's LLVM type, not from
+    /// the spelling, so it does not diagnose this: it silently widens `al` to
+    /// the full `rax` and the written spelling becomes a no-op. An author who
+    /// writes `i64 v: al` believing only the low byte is live is wrong about
+    /// which bits the block touches, so the mismatch is rejected rather than
+    /// silently reinterpreted.
+    ///
+    /// The converse — a *narrower* type in a wider spelling, `i32 x: rax` —
+    /// stays legal: that is the orthogonality rule working as intended, with
+    /// LLVM selecting `%eax` from the operand's type.
+    #[error(
+        "Type '{found}' is {type_bits} bits and does not fit in register \
+         '{register}', which is {reg_bits} bits, at {position}"
+    )]
+    AsmRegisterTooNarrow {
+        found: String,
+        type_bits: u32,
+        register: String,
+        reg_bits: u32,
+        position: Position,
+    },
 }
 
 impl TypeCheckError {
@@ -155,7 +244,16 @@ impl TypeCheckError {
             | Self::UnknownField { position, .. }
             | Self::MissingStructFields { position, .. }
             | Self::InaccessibleField { position, .. }
-            | Self::InaccessibleMethod { position, .. } => Some(*position),
+            | Self::InaccessibleMethod { position, .. }
+            | Self::AsmUnsupportedTarget { position, .. }
+            | Self::AsmUnknownRegister { position, .. }
+            | Self::AsmDuplicateRegister { position, .. }
+            | Self::AsmClobberIsOperand { position, .. }
+            | Self::AsmDuplicateClobber { position, .. }
+            | Self::AsmReservedRegister { position, .. }
+            | Self::AsmUnpinnableType { position, .. }
+            | Self::AsmRegisterClassMismatch { position, .. }
+            | Self::AsmRegisterTooNarrow { position, .. } => Some(*position),
             Self::UndefinedVariable(_, pos)
             | Self::UndefinedFunction(_, pos)
             | Self::InvalidDereference(_, pos)

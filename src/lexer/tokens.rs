@@ -6,6 +6,7 @@ use std::fmt;
 pub enum Keyword {
     Fn,
     Extern,
+    Asm,
     Const,
     Type,
     Struct,
@@ -32,6 +33,7 @@ impl fmt::Display for Keyword {
         let s = match self {
             Keyword::Fn => "fn",
             Keyword::Extern => "extern",
+            Keyword::Asm => "asm",
             Keyword::Const => "const",
             Keyword::Type => "type",
             Keyword::Struct => "struct",
@@ -62,6 +64,7 @@ impl Keyword {
         match s {
             "fn" => Some(Keyword::Fn),
             "extern" => Some(Keyword::Extern),
+            "asm" => Some(Keyword::Asm),
             "const" => Some(Keyword::Const),
             "type" => Some(Keyword::Type),
             "struct" => Some(Keyword::Struct),
@@ -269,13 +272,16 @@ impl LangType {
             && !self.is_array()
     }
 
+    /// True for a plain (non-pointer, non-array) float value (`fN`).
+    #[must_use]
+    pub fn is_plain_float(&self) -> bool {
+        self.base == TypeBase::SFloat && self.pointer_depth == 0 && !self.is_array()
+    }
+
     /// True for a plain (non-pointer, non-array) numeric value: integer or float.
     #[must_use]
     pub fn is_plain_numeric(&self) -> bool {
-        self.is_plain_int()
-            || (matches!(self.base, TypeBase::SFloat)
-                && self.pointer_depth == 0
-                && !self.is_array())
+        self.is_plain_int() || self.is_plain_float()
     }
 
     /// True when the value is pointer-shaped for arithmetic/comparison

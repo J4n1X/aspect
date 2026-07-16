@@ -1,0 +1,20 @@
+# expected: "Unknown register 'rex'"
+# requires_arch: ARCH_X86_64
+#-
+  A register name that is not in the target's register table.
+
+  Gated with `# requires_arch:`, not `$ifdef`: an `$ifdef`-gated failure test
+  would preprocess to an empty program, compile cleanly, and fail the
+  "expected compilation to fail" assertion. `# requires_arch:` instead drops
+  the generated test on a non-x86 host, where the checker rejects this asm fn
+  for the unrelated reason that it cannot model the target's registers at all.
+-#
+
+asm fn f(i64 a: rex) -> i64: rax
+{
+    "nop"
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return f(1) as i32
+}

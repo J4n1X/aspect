@@ -1,0 +1,18 @@
+# expected: 7
+#-
+  Register names are contextual: meaningful only after a `:` in an asm fn
+  signature or inside clobbers(...). They must never become keywords or
+  reserved identifiers, so they stay usable as ordinary variable names.
+  `memory` is covered too — it is a clobber name, not a keyword.
+
+  Deliberately ungated: no asm is involved, so this must hold on every
+  target.
+-#
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    i32 rax = 3
+    i32 rsi = 4
+    i32 memory = 0
+    i32 clobbers = 0
+    return rax + rsi + memory + clobbers
+}

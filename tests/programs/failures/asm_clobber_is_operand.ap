@@ -1,0 +1,16 @@
+# expected: "'rdi' is also pinned to an operand"
+# requires_arch: ARCH_X86_64
+#-
+  A register cannot be both an operand's pinned location and declared
+  destroyed.
+-#
+
+asm fn f(i64 a: rdi) -> i64: rax
+    clobbers(rdi)
+{
+    "nop"
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return f(1) as i32
+}

@@ -26,6 +26,7 @@ Formal grammar and lexical specification for the Aspect language.
 5. [Operator precedence](#operator-precedence)
 6. [Scoping rules](#scoping-rules)
 7. [Notable constraints](#notable-constraints)
+   - [`asm fn`](#asm-fn)
 
 ---
 
@@ -95,11 +96,15 @@ digit      ::= [0-9]
 Reserved keywords (not usable as identifiers):
 
 ```
-fn  extern  const  type  struct  alias  public  sizeof
+fn  extern  asm  const  type  struct  alias  public  sizeof
 while  if  else  elif  for  switch
 break  continue  as  return
 true  false
 ```
+
+Register names (`rax`, `rdi`, …) are **not** keywords. They are ordinary
+identifiers that only carry meaning after a `:` in an `asm fn` signature or
+inside `clobbers(...)`, so `i64 rax = 1` compiles anywhere.
 
 ### Types as tokens
 
@@ -359,12 +364,22 @@ they get their own chapter: [10-modules.md](10-modules.md).
 program ::= (newline* top-decl newline*)*
 
 top-decl ::= extern-fn-decl
+           | asm-fn-decl
            | fn-decl
            | global-var-decl
            | alias-decl
            | struct-decl
 
 extern-fn-decl ::= 'extern' 'fn' ident '(' param-list ')' return-ann term
+
+asm-fn-decl ::= 'asm' 'fn' ident '(' asm-param-list ')' asm-return-ann?
+                newline* asm-clobbers? newline* asm-block
+asm-param-list ::= /* empty */ | asm-param (',' asm-param)*
+asm-param      ::= type ident ':' register        # every operand is pinned
+asm-return-ann ::= '->' type (':' register)?      # register omitted only for `u0`
+asm-clobbers   ::= 'clobbers' '(' (register (',' register)*)? ')'
+asm-block      ::= '{' (newline | string)* '}'    # one or more; a line each
+register       ::= ident      # contextual — `rax` stays usable as a variable
 
 fn-decl ::= 'fn' ident '(' param-list ')' return-ann? newline* block
 
@@ -696,6 +711,45 @@ fn main(u32 argc, u8 **argv) -> i32 {
 ---
 
 ## Notable constraints
+
+### `asm fn`
+
+An `asm fn` is a function whose body is an instruction sequence rather than
+Aspect statements — the sibling of `extern fn`, whose body lives in another
+object file. Call sites are ordinary calls:
+
+```
+asm fn syscall3(i64 nr: rax, i64 a1: rdi, u8* a2: rsi, u64 a3: rdx) -> i64: rax
+    clobbers(rcx, r11, memory)
+{
+    "syscall"
+}
+
+fn sys_write(i32 fd, u8* buf, u64 len) -> i64 {
+    return syscall3(1, fd, buf, len)
+}
+```
+
+- **Types and registers are orthogonal.** The declared type drives conversions
+  (an `i32` argument widening into an `i64` parameter sign-extends as usual);
+  the register only pins location. `u8* buf: rsi` stays a pointer.
+- **Every operand is pinned.** An unpinned parameter is an error; the compiler
+  never allocates a register for you.
+- **Register names are contextual**, meaningful only after `:` or inside
+  `clobbers(...)`. They are not keywords — `i64 rax = 1` still compiles.
+- **Registers are validated against `--target`.** `rax` under
+  `--target aarch64-*` is a compile error, not a silent accept. `rsp`/`rbp`
+  are rejected, as are two operands naming one physical register under
+  different spellings (`rax` and `eax`).
+- **`memory`** is legal only in `clobbers(...)`. Name it whenever the
+  instructions read or write through a pointer, or LLVM may cache a load
+  across the block.
+- **A `-> u0` asm fn** has no return register.
+- `extern` and `asm` cannot be combined, in either order.
+
+The compiler always sets `sideeffect` and always appends
+`~{dirflag},~{fpsr},~{flags}`; neither is opt-out. See
+[06-codegen](06-codegen.md).
 
 ### Newlines as terminators
 

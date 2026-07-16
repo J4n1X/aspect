@@ -3,10 +3,12 @@ use super::types::{cast_valid, literal_float_compatible, literal_int_fits, types
 use crate::lexer::{LangType, TypeBase};
 use crate::scope::ScopeStack;
 use crate::parser::{
-    BinaryOp, ExprKind, Expression, Function, GlobalVar, LiteralValue, Program, Statement,
+    AsmSpec, BinaryOp, ExprKind, Expression, Function, FunctionBody, FunctionProto, GlobalVar,
+    LiteralValue, Program, Statement,
     StatementKind,
 };
 use crate::symbol::module::{ModuleSymbols, Visibility};
+use crate::target::TargetSpec;
 use std::collections::HashMap;
 
 /// Single-pass type checker for the Aspect language.
@@ -42,6 +44,11 @@ pub struct TypeChecker {
     /// `Some(t)` once the type is known (checked position, or the first
     /// `return` in synthesis position); `None` while still undetermined.
     value_block_types: Vec<Option<LangType>>,
+    /// The target being compiled for. Only `asm fn` consults it: register
+    /// names are validated against this target's register model, so `rax`
+    /// under an `aarch64-*` target is a clean error. Defaults to the host;
+    /// override with [`TypeChecker::with_target`].
+    target: TargetSpec,
     errors: Vec<TypeCheckError>,
 }
 
@@ -55,8 +62,18 @@ impl TypeChecker {
             current_function: None,
             source_files: Vec::new(),
             value_block_types: Vec::new(),
+            target: TargetSpec::host(),
             errors: Vec::new(),
         }
+    }
+
+    /// Check against `target` rather than the host. Mirrors
+    /// `Preprocessor::for_target`: the two must agree, or an `$ifdef
+    /// ARCH_X86_64` guard would admit code the checker then rejects.
+    #[must_use]
+    pub fn with_target(mut self, target: TargetSpec) -> Self {
+        self.target = target;
+        self
     }
 
     /// Set a single-entry source-file registry. Convenience for the simple
@@ -107,10 +124,14 @@ impl TypeChecker {
             self.check_global_var(global);
         }
 
-        for func in &mut program.functions {
-            self.check_proto(&func.proto);
-            if !func.proto.is_extern {
-                self.check_function(func);
+        for Function { proto, body } in &mut program.functions {
+            self.check_proto(proto);
+            match body {
+                // An asm fn has no statements to walk; it has a register
+                // contract to validate instead.
+                FunctionBody::Asm(asm) => self.check_asm_function(proto, asm),
+                FunctionBody::Aspect(stmts) => self.check_function(proto, stmts),
+                FunctionBody::Extern => {}
             }
         }
 
@@ -185,15 +206,233 @@ impl TypeChecker {
         }
     }
 
-    fn check_function(&mut self, func: &mut Function) {
-        self.current_function = Some(func.proto.name.clone());
+    /// Validate an `asm fn`'s register contract against the compilation
+    /// target.
+    ///
+    /// Every collision check compares the canonical register *family*, never
+    /// the spelling: `rax` and `eax` are one physical register, and LLVM
+    /// diagnoses nothing if two operands name it — it silently drops one.
+    /// Comparing spellings would let that through.
+    ///
+    /// The duplicate rule deliberately applies **only among parameters**. An
+    /// output sharing a register with an input (`-> i64: rax` alongside
+    /// `i64 nr: rax`) is the ordinary in-out syscall form and must be
+    /// accepted.
+    fn check_asm_function(&mut self, proto: &crate::parser::FunctionProto, asm: &AsmSpec) {
+        // An arch whose register model we don't have cannot be validated at
+        // all, so there is no point resolving x86 names against it.
+        let Some(arch) = self.target.arch_define().filter(|a| *a == "ARCH_X86_64") else {
+            self.errors.push(TypeCheckError::AsmUnsupportedTarget {
+                name: proto.name.clone(),
+                triple: self.target.triple().to_string(),
+                position: asm.pos,
+            });
+            return;
+        };
+
+        // Operand types: only values that can actually live in a register.
+        for (param_type, _) in &proto.params {
+            self.check_pinnable_type(*param_type, proto.pos);
+        }
+        if !proto.return_type.is_void_value() {
+            self.check_pinnable_type(proto.return_type, proto.pos);
+        }
+
+        // Parameters: resolve each name, then check it against the families
+        // already taken by an earlier parameter.
+        let mut param_families: Vec<(&'static str, String)> = Vec::new();
+        for (reg, (param_type, param_name)) in asm.param_regs.iter().zip(&proto.params) {
+            let Some(info) = self.resolve_asm_reg(arch, reg) else {
+                continue;
+            };
+            self.check_register_class(*param_type, &info, reg);
+            self.check_register_fits(arch, *param_type, &info, reg);
+            if let Some((_, owner)) = param_families.iter().find(|(f, _)| *f == info.family) {
+                self.errors.push(TypeCheckError::AsmDuplicateRegister {
+                    register: reg.name.clone(),
+                    param: owner.clone(),
+                    position: reg.pos,
+                });
+                continue;
+            }
+            param_families.push((info.family, param_name.clone()));
+        }
+
+        // Return register: resolvable and unreserved, but explicitly *not*
+        // checked against the parameters — see the in-out note above.
+        let return_family = asm.return_reg.as_ref().and_then(|reg| {
+            let info = self.resolve_asm_reg(arch, reg)?;
+            if !proto.return_type.is_void_value() {
+                self.check_register_class(proto.return_type, &info, reg);
+                self.check_register_fits(arch, proto.return_type, &info, reg);
+            }
+            Some(info.family)
+        });
+
+        // Clobbers: `memory` is a pseudo-register that names no hardware, so
+        // it skips register resolution and every family-based check — but a
+        // repeat of it is the same user mistake the duplicate rule exists to
+        // catch, so it is reported through the same diagnostic.
+        let mut clobber_families: Vec<&'static str> = Vec::new();
+        let mut saw_memory = false;
+        for clobber in &asm.clobbers {
+            if clobber.name == crate::asm::MEMORY_CLOBBER {
+                if saw_memory {
+                    self.errors.push(TypeCheckError::AsmDuplicateClobber {
+                        register: clobber.name.clone(),
+                        position: clobber.pos,
+                    });
+                }
+                saw_memory = true;
+                continue;
+            }
+            let Some(info) = self.resolve_asm_reg(arch, clobber) else {
+                continue;
+            };
+            if param_families.iter().any(|(f, _)| *f == info.family)
+                || return_family == Some(info.family)
+            {
+                self.errors.push(TypeCheckError::AsmClobberIsOperand {
+                    register: clobber.name.clone(),
+                    position: clobber.pos,
+                });
+                continue;
+            }
+            if clobber_families.contains(&info.family) {
+                self.errors.push(TypeCheckError::AsmDuplicateClobber {
+                    register: clobber.name.clone(),
+                    position: clobber.pos,
+                });
+                continue;
+            }
+            clobber_families.push(info.family);
+        }
+    }
+
+    /// Resolve one register name against `arch`'s table, reporting an unknown
+    /// or reserved name. `None` means an error was reported and the caller
+    /// should skip its family-based checks for this register.
+    fn resolve_asm_reg(
+        &mut self,
+        arch: &str,
+        reg: &crate::parser::AsmReg,
+    ) -> Option<crate::asm::RegInfo> {
+        let Some(info) = crate::asm::lookup_register(arch, &reg.name) else {
+            self.errors.push(TypeCheckError::AsmUnknownRegister {
+                register: reg.name.clone(),
+                arch: arch.to_string(),
+                position: reg.pos,
+            });
+            return None;
+        };
+        // Reserved takes precedence over every collision rule: naming rsp at
+        // all is the error, regardless of what else names it.
+        if crate::asm::is_reserved_family(info.family) {
+            self.errors.push(TypeCheckError::AsmReservedRegister {
+                register: reg.name.clone(),
+                position: reg.pos,
+            });
+            return None;
+        }
+        Some(info)
+    }
+
+    /// Reject an operand pinned to a register spelling too narrow to hold it.
+    ///
+    /// This is the one place [`crate::asm::RegInfo::width_bits`] is consulted,
+    /// and it deliberately checks in one direction only. A *narrower* type in
+    /// a wider spelling (`i32 x: rax`) is the orthogonality rule working:
+    /// LLVM sizes the physical register from the operand's LLVM type and
+    /// selects `%eax`. A *wider* type in a narrower spelling (`i64 v: al`) is
+    /// the same mechanism silently discarding what the user wrote — LLVM hands
+    /// back the full `rax`, so `al` means `rax` and the author's belief that
+    /// only the low byte is live is wrong. LLVM diagnoses nothing either way.
+    ///
+    /// This does not infer a type from a register: the declared type still
+    /// drives every conversion. It only rejects a pairing that cannot mean
+    /// what it says.
+    fn check_register_fits(
+        &mut self,
+        arch: &str,
+        ty: LangType,
+        info: &crate::asm::RegInfo,
+        reg: &crate::parser::AsmReg,
+    ) {
+        // A pointer occupies the target's full pointer width regardless of its
+        // pointee (`u8*` is 64-bit on x86-64, though its `size_bits` is 8).
+        // `check_pinnable_type` has already rejected anything that is neither
+        // pointer-like nor an 8/16/32/64-bit integer.
+        let type_bits = if ty.is_pointer_like() {
+            crate::asm::pointer_width_bits(arch)
+        } else {
+            ty.size_bits
+        };
+
+        if type_bits > info.width_bits {
+            self.errors.push(TypeCheckError::AsmRegisterTooNarrow {
+                found: self.type_name(&ty),
+                type_bits,
+                register: reg.name.clone(),
+                reg_bits: info.width_bits,
+                position: reg.pos,
+            });
+        }
+    }
+
+    /// Reject operand types that cannot be pinned to any register: integers of
+    /// 8/16/32/64 bits, floats of 32/64, and pointer-like values qualify.
+    /// Other widths are a real `X86ISelLowering` error, and a struct-by-value
+    /// operand would take the `byval` path, which is meaningless under
+    /// register pinning. (`u0` parameters are already rejected by
+    /// `check_proto`.) Which *bank* the type belongs in is
+    /// [`Self::check_register_class`]'s job.
+    fn check_pinnable_type(&mut self, ty: LangType, pos: crate::lexer::Position) {
+        let pinnable = ty.is_pointer_like()
+            || (ty.is_plain_int() && matches!(ty.size_bits, 8 | 16 | 32 | 64))
+            || (ty.is_plain_float() && matches!(ty.size_bits, 32 | 64));
+        if !pinnable {
+            self.errors.push(TypeCheckError::AsmUnpinnableType {
+                found: self.type_name(&ty),
+                position: pos,
+            });
+        }
+    }
+
+    /// Reject an operand pinned to the wrong register bank. Floats live in
+    /// SSE registers, integers and pointers in general-purpose ones; LLVM
+    /// cannot lower the crossed pairings and does not diagnose them.
+    fn check_register_class(
+        &mut self,
+        ty: LangType,
+        info: &crate::asm::RegInfo,
+        reg: &crate::parser::AsmReg,
+    ) {
+        let expected = if ty.is_plain_float() {
+            crate::asm::RegClass::Sse
+        } else {
+            crate::asm::RegClass::Gpr
+        };
+        if info.class != expected {
+            self.errors
+                .push(TypeCheckError::AsmRegisterClassMismatch {
+                    found: self.type_name(&ty),
+                    register: reg.name.clone(),
+                    expected: expected.describe(),
+                    actual: info.class.describe(),
+                    position: reg.pos,
+                });
+        }
+    }
+
+    fn check_function(&mut self, proto: &FunctionProto, stmts: &mut [Statement]) {
+        self.current_function = Some(proto.name.clone());
         self.enter_scope();
 
-        for (param_type, param_name) in &func.proto.params {
+        for (param_type, param_name) in &proto.params {
             self.define_var(param_name.clone(), *param_type);
         }
 
-        for stmt in &mut func.body {
+        for stmt in stmts {
             self.check_statement(stmt);
         }
 
@@ -1107,6 +1346,274 @@ mod tests {
         (program, result)
     }
 
+    /// Lex, parse, and type-check `src` against an explicit `--target`,
+    /// mirroring what the driver does for `aspc --target <triple>`.
+    ///
+    /// The integration harness cannot reach these rules — it always compiles
+    /// for the host, and its `# compile_args:` supports `-D`/`-I` only — so
+    /// the target-arch rules are covered here instead.
+    ///
+    /// Note that a non-x86 target is *not* merely hypothetical for a binary
+    /// built with only the x86 backend: `i686-*` is an x86 triple that LLVM
+    /// accepts and happily emits a 32-bit module for, while having no `rax`.
+    /// Nothing downstream would catch that, which is precisely why the check
+    /// belongs to the type checker.
+    fn check_for_target(src: &str, triple: &str) -> Result<(), Vec<TypeCheckError>> {
+        let tokens = tokenize(src.to_string()).expect("tokenization should succeed");
+        let mut parser = Parser::new(tokens);
+        let mut program = parser.parse_program().expect("parsing should succeed");
+        let mut checker = TypeChecker::new().with_target(TargetSpec::parse(triple));
+        checker.check_program(&mut program)
+    }
+
+    const SYSCALL_ASM_FN: &str = r#"
+asm fn add2(i64 a: rax, i64 b: rbx) -> i64: rax
+{
+    "add rax, rbx"
+}
+"#;
+
+    #[test]
+    fn asm_fn_is_rejected_for_a_non_x86_target() {
+        let errors = check_for_target(SYSCALL_ASM_FN, "aarch64-unknown-linux-gnu")
+            .expect_err("an asm fn must not compile for aarch64");
+        assert!(
+            matches!(
+                errors.as_slice(),
+                [TypeCheckError::AsmUnsupportedTarget { name, triple, .. }]
+                    if name == "add2" && triple == "aarch64-unknown-linux-gnu"
+            ),
+            "expected a single AsmUnsupportedTarget error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn asm_fn_is_accepted_for_an_x86_64_target() {
+        assert!(check_for_target(SYSCALL_ASM_FN, "x86_64-unknown-linux-gnu").is_ok());
+    }
+
+    #[test]
+    fn asm_fn_is_rejected_for_a_32_bit_x86_target() {
+        // i686 is the case that fails *open* if the target never reaches the
+        // checker: LLVM has the backend, accepts the triple, and emits a
+        // 32-bit module in which `{rax}` does not exist — surfacing only as a
+        // raw, positionless backend error. `arch_define()` returns None for
+        // i686, so the checker must reject it like any other non-x86-64 arch.
+        let errors = check_for_target(SYSCALL_ASM_FN, "i686-unknown-linux-gnu")
+            .expect_err("an asm fn naming rax must not compile for 32-bit x86");
+        assert!(
+            matches!(
+                errors.as_slice(),
+                [TypeCheckError::AsmUnsupportedTarget { triple, .. }]
+                    if triple == "i686-unknown-linux-gnu"
+            ),
+            "expected a single AsmUnsupportedTarget error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn an_operand_wider_than_its_register_is_rejected() {
+        // LLVM would silently widen `al` to the full `rax`, making the written
+        // spelling a no-op.
+        let (_, result) = check(
+            r#"
+asm fn lo(i64 v: al) -> i64: rax
+{
+    "mov rax, 0"
+}
+"#,
+        );
+        let errors = result.expect_err("an i64 must not fit in al");
+        assert!(
+            matches!(
+                errors.as_slice(),
+                [TypeCheckError::AsmRegisterTooNarrow { register, type_bits: 64, reg_bits: 8, .. }]
+                    if register == "al"
+            ),
+            "expected a single AsmRegisterTooNarrow error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_pointer_operand_wider_than_its_register_is_rejected() {
+        // A pointer is 64-bit whatever it points at: `u8*` reports
+        // `size_bits == 8` for its *pointee*, which must not be mistaken for
+        // the operand's width.
+        let (_, result) = check(
+            r#"
+asm fn p(u8* buf: sil) -> i64: rax
+{
+    "mov rax, 0"
+}
+"#,
+        );
+        let errors = result.expect_err("a pointer must not fit in sil");
+        assert!(
+            matches!(
+                errors.as_slice(),
+                [TypeCheckError::AsmRegisterTooNarrow { type_bits: 64, reg_bits: 8, .. }]
+            ),
+            "expected a single AsmRegisterTooNarrow error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn an_operand_narrower_than_its_register_is_accepted() {
+        // The orthogonality rule working as intended: the declared type drives
+        // the conversion and LLVM selects `%eax` from the operand's type. This
+        // must stay legal — it is the direction the width rule does not check.
+        let (_, result) = check(
+            r#"
+asm fn narrow(i32 x: rax, u8* buf: rsi) -> i32: rax
+{
+    "nop"
+}
+"#,
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn asm_fn_is_rejected_for_an_unrecognised_target() {
+        // A triple whose arch we cannot classify at all must fail closed
+        // rather than fall through to the x86 register table.
+        let errors = check_for_target(SYSCALL_ASM_FN, "riscv64-unknown-linux-gnu")
+            .expect_err("an asm fn must not compile for an unmodelled arch");
+        assert!(matches!(
+            errors.as_slice(),
+            [TypeCheckError::AsmUnsupportedTarget { .. }]
+        ));
+    }
+
+    #[test]
+    fn asm_fn_rejects_an_unpinnable_operand_type() {
+        let errors = check_for_target(
+            r#"
+asm fn f(bool a: rax) -> i64: rdx
+{
+    "nop"
+}
+"#,
+            "x86_64-unknown-linux-gnu",
+        )
+        .expect_err("a bool cannot be pinned to any register");
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, TypeCheckError::AsmUnpinnableType { .. })),
+            "expected an AsmUnpinnableType error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn asm_fn_rejects_an_operand_pinned_to_the_wrong_register_bank() {
+        // A float is pinnable — but only to SSE. `rax` cannot hold one, and
+        // LLVM diagnoses nothing if asked to try.
+        for (src, what) in [
+            ("asm fn f(f64 a: rax) -> f64: xmm0\n{\n    \"nop\"\n}\n", "f64 in a GPR"),
+            ("asm fn f(i64 a: xmm0) -> i64: rax\n{\n    \"nop\"\n}\n", "i64 in an SSE reg"),
+        ] {
+            let errors = check_for_target(src, "x86_64-unknown-linux-gnu")
+                .expect_err(&format!("{what} must be rejected"));
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| matches!(e, TypeCheckError::AsmRegisterClassMismatch { .. })),
+                "expected an AsmRegisterClassMismatch for {what}, got {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn asm_fn_accepts_a_float_pinned_to_an_sse_register() {
+        check_for_target(
+            r#"
+asm fn sqrt_asm(f64 x: xmm0) -> f64: xmm0
+{
+    "sqrtsd xmm0, xmm0"
+}
+"#,
+            "x86_64-unknown-linux-gnu",
+        )
+        .expect("an f64 pinned to xmm0 is the whole point of SSE support");
+    }
+
+    #[test]
+    fn asm_fn_accepts_an_output_sharing_a_register_with_an_input() {
+        // The in-out syscall form: the duplicate rule applies only among
+        // parameters, so `-> i64: rax` alongside `i64 nr: rax` is legal.
+        assert!(
+            check_for_target(
+                r#"
+asm fn syscall1(i64 nr: rax, i64 a1: rdi) -> i64: rax
+    clobbers(rcx, r11, memory)
+{
+    "syscall"
+}
+"#,
+                "x86_64-unknown-linux-gnu",
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn asm_fn_rejects_a_repeated_memory_clobber() {
+        let errors = check_for_target(
+            r#"
+asm fn f(i64 a: rdi) -> i64: rax
+    clobbers(memory, memory)
+{
+    "nop"
+}
+"#,
+            "x86_64-unknown-linux-gnu",
+        )
+        .expect_err("a repeated memory clobber is a mistake, not a no-op");
+        assert!(matches!(
+            errors.as_slice(),
+            [TypeCheckError::AsmDuplicateClobber { register, .. }] if register == "memory"
+        ));
+    }
+
+    #[test]
+    fn asm_fn_rejects_a_register_clobbered_under_two_spellings() {
+        // Aliasing again: `rcx` and `ecx` are one register, so clobbering
+        // both is a duplicate even though the spellings differ.
+        let errors = check_for_target(
+            r#"
+asm fn f(i64 a: rdi) -> i64: rax
+    clobbers(rcx, ecx)
+{
+    "nop"
+}
+"#,
+            "x86_64-unknown-linux-gnu",
+        )
+        .expect_err("one register clobbered twice must be rejected");
+        assert!(matches!(
+            errors.as_slice(),
+            [TypeCheckError::AsmDuplicateClobber { register, .. }] if register == "ecx"
+        ));
+    }
+
+    #[test]
+    fn asm_fn_accepts_a_single_memory_clobber_alongside_registers() {
+        assert!(
+            check_for_target(
+                r#"
+asm fn f(i64 a: rdi) -> i64: rax
+    clobbers(rcx, r11, memory)
+{
+    "nop"
+}
+"#,
+                "x86_64-unknown-linux-gnu",
+            )
+            .is_ok()
+        );
+    }
+
     /// Find a function by name.
     fn func<'a>(program: &'a Program, name: &str) -> &'a Function {
         program
@@ -1116,10 +1623,18 @@ mod tests {
             .unwrap_or_else(|| panic!("function `{name}` not found"))
     }
 
+    /// Statements of an Aspect-bodied function.
+    fn body<'a>(program: &'a Program, name: &str) -> &'a [Statement] {
+        match &func(program, name).body {
+            FunctionBody::Aspect(stmts) => stmts,
+            _ => panic!("function `{name}` has no Aspect body"),
+        }
+    }
+
     /// Initializer expression of the `idx`-th `VarDecl` in function `fname`.
     fn nth_var_init<'a>(program: &'a Program, fname: &str, idx: usize) -> &'a Expression {
         let mut count = 0;
-        for stmt in &func(program, fname).body {
+        for stmt in body(program, fname) {
             if let StatementKind::VarDecl {
                 initializer: Some(init),
                 ..

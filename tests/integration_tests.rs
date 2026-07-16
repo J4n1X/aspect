@@ -103,14 +103,14 @@ fn assert_compile_error_contains(
     }
 }
 
-/// Compile and JIT-execute a Aspect program in-process, returning `main`'s
-/// `i32` return value. `args` is the program's argv tail; the source path is
-/// prepended as the conventional `argv[0]`. `compile_args` holds
-/// `# compile_args:` flags for the preprocessor (`-D`/`-I`).
-fn compile_and_run_with_args(
+/// Compile and JIT-execute a Aspect program in-process at `opt_level`,
+/// returning `main`'s `i32` return value. `args` is the program's argv tail;
+/// the source path is prepended as the conventional `argv[0]`.
+fn run_at_opt(
     source_path: &str,
     args: &[String],
     compile_args: &[String],
+    opt_level: u8,
 ) -> Result<i32, String> {
     let program = parse_and_typecheck(source_path, compile_args)?;
     let context = Context::create();
@@ -119,18 +119,51 @@ fn compile_and_run_with_args(
             .map_err(|e| format!("Code generator setup failed: {e}"))?;
     codegen
         .generate(&program)
-        .map_err(|e| format!("Code generation failed: {e}"))?;
+        .map_err(|e| format!("Code generation failed at -O{opt_level}: {e}"))?;
 
     // Run the optimizer over it to catch any codegen issues that would cause optimization to fail
-    codegen.optimize(2, true).map_err(|e| format!("Optimization failed: {e}"))?;
-    
+    if opt_level > 0 {
+        codegen
+            .optimize(opt_level, true)
+            .map_err(|e| format!("Optimization failed at -O{opt_level}: {e}"))?;
+    }
+
     let mut argv: Vec<&str> = Vec::with_capacity(args.len() + 1);
     argv.push(source_path);
     argv.extend(args.iter().map(String::as_str));
 
     codegen
         .jit_execute_main(&argv, 0)
-        .map_err(|e| format!("JIT execution failed: {e}"))
+        .map_err(|e| format!("JIT execution failed at -O{opt_level}: {e}"))
+}
+
+/// Compile and JIT-execute a Aspect program in-process, returning `main`'s
+/// `i32` return value. `compile_args` holds `# compile_args:` flags for the
+/// preprocessor (`-D`/`-I`).
+///
+/// Every program runs at **both** `-O0` and `-O2`, and the two must agree.
+/// Optimization level is not a detail the corpus can be indifferent to: `-O0`
+/// and `-O1+` take materially different paths — an `asm fn`, for one, stays a
+/// real call at `-O0` and is folded into its caller by `alwaysinline` at
+/// `-O1+`. Running only `-O2` (as this harness used to) left every unoptimised
+/// lowering untested; running only `-O0` would never exercise the optimizer.
+/// A disagreement between the two is itself the finding, so it is reported as
+/// such rather than being resolved in favour of either.
+fn compile_and_run_with_args(
+    source_path: &str,
+    args: &[String],
+    compile_args: &[String],
+) -> Result<i32, String> {
+    let unoptimized = run_at_opt(source_path, args, compile_args, 0)?;
+    let optimized = run_at_opt(source_path, args, compile_args, 2)?;
+
+    if unoptimized != optimized {
+        return Err(format!(
+            "{source_path} is optimization-level dependent: -O0 returned {unoptimized}, \
+             -O2 returned {optimized}. One of the two lowerings is wrong."
+        ));
+    }
+    Ok(optimized)
 }
 
 fn compile_and_run(source_path: &str) -> Result<i32, String> {

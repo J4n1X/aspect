@@ -1,0 +1,11 @@
+# expected: "extern and asm cannot be combined"
+# The reversed order: `asm` is consumed first, so only `parse_asm_function`
+# can catch this. Without that check it dies with a generic "expected fn".
+
+asm extern fn f(i64 a: rax) -> i64: rax {
+    "nop"
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

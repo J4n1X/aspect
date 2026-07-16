@@ -7,7 +7,7 @@ use crate::codegen::generator::CodeGenerator;
 use crate::codegen::structs::is_struct_value;
 use crate::codegen::{CodegenError, LangTypeExt};
 use crate::lexer::{Position, TypeBase};
-use crate::parser::{Expression, Function, LangType};
+use crate::parser::{Expression, Function, LangType, Statement};
 
 /// Prepared LLVM call arguments plus the optional `sret` result slot
 /// (its pointer and struct type) that the caller must load after the call.
@@ -162,7 +162,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(function)
     }
 
-    pub(crate) fn generate_function(&mut self, func: &Function) -> Result<(), CodegenError> {
+    pub(crate) fn generate_function(
+        &mut self,
+        func: &Function,
+        stmts: &[Statement],
+    ) -> Result<(), CodegenError> {
         let function = *self.functions.get(&func.proto.name).ok_or_else(|| {
             CodegenError::UndefinedFunction(func.proto.name.clone(), func.proto.pos)
         })?;
@@ -215,7 +219,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         // Generate function body (variables are allocated at their declaration site)
-        for stmt in &func.body {
+        for stmt in stmts {
             cg.generate_statement(stmt)?;
         }
 

@@ -1,0 +1,25 @@
+# expected: "does not fit in register 'al'"
+# requires_arch: ARCH_X86_64
+#-
+  An operand pinned to a register spelling too narrow to hold its declared
+  type. LLVM does not diagnose this: it sizes the physical register from the
+  operand's LLVM type and silently hands back the full `rax`, so `al` would
+  quietly mean `rax` and the author's belief that only the low byte is live
+  would be wrong.
+
+  The converse is deliberately legal and is covered in asm_arith.ap: a
+  narrower type in a wider spelling (`i32 x: rax`) is the types-and-registers
+  orthogonality rule working as intended, with LLVM selecting `%eax`.
+
+  Gated with `# requires_arch:` rather than `$ifdef` — see
+  asm_unknown_register.ap for why a failure test cannot gate itself.
+-#
+
+asm fn lo(i64 v: al) -> i64: rax
+{
+    "mov rax, 0"
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return lo(1) as i32
+}

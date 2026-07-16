@@ -1,0 +1,15 @@
+# expected: "already pinned to parameter 'a'"
+# requires_arch: ARCH_X86_64
+#-
+  Two parameters pinned to the same register: LLVM would silently drop one
+  of the two operands rather than diagnose it.
+-#
+
+asm fn f(i64 a: rax, i64 b: rax) -> i64: rdx
+{
+    "nop"
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return f(1, 2) as i32
+}

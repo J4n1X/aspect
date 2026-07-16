@@ -1,0 +1,10 @@
+# expected: "extern and asm cannot be combined"
+# `extern` reaches the dispatch first and is caught there.
+
+extern asm fn f(i64 a: rax) -> i64: rax {
+    "nop"
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

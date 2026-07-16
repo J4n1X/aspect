@@ -1,0 +1,15 @@
+# expected: "cannot pin a return register"
+#-
+  A `-> u0` asm fn has no output register and no output constraint, so there
+  is nothing for a return pin to name.
+-#
+
+asm fn f(i64 a: rdi) -> u0: rax
+{
+    "nop"
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    f(1)
+    return 0
+}

@@ -1,0 +1,48 @@
+# expected: 42
+#-
+  An `asm fn` doing real arithmetic in pinned registers, plus the in-out
+  case (`rax` is both an input and the output). x86-specific, so the asm
+  path is gated; every other target computes the same value in plain Aspect
+  so the test stays honest there rather than silently vanishing.
+
+  `sub2` carries the weight here: `add` is commutative, so an `add2`-only
+  test still yields 42 when the two operands are pinned to each other's
+  registers, and cannot tell correct lowering from swapped operands. `sub`
+  is order-sensitive — swapped operands give -42 — so it fails loudly.
+-#
+
+$ifdef ARCH_X86_64
+asm fn add2(i64 a: rax, i64 b: rbx) -> i64: rax
+{
+    "add rax, rbx"
+}
+
+asm fn sub2(i64 a: rax, i64 b: rbx) -> i64: rax
+{
+    "sub rax, rbx"
+}
+$else
+fn add2(i64 a, i64 b) -> i64 {
+    return a + b
+}
+
+fn sub2(i64 a, i64 b) -> i64 {
+    return a - b
+}
+$endif
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    # Order-sensitive: 50 - 8, not 8 - 50.
+    i64 diff = sub2(50, 8)
+    if diff != 42 {
+        return 1
+    }
+
+    # The in-out case, where `rax` is both the first input and the output.
+    i64 sum = add2(40, 2)
+    if sum != diff {
+        return 2
+    }
+
+    return sum as i32
+}

@@ -64,6 +64,24 @@ pub enum ParserError {
     #[error("Expected statement at {0}")]
     ExpectedStatement(Position),
 
+    /// An `asm fn` parameter with no `: <register>` pin. Only pinned operands
+    /// are admitted, so this is a parse error rather than a defaulted choice.
+    #[error("asm fn parameter '{0}' must be pinned to a register (e.g. 'i64 {0}: rdi') at {1}")]
+    AsmMissingParamRegister(String, Position),
+
+    /// A non-void `asm fn` whose return value is not pinned to a register.
+    #[error("asm fn '{0}' must pin its return value to a register (e.g. '-> i64: rax') at {1}")]
+    AsmMissingReturnRegister(String, Position),
+
+    /// A `-> u0` `asm fn` with a return pin: a void asm fn has no output
+    /// register and no output constraint, so there is nothing to pin.
+    #[error("asm fn '{0}' returns u0 and cannot pin a return register at {1}")]
+    AsmVoidReturnRegister(String, Position),
+
+    /// An `asm fn` whose body contains no assembly string literal.
+    #[error("asm fn '{0}' body must contain at least one assembly string literal at {1}")]
+    AsmEmptyBody(String, Position),
+
     #[error("Unexpected end of input")]
     UnexpectedEof,
 
@@ -130,6 +148,10 @@ impl ParserError {
             ParserError::InvalidBinaryOperation(pos) => Some(*pos),
             ParserError::ExpectedExpression(pos) => Some(*pos),
             ParserError::ExpectedStatement(pos) => Some(*pos),
+            ParserError::AsmMissingParamRegister(_, pos) => Some(*pos),
+            ParserError::AsmMissingReturnRegister(_, pos) => Some(*pos),
+            ParserError::AsmVoidReturnRegister(_, pos) => Some(*pos),
+            ParserError::AsmEmptyBody(_, pos) => Some(*pos),
             ParserError::UnexpectedEof | ParserError::LexerError(_) => None,
         }
     }

@@ -198,14 +198,61 @@ pub struct FunctionProto {
     pub name: String,
     pub params: Vec<(LangType, String)>,
     pub return_type: LangType,
-    pub is_extern: bool,
     pub pos: Position,
+}
+
+/// A register name as written after a `:` or inside `clobbers(...)`.
+///
+/// Stored verbatim and never canonicalised: LLVM picks the correctly-sized
+/// physical sub-register from the operand's LLVM type, so the user's exact
+/// spelling is what must reach the constraint string.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AsmReg {
+    pub name: String,
+    pub pos: Position,
+}
+
+/// The instruction-sequence body of an `asm fn`, plus its register contract.
+///
+/// Registers live here rather than in `FunctionProto::params` because that
+/// `Vec<(LangType, String)>` is the shape the symbol table compares for
+/// signature equality and every other phase destructures; widening it would
+/// touch code with nothing to do with inline asm.
+///
+/// Parser-established invariants: `param_regs` is parallel to `proto.params`,
+/// `return_reg.is_some() == !proto.return_type.is_void_value()`, and `lines`
+/// is never empty.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AsmSpec {
+    pub param_regs: Vec<AsmReg>,
+    /// `None` for a `-> u0` asm fn, which has no output constraint.
+    pub return_reg: Option<AsmReg>,
+    /// Source order; may include the pseudo-register `memory`.
+    pub clobbers: Vec<AsmReg>,
+    /// One line per string literal, joined with `\n` for LLVM.
+    pub lines: Vec<String>,
+    /// The `asm` keyword, where whole-declaration diagnostics are reported.
+    pub pos: Position,
+}
+
+/// Where a function's body comes from, and thus how it is lowered. A function
+/// is exactly one of these — the variants are what make `extern`-with-a-body,
+/// or `asm`-and-statements, unrepresentable rather than merely undocumented.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FunctionBody {
+    /// `fn` — Aspect statements. Empty until pass 2 of `do_parse_program`
+    /// fills it in, so callers can be declared before their callees.
+    Aspect(Vec<Statement>),
+    /// `extern fn` — defined in another object file.
+    Extern,
+    /// `asm fn` — the instructions are the body.
+    Asm(AsmSpec),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Function {
     pub proto: FunctionProto,
-    pub body: Vec<Statement>,
+    pub body: FunctionBody,
 }
 
 #[derive(Debug, Clone, PartialEq)]

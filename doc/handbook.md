@@ -585,6 +585,46 @@ No body, just a signature — the linker (or, under `interpret`, `dlopen`
 against the host process) resolves it. This is how the entire `std/c/*`
 layer of the stdlib is written; see [§13](#13-standard-library-tour).
 
+### `asm fn` — dropping to instructions
+
+`extern fn` says "this body lives in another object file". `asm fn` says
+"this body *is* these instructions":
+
+```aspect
+asm fn syscall3(i64 nr: rax, i64 a1: rdi, u8 *a2: rsi, u64 a3: rdx) -> i64: rax
+    clobbers(rcx, r11, memory)
+{
+    "syscall"
+}
+```
+
+Each parameter is pinned to a register with `:`, the return value likewise,
+and the body is one string literal per line of assembly. `clobbers(...)`
+sits after the signature and before the block. Calling it is ordinary:
+
+```aspect
+fn sys_write(i32 fd, u8 *buf, u64 len) -> i64 {
+    return syscall3(1, fd, buf, len)     # just a function call
+}
+```
+
+Things worth knowing:
+
+- **The type still matters.** A register pins *where* a value lives; the
+  declared type decides *what* it is and how it converts — the `i32 fd`
+  above sign-extends into a 64-bit register exactly as it would for any
+  `i64` parameter, and `u8 *buf: rsi` stays a pointer.
+- **Register names aren't keywords.** `rax` means something only after a
+  `:` or inside `clobbers(...)`; `i64 rax = 1` still compiles fine.
+- **Say `memory`** whenever your instructions read or write through a
+  pointer, as any syscall does. Omit it and the optimizer may cache a load
+  across the block and hand you stale data.
+- **Registers are checked against `--target`.** `rax` under
+  `--target aarch64-*` is a compile error, not a surprise at link time.
+  Gate arch-specific code behind `$ifdef ARCH_X86_64` ([§11](#11-the-preprocessor)).
+- Only pinned operands are supported — the compiler won't pick a register
+  for you — and `extern` and `asm` can't be combined.
+
 ### Forward references and mutual recursion
 
 Declaration order doesn't matter for functions, type-structs, methods,

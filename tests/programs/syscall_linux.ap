@@ -1,0 +1,128 @@
+# expected: 0
+# compile_args: "-I", "lib"
+#-
+  std/linux/syscall regression: real kernel calls, no libc on the path.
+  Returns the number of failed checks.
+
+  Linux/x86-64 only — elsewhere the module is empty and this compiles to a
+  trivial pass. `sys_exit_group` is deliberately never called: these run
+  JIT-in-process, so it would kill the test runner.
+-#
+$import std/linux/syscall
+
+$ifdef OS_LINUX
+$ifdef ARCH_X86_64
+fn main(u32 argc, u8 **argv) -> i32 {
+    i32 fails = 0
+
+    # syscall0
+    if sys_getpid() <= 0 { fails += 1 }
+
+    # syscall3 — a short write to stdout returns the byte count.
+    u8 *msg = "syscall write\n"
+    if sys_write(STDOUT, msg, 14) != 14 { fails += 1 }
+
+    # The -errno convention: writing to a closed fd is -EBADF (9).
+    i64 bad = sys_write(999, msg, 14)
+    if !failed(bad) { fails += 1 }
+    if errno_of(bad) != 9 { fails += 1 }
+
+    # ...and a successful call must not look like a failure.
+    if failed(14) { fails += 1 }
+    if errno_of(14) != 0 { fails += 1 }
+
+    # syscall4 (openat) + read + close: a real file round-trip. /proc/self/cmdline
+    # always exists on Linux and is readable.
+    u8 *path = "/proc/self/cmdline"
+    i64 fd = sys_openat(AT_FDCWD, path, O_RDONLY, 0)
+    if failed(fd) {
+        fails += 1
+    } else {
+        u8[64] buf
+        i64 n = sys_read(fd as i32, buf, 64)
+        if n <= 0 { fails += 1 }
+        if failed(sys_close(fd as i32)) { fails += 1 }
+    }
+
+    # Opening something that cannot exist is -ENOENT (2).
+    u8 *nope = "/nonexistent/aspect/probe"
+    i64 e = sys_openat(AT_FDCWD, nope, O_RDONLY, 0)
+    if errno_of(e) != 2 { fails += 1 }
+
+    # syscall6 (mmap) + munmap: an anonymous private page.
+    i64 addr = sys_mmap(null, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0 - 1, 0)
+    if failed(addr) {
+        fails += 1
+    } else {
+        # The mapping is real memory: write through it, read it back.
+        u8 *page = addr as u8*
+        page[0] = 42
+        page[4095] = 7
+        if page[0] != 42 { fails += 1 }
+        if page[4095] != 7 { fails += 1 }
+        if failed(sys_munmap(addr as u0*, 4096)) { fails += 1 }
+    }
+
+    # Identity syscalls (syscall0).
+    if sys_getppid() <= 0 { fails += 1 }
+    if sys_gettid() <= 0 { fails += 1 }
+    if sys_getuid() < 0 { fails += 1 }
+    if failed(sys_sched_yield()) { fails += 1 }
+
+    # getrandom must actually fill the buffer, not just return a count.
+    u8[16] rnd
+    for (u64 i = 0; i < 16; i += 1) { rnd[i] = 0 }
+    if sys_getrandom(rnd, 16, 0) != 16 { fails += 1 }
+    i32 nonzero = 0
+    for (u64 i = 0; i < 16; i += 1) {
+        if rnd[i] != 0 { nonzero += 1 }
+    }
+    if nonzero == 0 { fails += 1 }        # 16 zero bytes is ~2^-128
+
+    # A real write/read round-trip through a temp file: open, write, seek,
+    # read back, verify bytes, close, unlink.
+    u8 *tmp = "/tmp/aspect_syscall_probe"
+    i64 wfd = sys_open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 420)
+    if failed(wfd) {
+        fails += 1
+    } else {
+        u8 *payload = "aspect"
+        if sys_write(wfd as i32, payload, 6) != 6 { fails += 1 }
+        if failed(sys_fsync(wfd as i32)) { fails += 1 }
+        if failed(sys_close(wfd as i32)) { fails += 1 }
+
+        i64 rfd = sys_open(tmp, O_RDONLY, 0)
+        if failed(rfd) {
+            fails += 1
+        } else {
+            u8[16] got
+            if sys_read(rfd as i32, got, 6) != 6 { fails += 1 }
+            if got[0] != 97 { fails += 1 }        # 'a'
+            if got[5] != 116 { fails += 1 }       # 't'
+            # lseek back to 0 and re-read the first byte.
+            if sys_lseek(rfd as i32, 0, SEEK_SET) != 0 { fails += 1 }
+            u8[4] again
+            if sys_read(rfd as i32, again, 1) != 1 { fails += 1 }
+            if again[0] != 97 { fails += 1 }
+            if failed(sys_close(rfd as i32)) { fails += 1 }
+        }
+        if failed(sys_unlink(tmp)) { fails += 1 }
+        # ...and it is really gone.
+        if errno_of(sys_access(tmp, 0)) != 2 { fails += 1 }
+    }
+
+    # An un-wrapped syscall through the raw path — the module's claim that
+    # every number is reachable without a wrapper. SYS_UNAME is not wrapped
+    # (it needs a struct layout we don't have), but the buffer is just bytes.
+    u8[400] uts
+    if failed(syscall1(SYS_UNAME, uts as i64)) { fails += 1 }
+    if uts[0] == 0 { fails += 1 }         # sysname[0], e.g. 'L' of "Linux"
+
+    return fails
+}
+$else
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}
+$endif
+$endif

@@ -1170,12 +1170,17 @@ impl Parser {
         skip_nl!();
 
         while !self.is_at_end() {
-            let is_extern = kw_if!(Extern);
+            let kind = self.parse_kind_modifier()?;
+            let is_extern = matches!(&kind, Some((Keyword::Extern, _)));
 
+            if let Some((Keyword::Asm, asm_pos)) = &kind {
+                let func = self.parse_asm_function(*asm_pos)?;
+                functions.push(func);
+            }
             // `fn ident(...)` is a function definition; `fn(...)` (no name
             // between `fn` and `(`) is a function-pointer-typed global. The
             // statement-table dispatch handles the local-decl variant.
-            if self.check_keyword(&Keyword::Fn) && !self.starts_fnptr_var_decl() {
+            else if self.check_keyword(&Keyword::Fn) && !self.starts_fnptr_var_decl() {
                 let func = self.parse_function(is_extern)?;
                 functions.push(func);
             } else if self.check_keyword(&Keyword::Alias) {
@@ -1227,7 +1232,7 @@ impl Parser {
         let mut bodies = self.parse_pending_bodies();
         for func in &mut functions {
             if let Some(body) = bodies.remove(&func.proto.name) {
-                func.body = body;
+                func.body = crate::parser::FunctionBody::Aspect(body);
             }
         }
 
@@ -1238,6 +1243,37 @@ impl Parser {
             symbols: std::mem::take(&mut self.module),
             source_files: self.source_files.clone(),
         })
+    }
+
+    /// Consume the leading kind-modifiers of a top-level declaration, yielding
+    /// the one named (with its position) or `None`.
+    ///
+    /// `extern` and `asm` both answer "which kind of function is this", and a
+    /// function is exactly one kind, so naming two is one error whichever
+    /// order they appear in. Scanning them together rather than testing pairs
+    /// is what keeps that true as kinds are added.
+    fn parse_kind_modifier(&mut self) -> Result<Option<(Keyword, Position)>, ParserError> {
+        let mut kind: Option<(Keyword, Position)> = None;
+        loop {
+            let next = if self.check_keyword(&Keyword::Extern) {
+                Keyword::Extern
+            } else if self.check_keyword(&Keyword::Asm) {
+                Keyword::Asm
+            } else {
+                return Ok(kind);
+            };
+            let next_pos = self.peek().pos;
+            if let Some((prev, _)) = &kind {
+                let msg = if *prev == next {
+                    format!("duplicate `{next}`")
+                } else {
+                    "extern and asm cannot be combined on one function".to_string()
+                };
+                return Err(ParserError::UnexpectedToken(msg, next_pos));
+            }
+            kind = Some((next, next_pos));
+            self.advance();
+        }
     }
 
     /// Pre-register every `type <Name>` struct name with a reserved id before
@@ -1589,7 +1625,6 @@ impl Parser {
             name: mangled.clone(),
             params: params.clone(),
             return_type,
-            is_extern: false,
             pos,
         };
 
@@ -1632,7 +1667,7 @@ impl Parser {
 
         Ok(Function {
             proto,
-            body: Vec::new(),
+            body: crate::parser::FunctionBody::Aspect(Vec::new()),
         })
     }
 
@@ -1855,6 +1890,184 @@ impl Parser {
         ))
     }
 
+    /// Parse an `asm fn` declaration: a sibling of `extern fn`. Where an
+    /// extern fn's body lives in another object file, an asm fn's body *is*
+    /// the given instructions.
+    ///
+    /// Unlike an ordinary fn the body is parsed inline rather than deferred
+    /// to pass 2 — an asm body is string literals, so nothing in it can
+    /// forward-reference anything.
+    ///
+    /// Registering an ordinary `FunctionSymbol` at the end is what makes call
+    /// sites ordinary: `lookup_function`, the type checker and call codegen
+    /// all treat this exactly like any other function with a body.
+    /// `pos` is the `asm` keyword, already consumed by the caller's
+    /// kind-modifier scan.
+    #[parse_rule]
+    fn parse_asm_function(&mut self, pos: Position) -> Result<crate::parser::Function, ParserError> {
+        use crate::parser::{AsmReg, AsmSpec, Function, FunctionProto};
+        use crate::symbol::table::FunctionSymbol;
+
+        kw!(Fn);
+        let name = ident!();
+        token!(OpenParen);
+
+        // Every parameter must be pinned (no compiler-allocated operands), so
+        // `param_regs` stays exactly parallel to `params`.
+        let mut param_regs: Vec<AsmReg> = Vec::new();
+        let params = self.parse_comma_separated(&TokenKind::CloseParen, |p| {
+            let param_type = p.parse_type()?;
+            let param_name = p.parse_ident("parameter name")?;
+            if !p.check(&TokenKind::Colon) {
+                return Err(ParserError::AsmMissingParamRegister(
+                    param_name,
+                    p.peek().pos,
+                ));
+            }
+            p.advance(); // ':'
+            param_regs.push(p.parse_asm_reg()?);
+            Ok((param_type, param_name))
+        })?;
+        Self::check_duplicate_params(&params, pos)?;
+
+        let (return_type, return_reg) = if self.match_token(&[TokenKind::Arrow]) {
+            let ty = self.parse_type()?;
+            let reg = if self.check(&TokenKind::Colon) {
+                self.advance();
+                Some(self.parse_asm_reg()?)
+            } else {
+                None
+            };
+            (ty, reg)
+        } else {
+            (LangType::VOID, None)
+        };
+
+        // A void asm fn has no output register; a value-returning one must
+        // say where its value comes out.
+        if return_type.is_void_value() {
+            if let Some(reg) = &return_reg {
+                return Err(ParserError::AsmVoidReturnRegister(name.clone(), reg.pos));
+            }
+        } else if return_reg.is_none() {
+            return Err(ParserError::AsmMissingReturnRegister(name.clone(), pos));
+        }
+
+        // `clobbers` is contextual — a plain identifier, never a keyword — so
+        // it stays usable as an ordinary name elsewhere. The clause is
+        // optional and may sit on its own line.
+        skip_nl!();
+        let clobbers = if matches!(&self.peek().kind, TokenKind::Identifier(n) if n == "clobbers") {
+            self.advance();
+            token!(OpenParen);
+            self.parse_comma_separated(&TokenKind::CloseParen, Self::parse_asm_reg)?
+        } else {
+            Vec::new()
+        };
+        skip_nl!();
+
+        // Body: adjacent string literals, one line of assembly each. Consumed
+        // as raw tokens, NOT through expression parsing — asm lines must not
+        // land in the program's string-literal table.
+        let body_pos = pos!();
+        token!(OpenBrace);
+        let mut lines: Vec<String> = Vec::new();
+        loop {
+            skip_nl!();
+            if self.check(&TokenKind::CloseBrace) || self.is_at_end() {
+                break;
+            }
+            match &self.peek().kind {
+                TokenKind::StringLiteral(s) => {
+                    lines.push(s.clone());
+                    self.advance();
+                }
+                other => {
+                    return Err(ParserError::ExpectedToken(
+                        "assembly string literal".to_string(),
+                        format!("{other}"),
+                        self.peek().pos,
+                    ));
+                }
+            }
+        }
+        token!(CloseBrace);
+        if lines.is_empty() {
+            return Err(ParserError::AsmEmptyBody(name.clone(), body_pos));
+        }
+
+        self.module
+            .add_function(FunctionSymbol {
+                name: name.clone(),
+                params: params.clone(),
+                return_type,
+                is_extern: false,
+                has_body: true,
+                pos,
+            })
+            .map_err(|e| ParserError::from_symbol(e, pos))?;
+
+        Ok(Function {
+            proto: FunctionProto {
+                name,
+                params,
+                return_type,
+                pos,
+            },
+            body: crate::parser::FunctionBody::Asm(AsmSpec {
+                param_regs,
+                return_reg,
+                clobbers,
+                lines,
+                pos,
+            }),
+        })
+    }
+
+    /// Consume one contextual register name. Register names are ordinary
+    /// identifiers — meaningful only after a `:` in an `asm fn` signature or
+    /// inside `clobbers(...)` — so `rax` stays usable as a variable name
+    /// everywhere else in the language. Validating the name against the
+    /// target's register table is the type checker's job, not the parser's.
+    fn parse_asm_reg(&mut self) -> Result<crate::parser::AsmReg, ParserError> {
+        let pos = self.peek().pos;
+        match &self.peek().kind {
+            TokenKind::Identifier(name) => {
+                let name = name.clone();
+                self.advance();
+                Ok(crate::parser::AsmReg { name, pos })
+            }
+            other => Err(ParserError::ExpectedToken(
+                "register name".to_string(),
+                format!("{other}"),
+                pos,
+            )),
+        }
+    }
+
+    /// Reject a parameter list that names the same parameter twice.
+    ///
+    /// A fn *with* a body catches this in pass 2, when the body's scope
+    /// declares each parameter and the second declaration collides. The
+    /// bodyless forms — `extern fn` and `asm fn` — never open that scope, so
+    /// without this check they silently accept `f(i64 a, i64 a)`. Checking the
+    /// proto directly covers all three forms at their declaration site; the
+    /// error matches pass 2's spelling and position so a duplicate reports
+    /// identically no matter which form it appears in.
+    fn check_duplicate_params(
+        params: &[(LangType, String)],
+        pos: crate::lexer::Position,
+    ) -> Result<(), ParserError> {
+        let mut seen: Vec<&str> = Vec::with_capacity(params.len());
+        for (_, name) in params {
+            if seen.contains(&name.as_str()) {
+                return Err(ParserError::DuplicateDeclaration(name.clone(), pos));
+            }
+            seen.push(name);
+        }
+        Ok(())
+    }
+
     #[parse_rule]
     fn parse_function(&mut self, is_extern: bool) -> Result<crate::parser::Function, ParserError> {
         use crate::parser::{Function, FunctionProto};
@@ -1870,6 +2083,7 @@ impl Parser {
             let param_name = p.parse_ident("parameter name")?;
             Ok((param_type, param_name))
         })?;
+        Self::check_duplicate_params(&params, pos)?;
 
         let return_type = if self.match_token(&[TokenKind::Arrow]) {
             lang_type!()
@@ -1881,7 +2095,6 @@ impl Parser {
             name: name.clone(),
             params: params.clone(),
             return_type,
-            is_extern,
             pos,
         };
 
@@ -1898,18 +2111,17 @@ impl Parser {
 
         skip_nl!();
 
-        if is_extern {
+        let body = if is_extern {
             term!();
+            crate::parser::FunctionBody::Extern
         } else {
             // Body parsing is deferred to pass 2 (see `do_parse_program`) so
             // functions can call others defined later in the file.
             self.defer_function_body(name, params, pos)?;
-        }
+            crate::parser::FunctionBody::Aspect(Vec::new())
+        };
 
-        Ok(Function {
-            proto,
-            body: Vec::new(),
-        })
+        Ok(Function { proto, body })
     }
 
     #[parse_rule]

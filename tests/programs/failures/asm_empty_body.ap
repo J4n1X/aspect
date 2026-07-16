@@ -1,0 +1,13 @@
+# expected: "at least one assembly string literal"
+#-
+  An asm fn's body *is* its instructions; an empty one would lower to an asm
+  block that does nothing while still claiming to produce a value.
+-#
+
+asm fn f(i64 a: rdi) -> i64: rax
+{
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return f(1) as i32
+}

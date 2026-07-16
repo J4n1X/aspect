@@ -17,17 +17,55 @@ pub struct Program {
 ```rust
 pub struct Function {
     pub proto: FunctionProto,
-    pub body: Vec<Statement>,
+    pub body: FunctionBody,
 }
 
 pub struct FunctionProto {
     pub name: String,
     pub params: Vec<(LangType, String)>,  // (type, name) pairs
     pub return_type: LangType,
-    pub is_extern: bool,
     pub pos: Position,
 }
 ```
+
+A function is exactly one *kind*, and `FunctionBody` is what says which:
+
+```rust
+pub enum FunctionBody {
+    Aspect(Vec<Statement>),  // fn        — empty until pass 2 fills it
+    Extern,                  // extern fn — defined in another object file
+    Asm(AsmSpec),            // asm fn    — the instructions are the body
+}
+```
+
+The kind is an enum rather than a `bool` plus an `Option` because the three
+kinds are mutually exclusive: `extern`-with-a-body and `asm`-with-statements
+are unrepresentable rather than merely undocumented, and every consumer that
+lowers a function matches exhaustively instead of cross-checking fields.
+
+### AsmSpec
+
+The register contract of an `asm fn` (see [06-codegen](06-codegen.md) for the
+lowering).
+
+```rust
+pub struct AsmSpec {
+    pub param_regs: Vec<AsmReg>,      // parallel to proto.params
+    pub return_reg: Option<AsmReg>,   // None for a `-> u0` asm fn
+    pub clobbers: Vec<AsmReg>,        // may include the pseudo-register `memory`
+    pub lines: Vec<String>,           // one per string literal, joined with \n
+    pub pos: Position,
+}
+
+pub struct AsmReg {
+    pub name: String,  // verbatim; never canonicalised
+    pub pos: Position,
+}
+```
+
+Registers live here rather than widening `FunctionProto::params`, whose
+`(LangType, String)` shape the symbol table compares for signature equality
+and every other phase destructures.
 
 ## GlobalVar
 

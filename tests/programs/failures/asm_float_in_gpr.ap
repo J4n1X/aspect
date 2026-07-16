@@ -1,0 +1,11 @@
+# expected: "needs an SSE register"
+# A float is pinnable, but only to SSE. LLVM cannot put one in rax and does
+# not diagnose being asked to.
+
+asm fn f(f64 x: rax) -> f64: xmm0 {
+    "nop"
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

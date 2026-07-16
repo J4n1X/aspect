@@ -1,0 +1,17 @@
+# expected: "'esp' is reserved"
+# requires_arch: ARCH_X86_64
+#-
+  The reserved check is per register *family*, so the 32-bit spelling of the
+  stack pointer is rejected for the same reason `rsp` is — a spelling-only
+  check would let this through.
+-#
+
+asm fn f(i64 a: rdi) -> i64: rax
+    clobbers(esp)
+{
+    "nop"
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return f(1) as i32
+}

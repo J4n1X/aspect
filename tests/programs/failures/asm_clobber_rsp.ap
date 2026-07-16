@@ -1,0 +1,16 @@
+# expected: "'rsp' is reserved"
+# requires_arch: ARCH_X86_64
+#-
+  The stack pointer is live throughout and the calling convention depends on
+  it continuously; it may never be pinned or clobbered.
+-#
+
+asm fn f(i64 a: rdi) -> i64: rax
+    clobbers(rsp)
+{
+    "nop"
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return f(1) as i32
+}

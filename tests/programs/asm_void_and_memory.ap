@@ -1,0 +1,33 @@
+# expected: 99
+#-
+  Covers, in one program: a `-> u0` asm fn (no output register, no output
+  constraint); a zero-parameter asm fn; an absent clobbers clause; a present
+  clobbers(memory) clause; and a `i64*` operand pinned to rdi, which must
+  stay a pointer rather than being retyped from its register.
+-#
+
+$ifdef ARCH_X86_64
+asm fn nop_fn() -> u0
+{
+    "nop"
+}
+
+asm fn store_via_ptr(i64* p: rdi, i64 v: rsi) -> u0
+    clobbers(memory)
+{
+    "mov [rdi], rsi"
+}
+$else
+fn nop_fn() -> u0 { }
+
+fn store_via_ptr(i64* p, i64 v) -> u0 {
+    *p = v
+}
+$endif
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    i64 out = 0
+    nop_fn()
+    store_via_ptr(&out, 99)
+    return out as i32
+}

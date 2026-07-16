@@ -1,0 +1,14 @@
+# expected: "must be pinned to a register"
+#-
+  Only pinned operands are admitted — there are no compiler-allocated ones —
+  so an unpinned parameter is an error rather than a defaulted choice.
+-#
+
+asm fn f(i64 a) -> i64: rax
+{
+    "nop"
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return f(1) as i32
+}
