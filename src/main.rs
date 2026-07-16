@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use aspect::codegen::CodeGenerator;
 use aspect::preprocessor::{PreprocessedSource, Preprocessor};
 use aspect::parser::{Parser, Program};
+use aspect::target::TargetSpec;
 use aspect::typechecker::TypeChecker;
 
 #[derive(ClapParser)]
@@ -33,6 +34,22 @@ struct PreprocArgs {
     /// Module search root for `$import` (repeatable; module system pending)
     #[arg(short = 'I', long = "include-dir", value_name = "DIR")]
     include_dirs: Vec<PathBuf>,
+
+    /// Compilation target triple, e.g. `x86_64-unknown-linux-gnu` or
+    /// `x86_64-pc-windows-msvc`. Defaults to the host triple. Seeds the
+    /// `OS_*`/`ARCH_*` preprocessor defines that drive `$ifdef` in every
+    /// subcommand, and additionally selects the LLVM target machine for
+    /// `compile`/`interpret`.
+    #[arg(long = "target", value_name = "TRIPLE", default_value_t = TargetSpec::host().triple().to_string())]
+    target: String,
+}
+
+impl PreprocArgs {
+    /// The resolved compilation target: `--target` if given, the host
+    /// triple otherwise (clap already fills in the default).
+    fn target_spec(&self) -> TargetSpec {
+        TargetSpec::parse(&self.target)
+    }
 }
 
 #[derive(Subcommand)]
@@ -154,7 +171,7 @@ fn main() -> Result<()> {
 /// then tokenize with directive expansion. Errors are formatted with their
 /// originating file/position via the driver's file registry.
 fn preprocess_source(path: &Path, preproc: &PreprocArgs) -> Result<PreprocessedSource> {
-    let mut pp = Preprocessor::new();
+    let mut pp = Preprocessor::for_target(&preproc.target_spec());
     for dir in &preproc.include_dirs {
         pp.add_include_dir(dir.clone());
     }
@@ -204,11 +221,12 @@ fn build_program(path: &Path, preproc: &PreprocArgs) -> Result<Program> {
 }
 
 /// Back-end setup shared by `compile` and `interpret`: generate LLVM IR for
-/// `program` (module named after the file stem) and run optimization passes
-/// when `opt_level > 0`.
+/// `program` (module named after the file stem, targeting `preproc.target`)
+/// and run optimization passes when `opt_level > 0`.
 fn build_codegen<'ctx>(
     context: &'ctx LLVMContext,
     path: &Path,
+    preproc: &PreprocArgs,
     program: &Program,
     opt_level: u8,
     verify_each: bool,
@@ -218,7 +236,8 @@ fn build_codegen<'ctx>(
         .and_then(|s| s.to_str())
         .unwrap_or("module");
 
-    let mut codegen = CodeGenerator::new(context, module_name);
+    let mut codegen = CodeGenerator::new(context, module_name, &preproc.target_spec())
+        .with_context(|| format!("failed to set up code generation for '{}'", path.display()))?;
     codegen
         .generate(program)
         .with_context(|| format!("failed to generate code for '{}'", path.display()))?;
@@ -321,7 +340,7 @@ fn compile_file(
 ) -> Result<()> {
     let program = build_program(path, preproc)?;
     let context = LLVMContext::create();
-    let codegen = build_codegen(&context, path, &program, opt_level, verify_each)?;
+    let codegen = build_codegen(&context, path, preproc, &program, opt_level, verify_each)?;
 
     match emit {
         EmitTarget::Ir => {
@@ -376,7 +395,7 @@ fn interpret_file(
 ) -> Result<()> {
     let program = build_program(path, preproc)?;
     let context = LLVMContext::create();
-    let codegen = build_codegen(&context, path, &program, opt_level, false)?;
+    let codegen = build_codegen(&context, path, preproc, &program, opt_level, false)?;
 
     // argv[0] is the source path by C convention; user args follow.
     let path_str = path.display().to_string();

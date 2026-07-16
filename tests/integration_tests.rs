@@ -5,6 +5,7 @@ use aspect_macros::generate_tests;
 use aspect::codegen::CodeGenerator;
 use aspect::preprocessor::{PreprocessedSource, Preprocessor};
 use aspect::parser::{Parser, Program};
+use aspect::target::TargetSpec;
 use aspect::typechecker::TypeChecker;
 
 /// Preprocess a source file with extra compiler flags from a
@@ -74,7 +75,9 @@ fn module_name_for(source_path: &str) -> &str {
 fn compile_only(source_path: &str, compile_args: &[String]) -> Result<(), String> {
     let program = parse_and_typecheck(source_path, compile_args)?;
     let context = Context::create();
-    let mut codegen = CodeGenerator::new(&context, module_name_for(source_path));
+    let mut codegen =
+        CodeGenerator::new(&context, module_name_for(source_path), &TargetSpec::host())
+            .map_err(|e| format!("Code generator setup failed: {e}"))?;
     codegen
         .generate(&program)
         .map_err(|e| format!("Code generation failed: {e}"))?;
@@ -111,7 +114,9 @@ fn compile_and_run_with_args(
 ) -> Result<i32, String> {
     let program = parse_and_typecheck(source_path, compile_args)?;
     let context = Context::create();
-    let mut codegen = CodeGenerator::new(&context, module_name_for(source_path));
+    let mut codegen =
+        CodeGenerator::new(&context, module_name_for(source_path), &TargetSpec::host())
+            .map_err(|e| format!("Code generator setup failed: {e}"))?;
     codegen
         .generate(&program)
         .map_err(|e| format!("Code generation failed: {e}"))?;

@@ -14,6 +14,7 @@ use std::os::raw::c_char;
 use crate::codegen::scope::ScopeStack;
 use crate::codegen::CodegenError;
 use crate::parser::{LangType, Program};
+use crate::target::TargetSpec;
 
 pub struct CodeGenerator<'ctx> {
     pub(crate) context: &'ctx Context,
@@ -75,26 +76,48 @@ pub struct CodeGenerator<'ctx> {
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
-    /// Creates a new `CodeGenerator` with the given LLVM context and module name.
+    /// Creates a new `CodeGenerator` for `target` (see [`TargetSpec::host`]
+    /// for the host-defaulting case). Sets up the module's LLVM triple and
+    /// data layout from `target`, so downstream codegen ABI decisions (e.g.
+    /// struct/int alignment) are correct for the target being compiled for,
+    /// not necessarily the machine `aspc` itself is running on.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the default target triple cannot be resolved to a valid target.
-    #[must_use]
-    pub fn new(context: &'ctx Context, module_name: &str) -> Self {
+    /// Returns [`CodegenError::UnsupportedTarget`] when LLVM can't resolve
+    /// `target`'s triple to a usable target/target machine — e.g. an
+    /// `aarch64-*` triple when only the x86 backend is compiled into this
+    /// `aspc` binary (`--features target-x86`), or a malformed triple string.
+    pub fn new(
+        context: &'ctx Context,
+        module_name: &str,
+        target: &TargetSpec,
+    ) -> Result<Self, CodegenError> {
         let module = context.create_module(module_name);
         let builder = context.create_builder();
 
-        Target::initialize_native(&InitializationConfig::default())
-            .expect("Failed to initialize native target");
+        // Initializes whichever backend(s) this binary was built with for
+        // the machine it is *running on* — not `target`. That's sufficient
+        // for every triple that backend covers (e.g. the x86 backend covers
+        // every `x86_64-*` triple, windows-msvc included; it just changes
+        // the object format), and any triple outside that coverage fails
+        // cleanly at `Target::from_triple` below rather than here.
+        Target::initialize_native(&InitializationConfig::default()).map_err(|reason| {
+            CodegenError::UnsupportedTarget {
+                triple: target.triple().to_string(),
+                reason,
+            }
+        })?;
 
-        // TODO: Make target configurable
-        let triple = TargetMachine::get_default_triple();
-        let target = Target::from_triple(&triple).expect("Failed to get target from triple");
+        let triple = target.llvm_triple();
+        let llvm_target = Target::from_triple(&triple).map_err(|e| CodegenError::UnsupportedTarget {
+            triple: target.triple().to_string(),
+            reason: e.to_string(),
+        })?;
 
         // Set module triple and data layout so LLVM uses the correct ABI alignments
         // (e.g. i64 → align 8 on x86-64 instead of defaulting to align 4).
-        let target_machine = target
+        let target_machine = llvm_target
             .create_target_machine(
                 &triple,
                 "generic",
@@ -103,11 +126,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 RelocMode::Default,
                 CodeModel::Default,
             )
-            .expect("Failed to create target machine for data layout");
+            .ok_or_else(|| CodegenError::UnsupportedTarget {
+                triple: target.triple().to_string(),
+                reason: "LLVM could not create a target machine for this triple".to_string(),
+            })?;
         module.set_triple(&triple);
         module.set_data_layout(&target_machine.get_target_data().get_data_layout());
 
-        Self {
+        Ok(Self {
             context,
             module,
             builder,
@@ -125,7 +151,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             current_function_return_type: None,
             loop_stack: Vec::new(),
             value_block_stack: Vec::new(),
-        }
+        })
     }
 
     /// Generate LLVM IR from a program

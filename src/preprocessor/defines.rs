@@ -27,6 +27,7 @@
 use std::collections::HashMap;
 
 use crate::lexer::{tokenize, Position, Token, TokenKind};
+use crate::target::TargetSpec;
 
 use super::errors::PreprocessError;
 
@@ -78,33 +79,19 @@ impl DefineTable {
 
     /// A table pre-seeded with the compiler-provided defines: `OS_LINUX` /
     /// `OS_WINDOWS` / `OS_MACOS` and `ARCH_X86_64` / `ARCH_AARCH64` as flag
-    /// defines from the build target, plus `ASPECT_VERSION_MAJOR` /
-    /// `ASPECT_VERSION_MINOR` as integer tokens from the crate version.
+    /// defines from `target` (the *compilation* target — see
+    /// [`crate::target::TargetSpec`], never the compiler binary's own build
+    /// host), plus `ASPECT_VERSION_MAJOR` / `ASPECT_VERSION_MINOR` as integer
+    /// tokens from the crate version.
     #[must_use]
-    pub fn with_platform_defines() -> Self {
+    pub fn with_platform_defines(target: &TargetSpec) -> Self {
         let mut table = Self::default();
 
-        let os = if cfg!(target_os = "linux") {
-            Some("OS_LINUX")
-        } else if cfg!(target_os = "windows") {
-            Some("OS_WINDOWS")
-        } else if cfg!(target_os = "macos") {
-            Some("OS_MACOS")
-        } else {
-            None
-        };
-        if let Some(name) = os {
+        if let Some(name) = target.os_define() {
             table.insert_builtin_flag(name);
         }
 
-        let arch = if cfg!(target_arch = "x86_64") {
-            Some("ARCH_X86_64")
-        } else if cfg!(target_arch = "aarch64") {
-            Some("ARCH_AARCH64")
-        } else {
-            None
-        };
-        if let Some(name) = arch {
+        if let Some(name) = target.arch_define() {
             table.insert_builtin_flag(name);
         }
 
@@ -457,8 +444,8 @@ mod tests {
     }
 
     #[test]
-    fn platform_defines_are_seeded() {
-        let table = DefineTable::with_platform_defines();
+    fn platform_defines_are_seeded_from_the_host_target() {
+        let table = DefineTable::with_platform_defines(&TargetSpec::host());
         if cfg!(target_os = "linux") {
             assert!(table.is_defined("OS_LINUX"));
             assert!(!table.is_defined("OS_WINDOWS"));
@@ -473,5 +460,46 @@ mod tests {
             [Token { kind: TokenKind::Integer(v), .. }] if *v == expected
         ));
         assert!(table.is_defined("ASPECT_VERSION_MINOR"));
+    }
+
+    #[test]
+    fn platform_defines_follow_an_explicit_target_triple_not_the_build_host() {
+        // `x86_64-pc-windows-msvc` must seed OS_WINDOWS (and never
+        // OS_LINUX) even though these unit tests themselves run on Linux —
+        // the whole point of `TargetSpec` is that the compilation target is
+        // independent of the compiler binary's own build/run host.
+        let windows =
+            DefineTable::with_platform_defines(&TargetSpec::parse("x86_64-pc-windows-msvc"));
+        assert!(windows.is_defined("OS_WINDOWS"));
+        assert!(!windows.is_defined("OS_LINUX"));
+        assert!(!windows.is_defined("OS_MACOS"));
+        assert!(windows.is_defined("ARCH_X86_64"));
+
+        let linux =
+            DefineTable::with_platform_defines(&TargetSpec::parse("x86_64-unknown-linux-gnu"));
+        assert!(linux.is_defined("OS_LINUX"));
+        assert!(!linux.is_defined("OS_WINDOWS"));
+        assert!(linux.is_defined("ARCH_X86_64"));
+
+        let mac = DefineTable::with_platform_defines(&TargetSpec::parse("aarch64-apple-darwin"));
+        assert!(mac.is_defined("OS_MACOS"));
+        assert!(mac.is_defined("ARCH_AARCH64"));
+        assert!(!mac.is_defined("ARCH_X86_64"));
+    }
+
+    #[test]
+    fn platform_defines_are_absent_for_an_unrecognised_triple() {
+        // A triple naming neither a known OS nor a known arch simply seeds
+        // no OS_*/ARCH_* define — unrecognised is not an error at this
+        // layer (`TargetSpec::parse` never fails); only codegen rejects a
+        // triple LLVM itself can't resolve.
+        let table = DefineTable::with_platform_defines(&TargetSpec::parse("riscv64-unknown-none"));
+        assert!(!table.is_defined("OS_LINUX"));
+        assert!(!table.is_defined("OS_WINDOWS"));
+        assert!(!table.is_defined("OS_MACOS"));
+        assert!(!table.is_defined("ARCH_X86_64"));
+        assert!(!table.is_defined("ARCH_AARCH64"));
+        // Version defines are unconditional.
+        assert!(table.is_defined("ASPECT_VERSION_MAJOR"));
     }
 }

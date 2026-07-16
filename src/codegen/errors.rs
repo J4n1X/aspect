@@ -30,6 +30,14 @@ pub enum CodegenError {
 
     #[error("Missing return statement in function '{0}' at {1}")]
     MissingReturn(String, Position),
+
+    /// LLVM couldn't resolve the requested `--target` triple to a usable
+    /// target/target machine — e.g. an `aarch64-*` triple when only the x86
+    /// backend is compiled into this `aspc` binary, or a malformed triple
+    /// string. Has no source position: the failure is about the target the
+    /// whole compilation was invoked with, not any one place in the source.
+    #[error("unsupported compilation target '{triple}': {reason}")]
+    UnsupportedTarget { triple: String, reason: String },
 }
 
 impl CodegenError {
@@ -43,7 +51,10 @@ impl CodegenError {
             | Self::InvalidOperation(_, pos)
             | Self::UnexpectedStatement(pos)
             | Self::MissingReturn(_, pos) => Some(*pos),
-            Self::LLVMError(_) | Self::MainNotFound | Self::InvalidMainSignature => None,
+            Self::LLVMError(_)
+            | Self::MainNotFound
+            | Self::InvalidMainSignature
+            | Self::UnsupportedTarget { .. } => None,
         }
     }
 }

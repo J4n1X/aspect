@@ -50,6 +50,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::lexer::{tokenize_with_file_id, Position, Token, TokenKind};
+use crate::target::TargetSpec;
 
 pub use defines::{Define, DefineOrigin, DefineTable};
 pub use errors::PreprocessError;
@@ -187,11 +188,24 @@ impl Default for Preprocessor {
 }
 
 impl Preprocessor {
-    /// A driver seeded with the compiler-provided platform defines.
+    /// A driver seeded with the compiler-provided platform defines for the
+    /// *host* target ([`TargetSpec::host`]). The ergonomic default for
+    /// tests and any caller that doesn't need cross-target `$ifdef`
+    /// behaviour — equivalent to `Preprocessor::for_target(&TargetSpec::host())`.
     #[must_use]
     pub fn new() -> Self {
+        Self::for_target(&TargetSpec::host())
+    }
+
+    /// A driver seeded with the compiler-provided platform defines for an
+    /// explicit compilation target — what `--target` wires up. Every
+    /// subcommand that preprocesses goes through this (via `--target`'s
+    /// host-defaulted value), so `$ifdef OS_*`/`$ifdef ARCH_*` always match
+    /// the target being compiled for, not the host `aspc` happens to run on.
+    #[must_use]
+    pub fn for_target(target: &TargetSpec) -> Self {
         Self {
-            defines: DefineTable::with_platform_defines(),
+            defines: DefineTable::with_platform_defines(target),
             include_dirs: Vec::new(),
             conditionals: conditional::ConditionalStack::default(),
             tokens: Vec::new(),
