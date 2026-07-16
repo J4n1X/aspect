@@ -156,8 +156,13 @@ language's universal object pointer (C's `void*`):
   arithmetic on it are all rejected — cast to a sized pointer first
   (`p as i32*`, or `p as u8*` for byte offsets).
 - Null tests work directly: `p == null`, `if p { ... }`, `!p`.
-- `u0**` is an ordinary pointer whose pointee happens to be `u0*`; it
-  subscripts fine and is **not** implicitly convertible like `u0*` is.
+- `u0**` (depth 2) does not get `u0*`'s depth-crossing treatment, but it
+  is not itself opaque — it dereferences fine (yielding a `u0*`, which
+  then can't be dereferenced further without a cast), and it coerces
+  implicitly with any other depth-2 pointer under the ordinary
+  same-depth rule (see "Array-to-pointer decay" above), same as `u0*`
+  itself coerces with any depth-1 pointer even without invoking its
+  special depth-crossing rule.
 - `sizeof(u0*)` is the pointer width; `sizeof(u0)` is an error.
 
 Use `u0*` where no particular pointee is expected (allocators, callbacks
@@ -729,13 +734,19 @@ form; write `0 - n` instead.
 
 ### `as` is explicit and always required for narrowing
 
-The type checker allows implicit widening between compatible integer
-categories (`SInt` / `UInt`), but the code generator may emit a warning.
-Use explicit `as` to make intent clear and silence the warning:
+`types_coercible` (`src/typechecker/types.rs`) gates implicit integer
+coercion on width alone: `from.size_bits <= to.size_bits`, independent of
+`SInt`/`UInt`. This means cross-sign coercions are implicit whenever the
+target is at least as wide, including same-width sign reinterpretation
+(`i32` → `u32`) — and it happens silently; there is no compiler warning
+for this or any other implicit coercion (no `eprintln!`/warning
+mechanism exists in the codegen or typechecker).
 
 ```
 u64 n = 0
-n += 1 as u64     # explicit, no warning
+n += 1        # i32 literal into u64 context — implicit, no cast needed
+i32 s = 0 - 1
+u32 u = s     # i32 -> u32, same width, opposite sign — also implicit
 ```
 
 Narrowing (e.g., `i64` to `i32`, or `i32` to `i8`) always requires `as`.

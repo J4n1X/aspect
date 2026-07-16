@@ -270,13 +270,25 @@ zero-fills. Pick the unsigned width when you're doing bit manipulation
 that shouldn't care about sign (see `demos/types.ap` for a worked
 example with packed RGBA colour channels).
 
-Implicit widening between compatible categories is allowed (`i32` → `i64`
-is fine); narrowing always requires an explicit cast:
+Implicit integer coercion is gated on **width alone, not signedness** —
+if the target type is at least as wide as the source, no cast is needed,
+whether or not the two sides agree on sign:
 
 ```aspect
-u64 n = 0
-n += 1 as u64        # widening an i32 literal into a u64 context — explicit, no warning
+i32 a = 5
+i64 b = a         # i32 -> i64: wider, same sign — implicit
+u64 c = a         # i32 -> u64: wider, DIFFERENT sign — also implicit
+u32 d = a         # i32 -> u32: SAME width, different sign — implicit too
+```
 
+That last line silently reinterprets the bit pattern (a negative `i32`
+assigned to a same-width `u32` comes out as the huge unsigned value you'd
+expect from two's-complement, with no diagnostic at all — there is
+currently no compiler warning for any of this, implicit or not).
+Narrowing — a strictly smaller target width — is the one case that's
+always a hard type error without an explicit cast:
+
+```aspect
 i64 big = 300
 i8 small = big as i8    # narrowing: `as` is mandatory
 ```
@@ -301,6 +313,14 @@ u0* raw = malloc(16)
 i32* p  = raw as i32*
 ```
 
+`as` is **mandatory** for: narrowing an integer to a smaller width,
+converting between an integer and a float (either direction — there's no
+implicit `int → float` promotion, unlike C), and converting a pointer
+to/from an integer. It's **legal but not required** everywhere else `as`
+appears above — e.g. `raw as i32*` is one valid way to sharpen a `u0*`,
+but plain `i32* p = raw` already works without it (see
+[Pointers](#pointers) below).
+
 ### `const`
 
 `const` marks a value (or the pointee of a pointer) as read-only. It
@@ -322,25 +342,45 @@ i32 *p = &x
 *p = 20          # x is now 20
 ```
 
+Two pointers of the **same depth** coerce into one another implicitly
+regardless of pointee type — the type checker only compares pointer
+depth here, not what's on the other side of it. This isn't limited to
+`u0*`; it's true of any two sized pointers:
+
+```aspect
+i32 *p = &x
+u8 *q = p        # i32* -> u8*, no cast — same depth, any pointee type
+```
+
+In practice this means the compiler won't stop you from assigning the
+"wrong" pointer type as long as the depth matches — worth remembering
+when a pointer holds a surprising value; see [§15](#15-common-pitfalls).
+
 ### The opaque pointer `u0*`
 
 `u0*` is Aspect's `void*` — the universal untyped pointer, used
 throughout the standard library for allocators and type-erased APIs
 (`malloc`, `sort_bytes`'s comparator arguments, and so on).
 
-- Any pointer, at any depth, coerces to and from `u0*` implicitly — no
-  cast needed to pass a `Point*` where `u0*` is expected, or to assign a
-  `u0*` allocation result into a `Point*` variable.
+- Beyond the general same-depth coercion above, `u0*` (depth exactly 1)
+  additionally bridges **any** pointer depth — a `Point*`, `Point**`, or
+  deeper all coerce to and from `u0*` directly, no cast needed. That's
+  the one thing genuinely unique to `u0*`; nothing else crosses depths
+  implicitly.
 - It is *opaque*: you cannot dereference it, subscript it, or do pointer
   arithmetic on it. Cast to a sized pointer first (`p as Point*`, or
   `p as u8*` to treat it as raw bytes).
 - Null checks work directly: `p == null`, `if p { ... }`, `!p`.
-- `u0**` is an ordinary, non-opaque pointer — it does *not* get the
-  implicit-coercion treatment `u0*` gets.
+- `u0**` (depth 2) does *not* get the depth-crossing treatment `u0*`
+  gets — but it's an ordinary pointer otherwise, so it coerces with any
+  other depth-2 pointer (`Point**`, `i32**`, …) under the general
+  same-depth rule above. What actually makes `u0*` special is only its
+  *own* opacity — `u0**` can be dereferenced fine; you just get a `u0*`
+  back, which then can't be dereferenced further without a cast.
 
 ```aspect
 u0 *raw = malloc(sizeof(i32) * 10)   # untyped allocation
-i32 *xs = raw                        # implicit coercion, no cast
+i32 *xs = raw                        # implicit, depth-crossing coercion
 xs[0] = 42                           # fine now that it's a sized pointer
 free(xs)                             # any pointer coerces back into free's u0*
 ```
@@ -1098,6 +1138,14 @@ Aspect:
   body. There is no single-statement-without-braces shorthand.
 - **Narrowing always needs `as`.** `i64` → `i32`, `i32` → `i8`,
   pointer ↔ integer — all explicit, no exceptions.
+- **Implicit coercion is looser than you'd expect, and silent.**
+  Integer coercion is gated on width alone, so `i32 → u32` (same width,
+  opposite sign) needs no cast and reinterprets the bit pattern; sized
+  pointers of matching depth coerce into each other regardless of
+  pointee type (`i32* → u8*` needs no cast either). Neither case
+  produces a warning — there is currently no warning mechanism in the
+  compiler at all. See [§4](#signedness-and-widening) and
+  [§4](#pointers).
 - **Compound assignment (`+=` and friends) only targets a plain
   variable** — not a field (`this.x += 1`) and not a subscript
   (`xs[i] += 1`). Both are parse errors ("compound assignment requires a
