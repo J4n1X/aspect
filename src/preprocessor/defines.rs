@@ -78,8 +78,8 @@ impl DefineTable {
 
     /// A table pre-seeded with the compiler-provided defines: `OS_LINUX` /
     /// `OS_WINDOWS` / `OS_MACOS` and `ARCH_X86_64` / `ARCH_AARCH64` as flag
-    /// defines from the build target, plus `TJLB_VERSION_MAJOR` /
-    /// `TJLB_VERSION_MINOR` as integer tokens from the crate version.
+    /// defines from the build target, plus `ASPECT_VERSION_MAJOR` /
+    /// `ASPECT_VERSION_MINOR` as integer tokens from the crate version.
     #[must_use]
     pub fn with_platform_defines() -> Self {
         let mut table = Self::default();
@@ -109,11 +109,11 @@ impl DefineTable {
         }
 
         table.insert_builtin_int(
-            "TJLB_VERSION_MAJOR",
+            "ASPECT_VERSION_MAJOR",
             version_component(env!("CARGO_PKG_VERSION_MAJOR")),
         );
         table.insert_builtin_int(
-            "TJLB_VERSION_MINOR",
+            "ASPECT_VERSION_MINOR",
             version_component(env!("CARGO_PKG_VERSION_MINOR")),
         );
         table
@@ -466,12 +466,12 @@ mod tests {
         if cfg!(target_arch = "x86_64") {
             assert!(table.is_defined("ARCH_X86_64"));
         }
-        let major = table.get("TJLB_VERSION_MAJOR").unwrap();
+        let major = table.get("ASPECT_VERSION_MAJOR").unwrap();
         let expected = version_component(env!("CARGO_PKG_VERSION_MAJOR"));
         assert!(matches!(
             major.tokens.as_slice(),
             [Token { kind: TokenKind::Integer(v), .. }] if *v == expected
         ));
-        assert!(table.is_defined("TJLB_VERSION_MINOR"));
+        assert!(table.is_defined("ASPECT_VERSION_MINOR"));
     }
 }

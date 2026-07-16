@@ -1,0 +1,29 @@
+{
+  "name": "aspect",
+  "displayName": "Aspect Language Support",
+  "description": "Syntax highlighting for the Aspect programming language",
+  "version": "0.2.0",
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "aspect",
+        "aliases": ["Aspect", "aspect"],
+        "extensions": [".ap"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "aspect",
+        "scopeName": "source.aspect",
+        "path": "./syntaxes/aspect.tmLanguage.json"
+      }
+    ]
+  }
+}

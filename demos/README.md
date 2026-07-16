@@ -1,44 +1,44 @@
-# TJLB Demos
+# Aspect Demos
 
-Showcase programs for the TJLB language. **Demos are not part of the test
+Showcase programs for the Aspect language. **Demos are not part of the test
 suite** — they exist to be read and run. (The shared standard library below
-*is* regression-tested, via `tests/programs/stdlib_check.tjlb`.)
+*is* regression-tested, via `tests/programs/stdlib_check.ap`.)
 
 Run any demo with the JIT interpreter. Demos import the standard library
 (`lib/std/**`), so pass the `-I lib` search root:
 
 ```bash
-cargo run -- interpret -I lib demos/<name>.tjlb            # or target/…/tjlb-parser
-cargo run -- interpret -I lib demos/life.tjlb -- watch     # args after --
+cargo run -- interpret -I lib demos/<name>.ap            # or target/…/aspc
+cargo run -- interpret -I lib demos/life.ap -- watch     # args after --
 ```
 
-Or compile to native via `./compile-file.sh demos/<name>.tjlb`
+Or compile to native via `./compile-file.sh demos/<name>.ap`
 (the script passes `-I lib` itself).
 
 ## Feature showcases
 
 | Demo | What it shows |
 |------|---------------|
-| [`mandelbrot.tjlb`](mandelbrot.tjlb) | ASCII Mandelbrot renderer. Tight `f64` loops, escape-time iteration, palette indexing. |
-| [`life.tjlb`](life.tjlb) | Conway's Game of Life on a torus. Type-struct with private cell buffer, O(1) double-buffer swap, `std/rand` soup seeding. Pass any arg (e.g. `-- watch`) for ANSI animation. |
-| [`calc.tjlb`](calc.tjlb) | Precedence-climbing expression evaluator in a single self-recursive method. Encapsulated cursor state, error carrying via a result struct. |
-| [`vm.tjlb`](vm.tjlb) | Stack-based bytecode VM. Opcode dispatch through an array of function pointers — `ops[opcode](vm)` — running factorial and summation bytecode. |
-| [`wordfreq.tjlb`](wordfreq.tjlb) | Word frequency counter. Composes the hash map, generic sort, and a `for_each` function-pointer callback. |
-| [`sort_demo.tjlb`](sort_demo.tjlb) | One type-erased sort, four orderings: ints both ways, strings, and a `Person[6]` struct array by two different keys. |
+| [`mandelbrot.ap`](mandelbrot.ap) | ASCII Mandelbrot renderer. Tight `f64` loops, escape-time iteration, palette indexing. |
+| [`life.ap`](life.ap) | Conway's Game of Life on a torus. Type-struct with private cell buffer, O(1) double-buffer swap, `std/rand` soup seeding. Pass any arg (e.g. `-- watch`) for ANSI animation. |
+| [`calc.ap`](calc.ap) | Precedence-climbing expression evaluator in a single self-recursive method. Encapsulated cursor state, error carrying via a result struct. |
+| [`vm.ap`](vm.ap) | Stack-based bytecode VM. Opcode dispatch through an array of function pointers — `ops[opcode](vm)` — running factorial and summation bytecode. |
+| [`wordfreq.ap`](wordfreq.ap) | Word frequency counter. Composes the hash map, generic sort, and a `for_each` function-pointer callback. |
+| [`sort_demo.ap`](sort_demo.ap) | One type-erased sort, four orderings: ints both ways, strings, and a `Person[6]` struct array by two different keys. |
 
 ## Language-tour demos
 
 | Demo | What it shows |
 |------|---------------|
-| [`hello.tjlb`](hello.tjlb) | `$import std/...`, printing, heap allocation with `sizeof(T)`. |
-| [`types.tjlb`](types.tjlb) | Guided tour of the numeric type system (widths, signedness, casts, bit ops). Self-contained. |
-| [`string_demo.tjlb`](string_demo.tjlb) | The `String` type-struct: factories, sret returns, autoref methods, encapsulation. |
-| [`vec_demo.tjlb`](vec_demo.tjlb) | `VecI32` dynamic array: push/pop/at, amortised growth. |
-| [`float_demo.tjlb`](float_demo.tjlb) | `f64` printing and NaN semantics (`x != x`). |
-| [`list_init.tjlb`](list_init.tjlb) | List initializers: full / empty / partial / expression elements. |
-| [`concat_args.tjlb`](concat_args.tjlb) | `argc`/`argv` handling. Run with `-- hello world`. |
-| [`ask_name.tjlb`](ask_name.tjlb) | Interactive stdin (blocks — run in a terminal). |
-| [`stress_test.tjlb`](stress_test.tjlb) | Kitchen-sink compiler exercise; `bench.tjlb` + `bench.c` compare against C. |
+| [`hello.ap`](hello.ap) | `$import std/...`, printing, heap allocation with `sizeof(T)`. |
+| [`types.ap`](types.ap) | Guided tour of the numeric type system (widths, signedness, casts, bit ops). Self-contained. |
+| [`string_demo.ap`](string_demo.ap) | The `String` type-struct: factories, sret returns, autoref methods, encapsulation. |
+| [`vec_demo.ap`](vec_demo.ap) | `VecI32` dynamic array: push/pop/at, amortised growth. |
+| [`float_demo.ap`](float_demo.ap) | `f64` printing and NaN semantics (`x != x`). |
+| [`list_init.ap`](list_init.ap) | List initializers: full / empty / partial / expression elements. |
+| [`concat_args.ap`](concat_args.ap) | `argc`/`argv` handling. Run with `-- hello world`. |
+| [`ask_name.ap`](ask_name.ap) | Interactive stdin (blocks — run in a terminal). |
+| [`stress_test.ap`](stress_test.ap) | Kitchen-sink compiler exercise; `bench.ap` + `bench.c` compare against C. |
 
 ## The standard library (`lib/std/`)
 

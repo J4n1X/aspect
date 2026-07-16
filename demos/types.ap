@@ -1,0 +1,278 @@
+# expected: 5
+#-
+  types.ap  --  A guided tour of Aspect's numeric type system.
+
+  Demonstrates:
+    * Integer widths:  i8 / i32 / i64 / u8 / u32 / u64
+    * Signed vs. unsigned:  u32 for bit ops; i32 for arithmetic
+    * Explicit widening:  i32 -> i64 to prevent overflow
+    * Saturating narrowing:  i32 -> i8 with clamping
+    * Hex and binary literals:  0xFF  0b10110101
+    * Typed pointer walk:  u8[N]  /  u8*
+    * Floating-point:  f64
+
+  Stays deliberately self-contained — its own `strlen`, `println`,
+  number-to-string helpers — so the demo *is* the tour, not a thin
+  wrapper around std. The standard library lives under `demos/std/`
+  for the demos that want it.
+
+  Compile:  aspect compile demos/types.ap -o types.ll
+  Run:      lli types.ll          (exit code 5 = popcount of 0b10110101)
+-#
+
+extern fn puts(u8 *msg) -> u0
+extern fn write(i32 fd, u8 *buf, u64 len) -> i64
+
+# Return the byte length of a null-terminated u8 string.
+fn strlen(u8 *s) -> u64 {
+    u64 n = 0
+    while s[n] != 0 {
+        n += 1
+    }
+    return n
+}
+
+#-
+  rgba -- pack four u8 colour channels into one u32.
+
+  Using u32 rather than i32 keeps the bit manipulation sign-free:
+  shifting a u32 right always inserts zeros (logical shift), whereas
+  shifting a negative i32 right is arithmetic (inserts sign bits).
+-#
+fn rgba(u8 r, u8 g, u8 b, u8 a) -> u32 {
+    return (r as u32 << 24) | (g as u32 << 16) | (b as u32 << 8) | a as u32
+}
+
+# Extract byte n (0 = least-significant) from a packed u32.
+fn byte_of(u32 v, u32 n) -> u8 {
+    return ((v >> (n * 8)) & 0xFF) as u8
+}
+
+#-
+  popcount -- count the set bits (Hamming weight) of a u32.
+
+  The loop right-shifts v until it is zero, accumulating set bits.
+  Declaring v as u32 instead of i32 makes the shift unambiguous:
+  no sign-extension, no implementation-defined behaviour.
+-#
+fn popcount(u32 v) -> u32 {
+    u32 count = 0
+    while v != 0 {
+        count += v & 1
+        v >>= 1
+    }
+    return count
+}
+
+#-
+  wide_mul -- multiply two i32 values and return i64.
+
+  100 000 * 100 000 = 10^10, which overflows i32 (max ~2.1 * 10^9).
+  Widening both operands to i64 before the multiply keeps the full result.
+-#
+fn wide_mul(i32 a, i32 b) -> i64 {
+    return (a as i64) * (b as i64)
+}
+
+#-
+  clamp_i8 -- saturating narrowing from i32 to i8.
+
+  Rather than letting the bit pattern wrap silently, we clamp to the
+  representable range [-128, 127] and then apply the explicit `as i8` cast.
+  Aspect requires `as` for all narrowing conversions -- nothing is implicit.
+-#
+fn clamp_i8(i32 v) -> i8 {
+    if v > 127 {
+        return 127 as i8
+    }
+    i32 min_val = 0 - 128
+    if v < min_val {
+        return min_val as i8
+    }
+    return v as i8
+}
+
+# Convert u64 to its decimal string in buf (>= 21 bytes).  Returns buf.
+fn u64_to_str(u64 v, u8 *buf) -> u8 * {
+    u64 i = 0
+    if v == 0 {
+        buf[0] = 48
+        buf[1] = 0
+        return buf
+    }
+    while v != 0 {
+        buf[i] = (48 + v % 10) as u8
+        v /= 10
+        i += 1
+    }
+    buf[i] = 0
+    u64 lo = 0
+    u64 hi = i - 1
+    while lo < hi {
+        u8 t = buf[lo]
+        buf[lo] = buf[hi]
+        buf[hi] = t
+        lo += 1
+        hi -= 1
+    }
+    return buf
+}
+
+# Convert i64 to its decimal string in buf (>= 22 bytes).  Returns buf.
+fn i64_to_str(i64 v, u8 *buf) -> u8 * {
+    u8[24] tmp
+    u64 i = 0
+    if v < 0 {
+        buf[0] = 45
+        u64_to_str(0 - v as u64, tmp)
+        while tmp[i] != 0 {
+            buf[i + 1] = tmp[i]
+            i += 1
+        }
+        buf[i + 1] = 0
+        return buf
+    }
+    return u64_to_str(v as u64, buf)
+}
+
+# Convert f64 to a 2-decimal-place string in buf (>= 32 bytes).  Returns buf.
+fn f64_to_str_2dp(f64 v, u8 *buf) -> u8 * {
+    u8[8] cents_str
+    u64 len = 0
+    u64 j = 0
+    i64 int_part = v as i64
+    f64 frac = v - (int_part as f64)
+    i64 cents = (frac * 100.0 + 0.5) as i64
+    if cents >= 100 {
+        int_part += 1
+        cents = 0
+    }
+    i64_to_str(int_part, buf)
+    len = strlen(buf)
+    buf[len] = 46
+    len += 1
+    if cents < 10 {
+        buf[len] = 48
+        len += 1
+    }
+    i64_to_str(cents, cents_str)
+    while cents_str[j] != 0 {
+        buf[len] = cents_str[j]
+        len += 1
+        j += 1
+    }
+    buf[len] = 0
+    return buf
+}
+
+# Write string s to stdout without a trailing newline.
+fn print_str(u8 *s) -> u0 {
+    write(1, s, strlen(s))
+}
+
+# Write string s to stdout followed by a newline (like puts, but uses write).
+fn println(u8 *s) -> u0 {
+    u8[2] nl
+    nl[0] = 10
+    nl[1] = 0
+    write(1, s, strlen(s))
+    write(1, nl, 1)
+}
+
+fn print_u64(u64 v) -> u0 {
+    u8[24] buf
+    u64_to_str(v, buf)
+    write(1, buf, strlen(buf))
+}
+
+fn print_i64(i64 v) -> u0 {
+    u8[24] buf
+    i64_to_str(v, buf)
+    write(1, buf, strlen(buf))
+}
+
+fn print_f64_2dp(f64 v) -> u0 {
+    u8[32] buf
+    f64_to_str_2dp(v, buf)
+    write(1, buf, strlen(buf))
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    println("=== Aspect Type System Demo ===")
+    println("")
+
+    # -- 1. u32 packed colour ------------------------------------------
+    # Four independent u8 channels packed tightly into one u32 (RGBA, r=MSB).
+    # Extracting a channel requires a right-shift, a mask, and a cast to u8.
+    u32 coral  = rgba(255 as u8, 127 as u8,  80 as u8, 255 as u8)
+    u32 indigo = rgba( 75 as u8,   0 as u8, 130 as u8, 255 as u8)
+
+    u8 coral_r = byte_of(coral, 3)    # 0xFF = 255
+    u8 coral_g = byte_of(coral, 2)    # 0x7F = 127
+    u8 coral_b = byte_of(coral, 1)    # 0x50 =  80
+
+    print_str("1. u32 packed RGBA:  coral red=")
+    print_u64(coral_r as u64)
+    print_str(" green=")
+    print_u64(coral_g as u64)
+    print_str(" blue=")
+    print_u64(coral_b as u64)
+    println("")
+
+    # -- 2. u32 bit counting -------------------------------------------
+    # Binary literal 0b10110101 = 181d, with 5 bits set.
+    # u32 ensures the right-shift in popcount is logical (zero-fill).
+    u32 mask = 0b10110101
+    u32 bits = popcount(mask)
+    print_str("2. u32 popcount(0b10110101=181) = ")
+    print_u64(bits as u64)
+    println("  [logical shift, no sign bit]")
+
+    # -- 3. widening multiply ------------------------------------------
+    # The product 10^10 overflows i32; widening to i64 first is safe.
+    i32 big     = 100000
+    i64 product = wide_mul(big, big)
+    print_str("3. i64 wide_mul(100000,100000) = ")
+    print_i64(product)
+    println("  [no i32 overflow]")
+
+    # -- 4. saturating narrowing cast ----------------------------------
+    # Values outside [-128, 127] are clamped before the `as i8` truncation.
+    i8 hi = clamp_i8(200)        #  200 -> 127  (i8 max)
+    i8 lo = clamp_i8(0 - 200)    # -200 -> -128 (i8 min)
+    print_str("4. clamp_i8: 200->")
+    print_i64(hi as i64)
+    print_str("  -200->")
+    print_i64(lo as i64)
+    println("  [saturating i32->i8]")
+
+    # -- 5. f64 floating-point -----------------------------------------
+    # All numeric literals with a decimal point are f64.
+    # Binary ops on f64 use IEEE 754 double-precision arithmetic.
+    f64 pi   = 3.14159265358979
+    f64 rad  = 5.0
+    f64 area = pi * rad * rad    # ~78.5398
+    print_str("5. f64 circle area: pi * 5.0^2 = ")
+    print_f64_2dp(area)
+    println("")
+
+    # -- 6. u8 array walked via typed pointer --------------------------
+    # A preallocated u8[8] array decays to u8* in expressions.
+    # &buf gives u8**, which we cast to u8* to match write/strlen.
+    u8[8] buf
+    buf[0] = 72 as u8    # 'H'
+    buf[1] = 105 as u8   # 'i'
+    buf[2] = 33 as u8    # '!'
+    buf[3] = 10 as u8    # '\n'
+    buf[4] = 0 as u8     # null terminator
+
+    u8 *p   = buf
+    u64 len = strlen(p)
+    write(1, p, len)
+    puts("6. u8[8] buf walked through u8* pointer -- wrote 'Hi!' above")
+
+    puts("")
+    puts("Exit code = popcount(0b10110101) = 5")
+
+    return bits as i32    # exit code: 5
+}

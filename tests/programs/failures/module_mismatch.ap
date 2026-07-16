@@ -1,0 +1,11 @@
+# expected: "badmod.ap", "declares module `actually_other`"
+# compile_args: "-I", "tests/modules"
+# `$module` is authoritative: the file resolution finds for `badmod`
+# declares `actually_other`, so the import is a hard error naming the
+# file, its declaration, and the import that pulled it in.
+
+$import badmod
+
+fn main(u32 argc, u8** argv) -> i32 {
+    return 0
+}

@@ -1,6 +1,6 @@
 # Lexer
 
-The lexer (`src/lexer/`) tokenizes TJLB source text into a flat `Vec<Token>`.
+The lexer (`src/lexer/`) tokenizes Aspect source text into a flat `Vec<Token>`.
 
 ## Files
 

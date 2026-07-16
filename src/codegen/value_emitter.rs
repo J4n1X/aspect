@@ -140,7 +140,7 @@ impl<'ctx> ValueEmitter<'ctx> for RuntimeEmitter<'_, 'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         let res = match op {
             // Signed arithmetic carries `nsw`: signed overflow is undefined in
-            // TJLB, which lets LLVM assume `a + 1 > a` etc. Unsigned arithmetic
+            // Aspect, which lets LLVM assume `a + 1 > a` etc. Unsigned arithmetic
             // is defined to wrap, so it stays plain.
             BinaryOp::Add if is_signed => self
                 .builder

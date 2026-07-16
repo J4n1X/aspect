@@ -19,8 +19,8 @@
 //! `$import <path>` searches each `-I` root **in flag order** for exactly
 //! two shapes ([`resolve_module_files`]):
 //!
-//! - **file form** — `<root>/<path>.tjlb`, a single-file module;
-//! - **directory form** — every `.tjlb` file *directly* inside
+//! - **file form** — `<root>/<path>.ap`, a single-file module;
+//! - **directory form** — every `.ap` file *directly* inside
 //!   `<root>/<path>/` (non-recursive; subdirectories are submodules and are
 //!   imported explicitly), loaded in sorted filename order.
 //!
@@ -191,7 +191,7 @@ pub(crate) fn resolve_module_files(
     let mut candidates = Vec::new();
     for root in roots {
         let dir_form = root.join(&relative);
-        let file_form = dir_form.with_extension("tjlb");
+        let file_form = dir_form.with_extension("ap");
         let file_exists = file_form.is_file();
         let dir_files = list_module_dir(&dir_form)?;
         match (file_exists, dir_files.is_empty()) {
@@ -218,9 +218,9 @@ pub(crate) fn resolve_module_files(
     })
 }
 
-/// The `.tjlb` files directly inside `dir`, sorted by name. Empty when
+/// The `.ap` files directly inside `dir`, sorted by name. Empty when
 /// `dir` doesn't exist or is not a directory — a directory without any
-/// `.tjlb` files directly inside it does *not* constitute the directory
+/// `.ap` files directly inside it does *not* constitute the directory
 /// form (resolution falls through to the next root).
 fn list_module_dir(dir: &PathBuf) -> Result<Vec<PathBuf>, PreprocessError> {
     if !dir.is_dir() {
@@ -238,7 +238,7 @@ fn list_module_dir(dir: &PathBuf) -> Result<Vec<PathBuf>, PreprocessError> {
                 reason: e.to_string(),
             })?
             .path();
-        if path.is_file() && path.extension().is_some_and(|ext| ext == "tjlb") {
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "ap") {
             files.push(path);
         }
     }
@@ -254,7 +254,7 @@ mod tests {
     use super::*;
 
     /// The checked-in fixture tree (primary `-I` root) used by these tests
-    /// and mirrored by the `tests/programs/module_*.tjlb` integration tests.
+    /// and mirrored by the `tests/programs/module_*.ap` integration tests.
     fn fixture_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests")
@@ -380,7 +380,7 @@ mod tests {
     fn file_form_resolution() {
         let src = run("$import mathlib\n", &[fixture_root()]).unwrap();
         assert_eq!(src.files.len(), 2, "entry + one module file");
-        assert!(src.files[1].ends_with("modules/mathlib.tjlb"));
+        assert!(src.files[1].ends_with("modules/mathlib.ap"));
         assert_eq!(
             src.modules,
             vec![(0, String::new()), (1, "mathlib".to_string())]
@@ -396,8 +396,8 @@ mod tests {
     fn directory_form_loads_every_file_sorted() {
         let src = run("$import strutil\n", &[fixture_root()]).unwrap();
         assert_eq!(src.files.len(), 3, "entry + two module files");
-        assert!(src.files[1].ends_with("modules/strutil/first.tjlb"));
-        assert!(src.files[2].ends_with("modules/strutil/second.tjlb"));
+        assert!(src.files[1].ends_with("modules/strutil/first.ap"));
+        assert!(src.files[2].ends_with("modules/strutil/second.ap"));
         assert_eq!(
             src.modules,
             vec![
@@ -412,17 +412,17 @@ mod tests {
     fn first_root_offering_a_form_wins() {
         // `shadow` exists in both roots; flag order decides.
         let src = run("$import shadow\n", &[fixture_root(), alt_root()]).unwrap();
-        assert!(src.files[1].ends_with("modules/shadow.tjlb"));
+        assert!(src.files[1].ends_with("modules/shadow.ap"));
 
         let src = run("$import shadow\n", &[alt_root(), fixture_root()]).unwrap();
-        assert!(src.files[1].ends_with("modules_alt/shadow.tjlb"));
+        assert!(src.files[1].ends_with("modules_alt/shadow.ap"));
     }
 
     #[test]
     fn later_roots_are_searched_when_earlier_ones_miss() {
         // `onlyalt` exists only in the second root.
         let src = run("$import onlyalt\n", &[fixture_root(), alt_root()]).unwrap();
-        assert!(src.files[1].ends_with("modules_alt/onlyalt.tjlb"));
+        assert!(src.files[1].ends_with("modules_alt/onlyalt.ap"));
     }
 
     #[test]
@@ -432,7 +432,7 @@ mod tests {
             panic!("expected AmbiguousModuleForms, got {err:?}");
         };
         assert_eq!(module, "dual");
-        assert!(file.ends_with("modules/dual.tjlb"));
+        assert!(file.ends_with("modules/dual.ap"));
         assert!(dir.ends_with("modules/dual"));
     }
 
@@ -446,7 +446,7 @@ mod tests {
         // File form + directory form, per root.
         assert_eq!(candidates.len(), 4);
         let message = err.to_string();
-        assert!(message.contains("no/such/module.tjlb"));
+        assert!(message.contains("no/such/module.ap"));
         assert!(message.contains("modules_alt"));
     }
 
@@ -475,10 +475,10 @@ mod tests {
             panic!("expected ModuleDeclarationMismatch, got {err:?}");
         };
         assert_eq!(module, "badmod");
-        assert!(file.ends_with("modules/badmod.tjlb"));
+        assert!(file.ends_with("modules/badmod.ap"));
         assert_eq!(declared.as_deref(), Some("actually_other"));
         let message = err.to_string();
-        assert!(message.contains("badmod.tjlb"));
+        assert!(message.contains("badmod.ap"));
         assert!(message.contains("declares module `actually_other`"));
     }
 
@@ -500,7 +500,7 @@ mod tests {
         let base_loads = src
             .files
             .iter()
-            .filter(|f| f.ends_with("modules/base.tjlb"))
+            .filter(|f| f.ends_with("modules/base.ap"))
             .count();
         assert_eq!(base_loads, 1, "diamond must load `base` exactly once");
         // Direct edges only: the anonymous root imports left+right, each of

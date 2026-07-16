@@ -1,4 +1,4 @@
-# Replacing LLVM — Backend Options for tjlb
+# Replacing LLVM — Backend Options for aspect
 
 Status: **research / proposal** — not yet decided. Grounded in a line-level read of
 `src/codegen/` and web-verified research on each candidate (June 2026). No code written.
@@ -8,7 +8,7 @@ Status: **research / proposal** — not yet decided. Grounded in a line-level re
 ## 0. The question
 
 LLVM is a superb optimizer and a terrible dependency for a language this size. It
-statically links **~51 MB** into the `tjlb-parser` binary (measured: `strip`ped debug
+statically links **~51 MB** into the `aspc` binary (measured: `strip`ped debug
 build is 51.6 MB; essentially all of it is LLVM 19). For comparison, the Hare compiler —
 the thing that started this — fits on a 1.44 MB floppy precisely because it does *not*
 use LLVM; it uses QBE. Our own front-end (lexer→parser→typechecker, ~6 k lines) gzips to
@@ -16,7 +16,7 @@ use LLVM; it uses QBE. Our own front-end (lexer→parser→typechecker, ~6 k lin
 
 This document surveys what it would actually take to drop LLVM, and recommends a path.
 
-**TL;DR.** The choice comes down to one axis — *who owns the System V ABI* — and tjlb's
+**TL;DR.** The choice comes down to one axis — *who owns the System V ABI* — and aspect's
 existing design quietly settles most of it. Three options are genuinely reasonable:
 
 | Rank | Option | One-line case | Lose the in-process JIT? | Floppy-sized? |
@@ -54,20 +54,20 @@ a new cost for the AOT path — it's the status quo.
 
 ## 2. The real decision axis: who owns the System V ABI
 
-This is the crux, and tjlb's own design notes already answer most of it.
+This is the crux, and aspect's own design notes already answer most of it.
 
 From `doc/plans/Struct-System.md` (locked decision #7) and `TODO.md`:
 
 > **Lowering: uniform by-pointer.** Structs are passed and returned by pointer (returns via
 > an `sret` hidden out-pointer; value params via `byval`)… We do **not** implement the System
-> V / Win64 by-value aggregate ABI now… Tjlb-internal calls control both sides, so the uniform
+> V / Win64 by-value aggregate ABI now… Aspect-internal calls control both sides, so the uniform
 > rule is correct; only `extern` by-value struct params/returns are forbidden until the ABI
 > work lands.
 
 Two consequences fall out of this, and they decide everything:
 
-- **tjlb does not do SysV eightbyte classification today.** It passes *every* struct as a
-  pointer to a stack slot and leans on LLVM's `byval`/`sret` attributes. Because tjlb owns
+- **aspect does not do SysV eightbyte classification today.** It passes *every* struct as a
+  pointer to a stack slot and leans on LLVM's `byval`/`sret` attributes. Because aspect owns
   both caller and callee for its own functions, this self-consistent convention is correct
   without ever classifying a struct into registers.
 - **The hard ABI work (extern by-value structs) is already deferred** — it's a LOW-priority
@@ -78,20 +78,20 @@ So the candidates split cleanly:
 - Backends that **do the C ABI for you** (QBE, a C compiler): near drop-in for what we do
   now, *and* they retire the deferred extern-by-value-struct TODO for free.
 - Backends where **you own the ABI** (Cranelift, MIR, hand-rolled): you'd implement SysV
-  classification yourself — *but* only for extern by-value structs, which tjlb doesn't
-  support anyway. For everything tjlb does today, the uniform-by-pointer convention maps
+  classification yourself — *but* only for extern by-value structs, which aspect doesn't
+  support anyway. For everything aspect does today, the uniform-by-pointer convention maps
   directly (allocate a stack slot, pass its address as a pointer-width param). So this is
-  **far less scary for tjlb specifically** than the generic warning ("Cranelift has no
+  **far less scary for aspect specifically** than the generic warning ("Cranelift has no
   aggregate types!") makes it sound.
 
-Two more tjlb-specific facts that de-risk the whole thing:
+Two more aspect-specific facts that de-risk the whole thing:
 
 - **No variadics.** Every `extern` is fixed-arity (`puts`, `write`, `read`, `malloc`,
-  `free`, `clock`, `realloc`). tjlb deliberately avoids `printf` (the `hello` demo says so
+  `free`, `clock`, `realloc`). aspect deliberately avoids `printf` (the `hello` demo says so
   explicitly). This matters because **Cranelift's single worst wart is varargs** — and it
   simply doesn't touch us.
 - **Scalar-only C boundary.** Because extern-by-value structs are already forbidden, the
-  entire libc surface tjlb uses is ints/pointers — trivially ABI-correct on every backend.
+  entire libc surface aspect uses is ints/pointers — trivially ABI-correct on every backend.
 
 ---
 
@@ -100,7 +100,7 @@ Two more tjlb-specific facts that de-risk the whole thing:
 | Backend | Lang / integration | Does C ABI for you? | In-process JIT? | Optimization | Added size vs 51 MB LLVM | License | Maturity |
 |---------|--------------------|---------------------|-----------------|--------------|--------------------------|---------|----------|
 | **QBE** | C lib; Rust `qbe` crate emits IL text → shell to `qbe`+`cc` | **Yes** (full SysV) | No | Light (≈40–75 % of LLVM `-O2`) | Tiny (~15 k LOC C; binary a few MB total) | MIT | Mature, 1.3 (Jun 2026) |
-| **Cranelift** | Pure Rust crates, no FFI | No (you lower aggregates; trivial for tjlb) | **Yes** (`cranelift-jit`) | `-O0`-class | ~10–15 MB (est., measure) | Apache-2.0 w/ LLVM-exc | Production (Wasmtime, rustc) |
+| **Cranelift** | Pure Rust crates, no FFI | No (you lower aggregates; trivial for aspect) | **Yes** (`cranelift-jit`) | `-O0`-class | ~10–15 MB (est., measure) | Apache-2.0 w/ LLVM-exc | Production (Wasmtime, rustc) |
 | **Transpile-to-C** | Emit C text + `Command` | **Yes** (the C compiler) | No (use `tcc`/libtcc) | Best (host `cc -O2`) | ~0 in binary; needs `cc` at runtime | n/a | Trivial; Nim-proven |
 | MIR | C lib; immature Rust bindings | No (block types, you classify) | Yes | Very good (~90 % gcc -O2) | Tiny (~175 KB) | MIT | Bindings unstable |
 | libtcc | C lib; `libtcc` crate | **Yes** (TCC) | Yes | Poor (single-pass) | ~100 KB | LGPL | Old (0.9.27, 2017) |
@@ -136,7 +136,7 @@ small standalone interpreter); source-level debug info (QBE has no DWARF — Har
 externally); and ~25–60 % of runtime performance vs LLVM `-O2`. Adds a hard runtime
 dependency on an assembler+linker (already true-ish for our AOT path).
 
-**Why it's compelling for tjlb.** It is the literal answer to the question that started
+**Why it's compelling for aspect.** It is the literal answer to the question that started
 this — Hare fits on a floppy *because of QBE*, and so would we. It does the ABI we've been
 deferring. It's the smallest real option. And the rewrite is a clean structural swap, not a
 new discipline.
@@ -154,11 +154,11 @@ riscv64, s390x.
 2. Opt — `-O0`-class (egraph mid-end exists but nothing like LLVM `-O2`). ~10× faster
    *compile* than LLVM.
 3. Object — `cranelift-object` writes native `.o` via the `object` crate; shell out to link.
-4. ABI — **CLIF has no aggregate types; you lower structs yourself.** *For tjlb this is
+4. ABI — **CLIF has no aggregate types; you lower structs yourself.** *For aspect this is
    small:* we already pass structs uniformly by pointer, which maps directly to "alloc a
    `StackSlot`, pass its address as an `i64`." We'd write the SysV classifier only if we
    ever want extern by-value structs — which we don't today. Fixed-arity scalar libc calls
-   map directly. **Varargs would be the pain point, but tjlb has none.**
+   map directly. **Varargs would be the pain point, but aspect has none.**
 5. JIT — **`cranelift-jit` keeps the `interpret` mode alive**, on the *same* codegen path as
    the object backend (both implement the `Module` trait). This is Cranelift's headline
    advantage for us: jobs 3 and 5 share one backend.
@@ -167,10 +167,10 @@ riscv64, s390x.
 Debug info is immature. We don't get to floppy size — Cranelift is a few-MB-of-Rust
 dependency (measure it), a big cut from 51 MB but not tiny.
 
-**Why it's compelling for tjlb.** It's the *least disruptive* option: stays in cargo (no
+**Why it's compelling for aspect.** It's the *least disruptive* option: stays in cargo (no
 FFI, no vendored C, no external assembler at build time), and it keeps both the object and
 JIT paths in one pure-Rust backend. The two reasons people fear Cranelift for a C-like
-language — aggregate ABI lowering and varargs — both miss tjlb's actual feature set.
+language — aggregate ABI lowering and varargs — both miss aspect's actual feature set.
 
 ### 4.3 Transpile-to-C — *the pragmatic path*
 
@@ -187,10 +187,10 @@ gives a near-instant run-it-now for `interpret`.
 
 **What we lose.** A runtime dependency on a C toolchain (mild on x86-64 Linux; real
 nonetheless — it's the opposite direction from the "no-libc/direct-syscalls" TODO).
-Debug info maps to *generated C*, not tjlb source (mitigable with `#line`, as Nim does).
+Debug info maps to *generated C*, not aspect source (mitigable with `#line`, as Nim does).
 The generated C isn't automatically OS-portable.
 
-**Why it's compelling for tjlb.** Least code and least risk of anything here, *best*
+**Why it's compelling for aspect.** Least code and least risk of anything here, *best*
 runtime performance, free correct ABI, and it gets us to "no LLVM" fastest. Excellent as a
 **de-risking first step** or a permanent choice if portability-to-anything matters.
 
@@ -225,10 +225,10 @@ that's worth having anyway.
 **Runner-up: Cranelift** — choose this instead if, on reflection, you value **(a)** keeping
 the in-process JIT and **(b)** staying 100 % pure-Rust/cargo (no external assembler, no
 vendored C, no shelling out) more than you value absolute size. It's the least disruptive
-option, and tjlb's design happens to dodge both of Cranelift's sharp edges (aggregate ABI,
+option, and aspect's design happens to dodge both of Cranelift's sharp edges (aggregate ABI,
 varargs). You give up floppy-size (lands ~10–15 MB) and some runtime perf.
 
-**Wildcard / first step: transpile-to-C.** If you want to *prove out* "tjlb without LLVM"
+**Wildcard / first step: transpile-to-C.** If you want to *prove out* "aspect without LLVM"
 in a weekend before committing, emit C and shell to `cc`. It's the least code, gives the
 best runtime perf, and you can keep it permanently or graduate to QBE/Cranelift later. It
 also makes extern-by-value structs Just Work.

@@ -36,7 +36,7 @@ These were settled in design discussion and are not open for re-litigation durin
 7. **Lowering: uniform by-pointer.** Structs are passed and returned by pointer (returns via an
    `sret` hidden out-pointer; value params via `byval`; `this` via a plain pointer). We do **not**
    implement the System V / Win64 by-value aggregate ABI now — that is a separate future item
-   (see TODO "Struct by-value ABI"). Tjlb-internal calls control both sides, so the uniform rule
+   (see TODO "Struct by-value ABI"). Aspect-internal calls control both sides, so the uniform rule
    is correct; only `extern` by-value struct params/returns are forbidden until the ABI work lands.
 8. **C-compatible layout from day one.** Struct LLVM types are built non-packed under the target
    data layout, which matches the platform C struct layout (natural alignment + tail padding). So
@@ -291,14 +291,14 @@ and guard struct types out of `emit_cast` paths.
   divergent copy); numeric-helper guards for `TypeBase::Struct`. Codegen's function path is unchanged
   (its `function_lang_params` is a borrow-local index, see §1). No struct/alias syntax yet — the
   table holds only functions, so all existing IR/tests stay byte-identical.
-- **M1 — Aliases. ✅ DONE (corpus IR byte-identical; `tests/programs/aliases.tjlb` +
-  `failures/parser_undefined_type.tjlb`).** `Keyword::Alias`; name-collection prescan; `parse_type`
+- **M1 — Aliases. ✅ DONE (corpus IR byte-identical; `tests/programs/aliases.ap` +
+  `failures/parser_undefined_type.ap`).** `Keyword::Alias`; name-collection prescan; `parse_type`
   identifier resolution + `apply_type_modifiers` (pointer `*` on named types); `parse_type_alias`;
   alias table; statement dispatcher recognizes named-type locals (`Parser::starts_named_var_decl`);
   global vars of named type; top-level `alias` branch + `synchronize` resync. Introduced the
   `parse_type` identifier resolution that structs also need.
-- **M2 — POD structs (pointer-based). ✅ DONE (corpus IR byte-identical; `tests/programs/structs.tjlb`,
-  `struct_copy.tjlb` + 3 failure tests + 3 checker unit tests).** `type Name { [public] T field }`;
+- **M2 — POD structs (pointer-based). ✅ DONE (corpus IR byte-identical; `tests/programs/structs.ap`,
+  `struct_copy.ap` + 3 failure tests + 3 checker unit tests).** `type Name { [public] T field }`;
   `ExprKind::FieldAccess`/`StructLiteral`, `StatementKind::FieldAssign`; `Keyword::Public`; the
   `Dot` postfix + struct-literal detection in `parse_primary`; `src/codegen/structs.rs` with the
   registration pass (`opaque_struct_type` + `set_body`), `lang_type_to_llvm`, `struct_field`, and
@@ -307,15 +307,15 @@ and guard struct types out of `emit_cast` paths.
   as first-class aggregates (insertvalue literals, load/store copy). Field access works on struct
   values **and** pointer-to-struct, so structs pass to functions by pointer (`fn f(Point* p)`).
 - **M2b — Struct by-value ABI (sret/byval). ✅ DONE (corpus IR byte-identical;
-  `tests/programs/struct_byvalue.tjlb`, `struct_rvalue_field.tjlb`).** Struct *value* returns lower
+  `tests/programs/struct_byvalue.ap`, `struct_rvalue_field.ap`).** Struct *value* returns lower
   to a hidden `sret(%S)` out-pointer (callee stores through it, returns void; caller allocas a slot,
   passes it, loads the result); struct *value* params lower to `byval(%S)` (caller spills the value
   to a temp and passes its address; callee uses the incoming pointer as the variable's storage).
   Added `function_return_types` + `current_sret` to `CodeGenerator`, a unified `build_abi_call`, and
   rvalue-struct field access (materialise to a temp slot). Per-target by-value *across the C/extern
   boundary* (System V/Win64 register classification) remains the separate future TODO.
-- **M3 — Methods + `this`. ✅ DONE (corpus IR byte-identical; `tests/programs/methods.tjlb`,
-  `method_chain.tjlb`, `failures/type_const_fn_writes.tjlb`).** Methods inside a `type` body
+- **M3 — Methods + `this`. ✅ DONE (corpus IR byte-identical; `tests/programs/methods.ap`,
+  `method_chain.ap`, `failures/type_const_fn_writes.ap`).** Methods inside a `type` body
   desugar to free functions named `Type$method`. An instance method takes a bare `this` receiver
   (no type annotation); the parser supplies it as an implicit `*Struct` first param.
   `const fn` makes the receiver `*const Struct`, and field access propagates that const through
@@ -328,8 +328,8 @@ and guard struct types out of `emit_cast` paths.
   An additional Reference check-mode rule now allows a const-pointer-to-non-const (`const T* p =
   &t`), needed so `&mutable_struct` coerces to a const-fn's `*const Struct` receiver.
 - **M4 — Encapsulation + `const fn` enforcement. ✅ DONE
-  (`tests/programs/encapsulation.tjlb` + `failures/type_private_field_read.tjlb`,
-  `type_private_field_literal.tjlb`).** `TypeCheckError::InaccessibleField` plus
+  (`tests/programs/encapsulation.ap` + `failures/type_private_field_read.ap`,
+  `type_private_field_literal.ap`).** `TypeCheckError::InaccessibleField` plus
   `is_inside_struct_methods(id)` on the checker (matches `current_function` against the mangled
   prefix `"<TypeName>$"`). `resolve_field` and the struct-literal check each enforce visibility.
   Together with the existing "must name every field" rule, this makes a type-struct with any

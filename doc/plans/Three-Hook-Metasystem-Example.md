@@ -3,15 +3,15 @@
 **Status:** Companion to [Three-Hook-Metasystem.md](Three-Hook-Metasystem.md).
 Illustrative — the metasystem is unimplemented, so the hook-*definition* syntax
 below is **proposed** (consolidated from design discussion). The hook-*using* code
-and the "lowers to today" code are real TJLB against the current `String` type
-([demos/std/string/String.tjlb](../../demos/std/string/String.tjlb)).
+and the "lowers to today" code are real Aspect against the current `String` type
+([demos/std/string/String.ap](../../demos/std/string/String.ap)).
 
-Metaprogramming bodies are ordinary TJLB — `if`/`elif`, **C-style** `for (;;)`,
+Metaprogramming bodies are ordinary Aspect — `if`/`elif`, **C-style** `for (;;)`,
 method calls — over compiler-provided **special structs** (`TokenTree`, `Ast`,
 `Expr`, `Stmt`, `Fn`, `Program`, `Judgments`, and concrete list types like
 `SegmentList`). No new control-flow forms.
 
-> **Metalanguage reality (verified).** TJLB today has no `for-in`, no generics, no
+> **Metalanguage reality (verified).** Aspect today has no `for-in`, no generics, no
 > closures, no `match` — only C-style loops and hand-monomorphized collections. So
 > metaprograms iterate index-wise (`list.count()` / `list.at(i)`), and `quote` is
 > **not optional sugar — it is the only thing that makes AST construction bearable.**
@@ -21,7 +21,7 @@ method calls — over compiler-provided **special structs** (`TokenTree`, `Ast`,
 ### Language features this leans on (new / proposed)
 
 - **`quote { ... }` / `$(...)`** *(mandatory)* — an AST builder: `quote` writes
-  surface TJLB that evaluates to an `Ast` node; `$(x)` splices an `Ast` (or type)
+  surface Aspect that evaluates to an `Ast` node; `$(x)` splices an `Ast` (or type)
   into it. Desugars to explicit `Ast.*` constructors. Must **gensym** the
   identifiers it introduces (`__t`, `__v`, …) so they can't capture spliced user
   code (hygiene).
@@ -57,7 +57,7 @@ answers it. Phase order (parent §2): `EXPANSIONS → elaboration → TRANSFORMS
 
 ## What the user writes
 
-```tjlb
+```aspect
 $import std/string      # the String type
 $import std/fmt         # the `interp` expansion + `@debug` transform
 $import std/io          # println
@@ -87,8 +87,8 @@ The programmer sees none of the machinery — that is the point.
 expansions compile ahead of their call sites). It sees only the token tree inside
 its braces — no types, no names, no other items.
 
-```tjlb
-# std/fmt/interp.tjlb
+```aspect
+# std/fmt/interp.ap
 $module std/fmt
 
 expansion interp(raw-tokens) -> expr {
@@ -97,7 +97,7 @@ expansion interp(raw-tokens) -> expr {
     Ast stmts = Ast.stmts()
     stmts = stmts.push(quote { String __t = String.empty() })
     SegmentList segs = body.segments()
-    for (u64 i = 0; i < segs.count(); i += 1 as u64) {     # no for-in in TJLB
+    for (u64 i = 0; i < segs.count(); i += 1 as u64) {     # no for-in in Aspect
         Segment seg = segs.at(i)
         if seg.is_text() {
             stmts = stmts.push(quote { __t.append_cstring($(seg.text_lit())) })
@@ -112,13 +112,13 @@ expansion interp(raw-tokens) -> expr {
 
 **Before:**
 
-```tjlb
+```aspect
 String line = interp { "Hello, {name}! Welcome." }
 ```
 
 **After (the value-block it emits):**
 
-```tjlb
+```aspect
 String line = {
     String __t = String.empty()
     __t.append_cstring("Hello, ")
@@ -155,8 +155,8 @@ Checking `__t.append_cstring(name)` demands `u8*`, finds `String`. Rather than
 erroring, the checker files an obligation keyed `(coerce, String -> u8*)` at that
 site — but only if the current module opted in. One registered handler claims that key.
 
-```tjlb
-# std/string/coerce.tjlb
+```aspect
+# std/string/coerce.ap
 $module std/string
 
 transform String -> u8* {
@@ -170,7 +170,7 @@ transform String -> u8* {
 
 **Before → after (re-checked):**
 
-```tjlb
+```aspect
 __t.append_cstring(name)            # (coerce, String->u8*)
 __t.append_cstring(name.c_str())    # discharged; types agree
 ```
@@ -197,8 +197,8 @@ expression so it reports itself and its value inline. It is not a repair (the co
 typechecks fine), so an attribute obligation **always fires and never diagnoses** at
 quiescence; it is an unconditional rewrite request.
 
-```tjlb
-# std/fmt/debug.tjlb
+```aspect
+# std/fmt/debug.ap
 $module std/fmt
 
 transform @debug(stmt) -> stmt {
@@ -237,10 +237,10 @@ transform @debug(stmt) -> stmt {
 
 **Value site — before/after:**
 
-```tjlb
+```aspect
 @debug i32 sum = add(a, b)
 ```
-```tjlb
+```aspect
 i32 sum = {
     i32 __v = add(a, b)
     __dbg_i32("sum = add(a, b)", 7, __v)     # 7 = this site's id
@@ -250,10 +250,10 @@ i32 sum = {
 
 **Void site — before/after:**
 
-```tjlb
+```aspect
 @debug println(line.c_str())
 ```
-```tjlb
+```aspect
 {
     println(line.c_str())
     __dbg_void("println(line.c_str())", 8)
@@ -289,8 +289,8 @@ both transforms' rewrites (parent §7). Modifies nothing; only judges.
 > **warning**, not a compile error, and is deliberately shallow — see its documented
 > blind spots below.
 
-```tjlb
-# std/string/lints.tjlb
+```aspect
+# std/string/lints.ap
 $module std/string
 
 rule String must_destroy {
@@ -360,7 +360,7 @@ the hooks buy. (Value-blocks are real now, so even the expansion's *output* is
 directly expressible by hand; the manual form below spells it out as plain
 statements only for clarity:)
 
-```tjlb
+```aspect
 fn greet(u8* who) -> i32 {
     String name = String.from_cstring(who)
 
@@ -396,7 +396,7 @@ fn greet(u8* who) -> i32 {
   flow-sensitive analyses the compiler must build. Tier-2 rules warn, they don't gate.
 - **Coercion is governed, not global.** Fires only after built-in coercion fails and
   only where a rule opts in. The single hook worth deferring past v1 if in doubt.
-- **Execution is the real work, not the syntax.** All three hooks run JIT'd TJLB
+- **Execution is the real work, not the syntax.** All three hooks run JIT'd Aspect
   inside the compiler (already possible: `CodeGenerator::generate` + `jit_execute`,
   inkwell/LLVM 19). The gap is the marshalling ABI (AST nodes as opaque handles into
   a compiler arena; `quote`/`Ast.*`/query as Rust `extern` builtins) and a **staged

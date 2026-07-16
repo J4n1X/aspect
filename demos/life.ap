@@ -1,0 +1,178 @@
+#-
+  life.ap — Conway's Game of Life on a wrapping (toroidal) grid.
+
+  The board is a type-struct owning a heap cell buffer; stepping writes
+  into a second board and the two swap buffers each generation — the
+  classic double-buffer, expressed with encapsulated methods. Seeding
+  mixes a deterministic random soup (std/rand at a fixed seed) with an
+  R-pentomino dropped in the middle.
+
+  Run:            aspc interpret -I lib demos/life.ap
+  Animate:        aspc interpret -I lib demos/life.ap -- watch
+                  (any extra argument turns on ANSI animation)
+-#
+
+$import std/io
+$import std/rand
+$import std/c/stdlib    # calloc/free
+$import std/c/stdio     # putchar
+
+extern fn usleep(u32 usec) -> i32
+
+const i64 W = 64
+const i64 H = 24
+
+type Board {
+    u8* cells       # private — W*H bytes, 1 = alive
+    i64 w           # private
+    i64 h           # private
+
+    public fn new(i64 w, i64 h) -> Board {
+        u8* buf = calloc((w * h) as u64, 1)
+        return Board { cells = buf, w = w, h = h }
+    }
+
+    # Wrapping read: coordinates off any edge come back around the torus.
+    const fn at(this, i64 x, i64 y) -> u8 {
+        i64 xx = (x + this.w) % this.w
+        i64 yy = (y + this.h) % this.h
+        return this.cells[yy * this.w + xx]
+    }
+
+    fn set(this, i64 x, i64 y, u8 v) {
+        this.cells[y * this.w + x] = v
+    }
+
+    public const fn population(this) -> i64 {
+        i64 n = 0
+        for (i64 i = 0; i < this.w * this.h; i += 1) {
+            n = n + (this.cells[i] as i64)
+        }
+        return n
+    }
+
+    const fn live_neighbors(this, i64 x, i64 y) -> i64 {
+        i64 n = 0
+        for (i64 dy = 0 - 1; dy <= 1; dy += 1) {
+            for (i64 dx = 0 - 1; dx <= 1; dx += 1) {
+                if dx != 0 || dy != 0 {
+                    n = n + (this.at(x + dx, y + dy) as i64)
+                }
+            }
+        }
+        return n
+    }
+
+    # One generation: B3/S23, written into `next` (same dimensions).
+    public const fn step_into(this, Board* next) {
+        for (i64 y = 0; y < this.h; y += 1) {
+            for (i64 x = 0; x < this.w; x += 1) {
+                i64 n = this.live_neighbors(x, y)
+                u8 alive = this.at(x, y)
+                u8 out = 0
+                if alive == 1 && (n == 2 || n == 3) { out = 1 }
+                if alive == 0 && n == 3 { out = 1 }
+                next.set(x, y, out)
+            }
+        }
+    }
+
+    # Exchange cell buffers with `other` — O(1), no copying.
+    public fn swap_with(this, Board* other) {
+        u8* tmp = this.cells
+        this.cells = other.cells
+        other.cells = tmp
+    }
+
+    public const fn render(this) {
+        for (i64 y = 0; y < this.h; y += 1) {
+            for (i64 x = 0; x < this.w; x += 1) {
+                if this.at(x, y) == 1 {
+                    putchar(35)              # '#'
+                } else {
+                    putchar(46)              # '.'
+                }
+            }
+            putchar(10)
+        }
+    }
+
+    # ~18% random soup away from the centre, R-pentomino in the middle.
+    public fn seed(this, u64 rng_seed) {
+        Rng rng = Rng.seeded(rng_seed)
+        for (i64 y = 0; y < this.h; y += 1) {
+            for (i64 x = 0; x < this.w; x += 1) {
+                i64 cx = x - this.w / 2
+                i64 cy = y - this.h / 2
+                # keep a calm 16x10 window around the centre
+                bool centre = cx > 0 - 8 && cx < 8 && cy > 0 - 5 && cy < 5
+                if !centre && rng.chance(18) {
+                    this.set(x, y, 1)
+                }
+            }
+        }
+        # R-pentomino:  .##
+        #               ##.
+        #               .#.
+        i64 mx = this.w / 2
+        i64 my = this.h / 2
+        this.set(mx, my - 1, 1)
+        this.set(mx + 1, my - 1, 1)
+        this.set(mx - 1, my, 1)
+        this.set(mx, my, 1)
+        this.set(mx, my + 1, 1)
+    }
+
+    public fn destroy(this) {
+        free(this.cells)
+        this.cells = null
+    }
+}
+
+# ANSI: clear screen, cursor home. Escape bytes emitted directly since
+# string literals have no \e escape.
+fn clear_screen() {
+    putchar(27) print("[2J")
+    putchar(27) print("[H")
+}
+
+fn show_generation(Board* b, i64 gen) {
+    print("generation ")
+    print_i64(gen)
+    print("   population ")
+    println_i64(b.population())
+    b.render()
+}
+
+fn main(u32 argc, u8** argv) -> i32 {
+    bool animate = argc > 1
+
+    Board cur = Board.new(W, H)
+    Board next = Board.new(W, H)
+    cur.seed(20260713)
+
+    if animate {
+        for (i64 gen = 0; gen <= 200; gen += 1) {
+            clear_screen()
+            show_generation(&cur, gen)
+            usleep(50000)
+            cur.step_into(&next)
+            cur.swap_with(&next)
+        }
+    } else {
+        # Three snapshots: the soup, mid-boil, and the settling field.
+        for (i64 gen = 0; gen <= 60; gen += 1) {
+            if gen == 0 || gen == 30 || gen == 60 {
+                show_generation(&cur, gen)
+                println("")
+            }
+            cur.step_into(&next)
+            cur.swap_with(&next)
+        }
+    }
+
+    i64 final_pop = cur.population()
+    cur.destroy()
+    next.destroy()
+    return (final_pop % 251) as i32
+}

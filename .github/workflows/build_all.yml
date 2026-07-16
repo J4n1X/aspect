@@ -12,10 +12,10 @@ jobs:
         include:
           - os: ubuntu-latest
             llvm_prefix: /usr/lib/llvm-19
-            artifact: target/release/tjlc
+            artifact: target/release/aspc
           - os: windows-latest
             llvm_prefix: C:\Program Files\LLVM
-            artifact: target/release/tjlc.exe
+            artifact: target/release/aspc.exe
 
     runs-on: ${{ matrix.os }}
 
@@ -58,20 +58,6 @@ jobs:
           key: ${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - run: cargo build --release
-
-      # One step, bash on both platforms (Git Bash ships on the Windows runner).
-      # Avoids the Windows-shell trap where the default `run:` shell is
-      # PowerShell, in which `move` is an alias for `Move-Item` and `/Y` is not
-      # a valid parameter — so the previous Windows step silently failed when
-      # the destination existed (from cargo's `target/` cache).
-      - name: Rename artifact for upload
-        shell: bash
-        run: |
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            mv -f target/release/tjlb-parser.exe target/release/tjlc.exe
-          else
-            mv -f target/release/tjlb-parser target/release/tjlc
-          fi
 
       - uses: actions/upload-artifact@v7
         with:

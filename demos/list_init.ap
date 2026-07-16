@@ -1,0 +1,74 @@
+# expected: 0
+#-
+  list_init.ap -- regression test for list initializers.
+  Verifies full / empty / partial / expression initializers all behave
+  as documented (uninitialised slots zero-fill). Returns 0 on success,
+  1 on any check failure.
+-#
+
+extern fn puts(u8 *msg) -> u0
+extern fn write(i32 fd, u8 *buf, u64 len) -> i64
+
+fn strlen(u8 *s) -> u64 {
+    u64 n = 0
+    while s[n] != 0 {
+        n += 1
+    }
+    return n
+}
+
+fn println(u8 *s) -> u0 {
+    u8[2] nl
+    nl[0] = 10
+    nl[1] = 0
+    write(1, s, strlen(s))
+    write(1, nl, 1 as u64)
+}
+
+fn sum_i32(i32 *arr, i32 len) -> i32 {
+    i32 total = 0
+    i32 i = 0
+    while i < len {
+        total += arr[i]
+        i += 1
+    }
+    return total
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    puts("=== List Initializer Demo ===")
+
+    # Full initializer: {10, 20, 30, 40, 50}, sum = 150
+    i32[5] full = {10, 20, 30, 40, 50}
+    i32 full_sum = sum_i32(full, 5)
+
+    # Empty initializer: all five slots must be zero, sum = 0
+    i32[5] empty = {}
+    i32 empty_sum = sum_i32(empty, 5)
+
+    # Partial initializer: {7, 8}, remaining three slots zero, sum = 15
+    i32[5] partial = {7, 8}
+    i32 partial_sum = sum_i32(partial, 5)
+
+    # u8 null-terminated string via full init
+    u8[6] hello = {72, 101, 108, 108, 111, 0}
+    puts(hello)
+
+    # Expression elements
+    i32 x = 3
+    i32[3] derived = {x * 2, x + 10, x * x}
+    i32 d_sum = sum_i32(derived, 3)
+
+    puts("All list initializer checks passed.")
+
+    if full_sum == 150 {
+        if empty_sum == 0 {
+            if partial_sum == 15 {
+                if d_sum == 28 {
+                    return 0
+                }
+            }
+        }
+    }
+    return 1
+}

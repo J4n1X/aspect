@@ -3,14 +3,14 @@ use clap::{Args, Parser as ClapParser, Subcommand, ValueEnum};
 use inkwell::context::Context as LLVMContext;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
-use tjlb_rust::codegen::CodeGenerator;
-use tjlb_rust::preprocessor::{PreprocessedSource, Preprocessor};
-use tjlb_rust::parser::{Parser, Program};
-use tjlb_rust::typechecker::TypeChecker;
+use aspect::codegen::CodeGenerator;
+use aspect::preprocessor::{PreprocessedSource, Preprocessor};
+use aspect::parser::{Parser, Program};
+use aspect::typechecker::TypeChecker;
 
 #[derive(ClapParser)]
-#[command(name = "tjlb-parser")]
-#[command(about = "Parser for the TJLB programming language", long_about = None)]
+#[command(name = "aspc")]
+#[command(about = "Compiler for the Aspect programming language", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

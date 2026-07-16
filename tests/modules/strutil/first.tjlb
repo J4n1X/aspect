@@ -1,7 +1,0 @@
-# Module fixture (directory form): `$import strutil` loads every .tjlb
-# directly inside `<root>/strutil/`, in sorted order — this file first.
-$module strutil
-
-fn su_first() -> i32 {
-    return 10
-}

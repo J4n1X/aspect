@@ -47,7 +47,7 @@ checker.check_program(&mut program) -> Result<(), Vec<TypeCheckError>>
 
 // Format an error with source-file prefix
 checker.format_error(&error) -> String
-// Output: "path/to/file.tjlb:12:5: error: ..."
+// Output: "path/to/file.ap:12:5: error: ..."
 ```
 
 ## Checking Phases
@@ -163,7 +163,7 @@ This means `u8 x = 255` is valid but `u8 x = 256` is a type error at compile tim
 Errors include position information. The `format_error()` method prepends the source file path:
 
 ```
-src/main.tjlb:12:5: Type mismatch: expected 'u8' but found 'i32' at 12:5
+src/main.ap:12:5: Type mismatch: expected 'u8' but found 'i32' at 12:5
 ```
 
 The `TypeCheckError::position()` method returns the `Option<Position>` for each variant

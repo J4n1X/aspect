@@ -1,11 +1,11 @@
 # Architecture Overview
 
-TJLB is a statically-typed, low-level programming language compiler written in Rust. It compiles a C-like language to LLVM IR via the [Inkwell](https://github.com/TheDan64/inkwell) safe Rust bindings. The binary is named `tjlb-parser` (historical name) and the library crate is `tjlb_rust`.
+Aspect is a statically-typed, low-level programming language compiler written in Rust. It compiles a C-like language to LLVM IR via the [Inkwell](https://github.com/TheDan64/inkwell) safe Rust bindings. The binary is named `aspc` and the library crate is `aspect`.
 
 ## Project Structure
 
 ```
-tjlb-rust/
+aspect/
 ├── src/
 │   ├── main.rs              # CLI entry point (clap-derived)
 │   ├── lib.rs               # Library root — re-exports all modules
@@ -37,7 +37,7 @@ tjlb-rust/
 │       └── errors.rs        # Codegen error types
 ├── tests/
 │   ├── integration_tests.rs # Integration test suite
-│   ├── programs/            # .tjlb test programs
+│   ├── programs/            # .ap test programs
 │   └── modules/             # module fixtures imported by test programs
 ├── lib/                     # The standard library (lib/std/**), pass -I lib
 ├── doc/                     # This documentation
@@ -50,7 +50,7 @@ tjlb-rust/
 The compiler runs a 6-stage pipeline:
 
 ```
-Source (.tjlb)
+Source (.ap)
     │
     ▼
 ┌──────────┐  Vec<Token>  ┌──────────────┐  expanded Vec<Token>
@@ -172,7 +172,7 @@ cargo run -- compile <FILE> [-e ir|obj|exe] [-o OUTPUT] [--print] [-O LEVEL]
 cargo run -- interpret <FILE> [-O LEVEL] [-- ARGS...]
 
 # Compile to native executable
-./compile-file.sh program.tjlb   # produces program.out
+./compile-file.sh program.ap   # produces program.out
 ```
 
 Every subcommand also takes the preprocessor flags `-D NAME[=VALUE]`
@@ -180,7 +180,7 @@ Every subcommand also takes the preprocessor flags `-D NAME[=VALUE]`
 repeatable). Programs that `$import std/...` need `-I lib`:
 
 ```bash
-cargo run -- interpret -I lib demos/hello.tjlb
+cargo run -- interpret -I lib demos/hello.ap
 ```
 
 ## Library Exports

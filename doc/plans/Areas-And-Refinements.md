@@ -1,10 +1,10 @@
-# Areas and Refinements — tjlb's Identity
+# Areas and Refinements — aspect's Identity
 
 Status: **design accepted, not yet implemented**. Locked decisions: B + A
 (see [§ Locked decisions](#locked-decisions)). Implementation is sequenced
 as **Areas first, then Refinements**.
 
-This document captures the design commitments that move tjlb out of the
+This document captures the design commitments that move aspect out of the
 "C with classes" orbit and into its own niche. It is the canonical
 reference for both features and the migration that follows them.
 
@@ -12,12 +12,12 @@ reference for both features and the migration that follows them.
 
 ## The pitch
 
-> *tjlb: a small systems language where memory has **scopes** and values
+> *aspect: a small systems language where memory has **scopes** and values
 > have **shapes**.*
 
 Two distinct ideas, both committed simultaneously as the language's
 identity. Neither is novel on its own; the combination is what
-distinguishes tjlb from the saturated modern-C-replacement family
+distinguishes aspect from the saturated modern-C-replacement family
 (Zig / Odin / Hare / Jai / unsafe-Rust).
 
 - **Areas** — memory has named scopes. Every allocation belongs to an
@@ -32,7 +32,7 @@ distinguishes tjlb from the saturated modern-C-replacement family
   that aborts on violation.
 
 Naming: we used to call the memory feature "arenas" but settled on
-**area** because *arena* connotes bump-allocator semantics. Tjlb's
+**area** because *arena* connotes bump-allocator semantics. Aspect's
 runtime gets to choose the implementation — bump allocator is the
 likely default, but the language commitment is to *scoping*, not
 allocation strategy.
@@ -54,7 +54,7 @@ relitigation** during implementation. Push back here, not in PRs.
    ranges and bounds (`>0`, `>=lo`, `<=hi`, `nonnull`). Compositions
    propagate by interval arithmetic. No general boolean predicates, no
    inter-parameter relations. SMT/Z3-based refinements are explicitly
-   out of scope for tjlb.
+   out of scope for aspect.
 
 3. **Default area: `heap`.** A process-wide area backed by malloc/free
    exists implicitly. Stdlib types accept an `area` parameter; passing
@@ -148,7 +148,7 @@ chunk-list bookkeeping. Allocations in `heap` persist until explicit
 
 Every heap-owning type in `demos/std/` becomes area-parameterised:
 
-```tjlb
+```aspect
 # Today:
 String s = String.from_cstring("hello")
 # ...
@@ -251,7 +251,7 @@ boundaries. So:
 
 ### Stdlib usage
 
-```tjlb
+```aspect
 fn divide(i32 a, i32 {!=0} b) -> i32 { return a / b }
 
 fn VecI32.at(this, u64 {< this.length} i) -> i32 {
@@ -334,7 +334,7 @@ Rough size: 1-2 weeks, ~700 lines.
 
 ## What this commits us to
 
-After both phases land, tjlb has:
+After both phases land, aspect has:
 
 - Scoped memory with compile-time leak/dangling protection — no
   borrow checker, no GC, no manual `destroy()`.
@@ -379,6 +379,6 @@ doc, not an extension of this one.
 - Liquid Haskell / SPARK Ada: refinement-types reference
   implementations. We're committing to a strict subset (intervals
   only).
-- Zig's allocator pattern: closest mainstream cousin to areas. Tjlb
+- Zig's allocator pattern: closest mainstream cousin to areas. Aspect
   goes further by making lifetimes part of type-checking, not just
   runtime convention.

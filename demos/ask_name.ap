@@ -1,0 +1,56 @@
+#-
+  Asks the user for their name and greets them.
+  Demonstrates: extern functions, pointer arithmetic,
+  arrays, string manipulation, loops, and I/O.
+
+  Intentionally NOT auto-tested — `read()` blocks on stdin and the JIT
+  test harness has no terminal attached. Run manually:
+    aspc interpret demos/ask_name.ap
+-#
+
+extern fn puts(u8 *str) -> u0
+extern fn read(i32 fd, u8 *buf, u64 len) -> i64
+
+fn strlen(u8 *str) -> i32 {
+    i32 len = 0
+    while str[len] != 0 as u8 {
+        len += 1
+    }
+    return len
+}
+
+fn strcpy(u8 *dst, u8 *src) -> u8 * {
+    u8 *start = dst
+    while *src != 0 as u8 {
+        *dst = *src
+        dst += 1
+        src += 1
+    }
+    *dst = 0 as u8
+    return start
+}
+
+fn strcat(u8 *dst, u8 *src) -> u8 * {
+    while *dst != 0 as u8 {
+        dst += 1
+    }
+    strcpy(dst, src)
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    u8[256] input
+    u8[512] output
+
+    puts("What is your name?")
+
+    i64 n = read(0, input, 255 as u64)
+    if n > 0 && input[n - 1] == 10 as u8 {
+        input[n - 1] = 0 as u8
+    }
+
+    strcpy(output, "Hello, ")
+    strcat(output, input)
+    puts(output)
+
+    return 0
+}

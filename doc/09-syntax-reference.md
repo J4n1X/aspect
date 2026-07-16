@@ -1,6 +1,6 @@
-# TJLB Syntax Reference
+# Aspect Syntax Reference
 
-Formal grammar and lexical specification for the TJLB language.
+Formal grammar and lexical specification for the Aspect language.
 
 ---
 
@@ -166,7 +166,7 @@ data really is bytes.
 
 Type modifier examples:
 
-```tjlb
+```aspect
 i32 value              # signed 32-bit integer
 const i32 CONSTANT     # constant signed 32-bit integer
 i32 *ptr               # pointer to i32
@@ -260,7 +260,7 @@ The directive families:
 
 ### Defines
 
-```tjlb
+```aspect
 $define DEBUG                      # flag define (no value)
 $define MAX_SIZE 1024              # value = rest-of-line token sequence
 $define GREETING "hello"           # any tokens, string literals included
@@ -280,7 +280,7 @@ $undefine DEBUG                    # removes; no-op if not defined
   as prior defines, so a file-level `$define` of a `-D`-injected name is
   the same error. Files that want overridable defaults write the guard:
 
-  ```tjlb
+  ```aspect
   $ifndef MAX_SIZE
   $define MAX_SIZE 1024
   $endif
@@ -294,14 +294,14 @@ $undefine DEBUG                    # removes; no-op if not defined
 |---|---|
 | `OS_LINUX` / `OS_WINDOWS` / `OS_MACOS` | target OS |
 | `ARCH_X86_64` / `ARCH_AARCH64` | target arch |
-| `TJLB_VERSION_MAJOR` / `TJLB_VERSION_MINOR` | compiler version, integer tokens |
+| `ASPECT_VERSION_MAJOR` / `ASPECT_VERSION_MINOR` | compiler version, integer tokens |
 
 **CLI:** `-D NAME` and `-D NAME=VALUE` (repeatable) inject defines before
 the entry file is processed — the standard build-system hook.
 
 ### Conditionals
 
-```tjlb
+```aspect
 $ifdef OS_LINUX
     extern fn epoll_create1(i32 flags) -> i32
 $elseifdef OS_MACOS
@@ -433,7 +433,7 @@ field (no partial init / defaulting). Read or write a field with `base.field`; t
 base may be a struct value or a single-level pointer-to-struct (which auto-derefs).
 Structs may be passed by pointer (`fn f(Point* p)`) **or by value** (`fn f(Point p)`):
 by-value parameters use `byval` and by-value returns use a hidden `sret` out-pointer.
-(By-value structs across the `extern`/C boundary await per-target ABI work; tjlb-to-tjlb
+(By-value structs across the `extern`/C boundary await per-target ABI work; aspect-to-aspect
 calls work today.)
 
 ```
@@ -587,7 +587,7 @@ arg-list ::= /* empty */ | expr (',' expr)*
 **Value blocks.** A `{ ... }` in *expression* position whose statements produce the
 expression's value via `return`:
 
-```tjlb
+```aspect
 i32 clamped = {
     if x > 100 {
         return 100
@@ -791,7 +791,7 @@ This is separate from the preallocated-array declaration `u8[1024] buf`
 
 ### Hello World
 
-```tjlb
+```aspect
 extern fn puts(u8 *str) -> u0
 
 fn main(u32 argc, u8 **argv) -> i32 {
@@ -803,7 +803,7 @@ fn main(u32 argc, u8 **argv) -> i32 {
 
 ### Fibonacci
 
-```tjlb
+```aspect
 fn fib(i32 n) -> i32 {
     if n <= 1 {
         return n
@@ -818,7 +818,7 @@ fn main(u32 argc, u8 **argv) -> i32 {
 
 ### String Length
 
-```tjlb
+```aspect
 fn strlen(u8 *str) -> i32 {
     i32 counter = 0
     while str[counter] != 0 as u8 {
@@ -830,7 +830,7 @@ fn strlen(u8 *str) -> i32 {
 
 ### Memory Operations
 
-```tjlb
+```aspect
 fn memset(u8 *dst, u64 len, u8 c) -> u0 {
     for (u64 i = 0; i < len; i += 1 as u64) {
         dst[i] = c
@@ -846,7 +846,7 @@ fn main(u32 argc, u8 **argv) -> i32 {
 
 ### Command-Line Arguments
 
-```tjlb
+```aspect
 extern fn puts(u8 *str) -> u0
 
 fn main(u32 argc, u8 **argv) -> i32 {
@@ -860,7 +860,7 @@ fn main(u32 argc, u8 **argv) -> i32 {
 
 ### Bitwise Operations
 
-```tjlb
+```aspect
 fn main(u32 argc, u8 **argv) -> i32 {
     i32 a = 12    # Binary: 1100
     i32 b = 10    # Binary: 1010
@@ -875,6 +875,6 @@ fn main(u32 argc, u8 **argv) -> i32 {
 
 ---
 
-*Generated from the TJLB compiler source. Grammar rules are derived from
+*Generated from the Aspect compiler source. Grammar rules are derived from
 `src/parser/expressions.rs`, `src/parser/statements.rs`, and
-`tjlb-macros/src/expand.rs`.*
+`aspect-macros/src/expand.rs`.*

@@ -1,0 +1,63 @@
+# expected: 149
+#-
+  struct_arrays.ap — regression test for lowering type-structs through
+  pointer arithmetic, subscripts, and array allocas.
+
+  These paths used to fail codegen with "struct#N value must be lowered
+  via lang_type_to_llvm": the pointer-arithmetic GEP, the dereference
+  load, and the array alloca all lowered types through the context-only
+  `LangTypeExt::to_llvm`, which cannot resolve type-structs against the
+  generator's named-struct cache.
+
+  Covers:
+    * `Pair* + i` pointer arithmetic (GEP scaled by struct size)
+    * struct-literal store through a subscript: `pairs[i] = Pair {...}`
+    * field read/write through a subscript: `pairs[i].a`
+    * whole-struct load through a subscript: `Pair copy = pairs[i]`
+    * stack arrays of structs: `Pair[2] sp` (+ global struct array type)
+-#
+
+extern fn malloc(u64 size) -> u8*
+extern fn free(u8* p) -> u0
+
+type Pair {
+    public i64 a
+    public i64 b
+}
+
+fn main(u32 argc, u8** argv) -> i32 {
+    # ── heap array of structs ────────────────────────────────────────────
+    Pair* pairs = malloc(3 * sizeof(Pair))
+    pairs[0] = Pair { a = 1, b = 2 }
+    pairs[1] = Pair { a = 3, b = 4 }
+    pairs[2] = Pair { a = 5, b = 6 }
+
+    # pointer arithmetic must scale by sizeof(Pair)
+    Pair* p2 = pairs + 2
+    p2.b = 60
+
+    # whole-struct load through a subscript
+    Pair copy = pairs[0]
+
+    # field access through a subscript, in a loop
+    i64 total = 0
+    for (u64 i = 0; i < 3; i += 1) {
+        total = total + pairs[i].a          # 1 + 3 + 5 = 9
+    }
+    total = total + pairs[2].b              # + 60 = 69
+    total = total + copy.b                  # + 2  = 71
+    free(pairs)
+
+    # ── stack array of structs ───────────────────────────────────────────
+    Pair[2] sp
+    sp[0] = Pair { a = 7, b = 8 }
+    sp[1] = Pair { a = 9, b = 10 }
+    sp[0].a = 70
+    total = total + sp[0].a + sp[1].a       # + 79 = 150
+    total = total - (sp[0].b - sp[1].b + 2) # - (8 - 10 + 2) = 150 - 0
+    if sp[1].b != 10 {
+        return 0
+    }
+
+    return (total - 1) as i32               # 149
+}

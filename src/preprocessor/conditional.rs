@@ -1013,7 +1013,7 @@ mod tests {
 
     #[test]
     fn platform_defines_reach_if_expressions() {
-        // TJLB_VERSION_MAJOR is a builtin integer define.
-        assert_eq!(ints("$if TJLB_VERSION_MAJOR >= 0\n1\n$endif\n"), vec![1]);
+        // ASPECT_VERSION_MAJOR is a builtin integer define.
+        assert_eq!(ints("$if ASPECT_VERSION_MAJOR >= 0\n1\n$endif\n"), vec![1]);
     }
 }

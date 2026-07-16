@@ -1,7 +1,7 @@
-//! TJLB Language Parser
+//! Aspect Language Compiler
 //!
-//! A parser for the TJLB programming language, a C-like language with specific
-//! syntax rules and constraints.
+//! A compiler for the Aspect programming language, a C-like language with
+//! specific syntax rules and constraints.
 
 pub mod codegen;
 pub mod lexer;

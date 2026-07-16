@@ -1,0 +1,7 @@
+# Second half of the import cycle (see cyc_a.ap).
+$module cyc_b
+$import cyc_a
+
+fn cyc_b_value() -> i32 {
+    return 2
+}

@@ -9,7 +9,7 @@ use crate::parser::{
 use crate::symbol::module::{ModuleSymbols, Visibility};
 use std::collections::HashMap;
 
-/// Single-pass type checker for the TJLB language.
+/// Single-pass type checker for the Aspect language.
 ///
 /// Walks the AST once and emits errors directly into `self.errors`.
 /// No constraint-collection phase — errors are reported immediately upon discovery.

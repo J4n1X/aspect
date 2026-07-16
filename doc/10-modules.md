@@ -1,6 +1,6 @@
 # Modules
 
-TJLB's module system is the language's load unit and visibility boundary.
+Aspect's module system is the language's load unit and visibility boundary.
 Two directives carry it (see [09-syntax-reference.md](09-syntax-reference.md)
 § Preprocessor for the general directive rules):
 
@@ -10,15 +10,15 @@ Two directives carry it (see [09-syntax-reference.md](09-syntax-reference.md)
 Both live in the preprocessor (`src/preprocessor/modules.rs`); the
 visibility rule is enforced later, at parse-time symbol resolution.
 
-```tjlb
-# in lib/std/io/print.tjlb:
+```aspect
+# in lib/std/io/print.ap:
 $module std/io
 $import std/c/stdio
 
 fn println(u8* s) -> i32 { return puts(s) }
 ```
 
-```tjlb
+```aspect
 # in an application file:
 $import std/io
 
@@ -30,7 +30,7 @@ fn main(u32 argc, u8** argv) -> i32 {
 Compile with the search root that holds the library:
 
 ```bash
-cargo run -- interpret app.tjlb -I lib
+cargo run -- interpret app.ap -I lib
 ```
 
 ## Path grammar
@@ -59,8 +59,8 @@ segment     ::= identifier
 
 Per `-I` root, in flag order, `$import std/io` looks for:
 
-- **file form:** `<root>/std/io.tjlb`, or
-- **directory form:** every `.tjlb` file directly inside `<root>/std/io/`
+- **file form:** `<root>/std/io.ap`, or
+- **directory form:** every `.ap` file directly inside `<root>/std/io/`
   (non-recursive).
 
 The first root that yields either form wins; a root offering *both* forms
@@ -125,17 +125,17 @@ Both resolution forms are exercised:
 
 | Import | Form | Files | Its own imports |
 |---|---|---|---|
-| `std/c/stdio` | file | `lib/std/c/stdio.tjlb` | — |
-| `std/c/stdlib` | file | `lib/std/c/stdlib.tjlb` | — |
-| `std/c/string` | file | `lib/std/c/string.tjlb` | — |
-| `std/io` | directory | `lib/std/io/print.tjlb` | `std/c/stdio` |
-| `std/math` | file | `lib/std/math.tjlb` | — |
-| `std/mem` | directory | `lib/std/mem/alloc.tjlb` | `std/c/stdlib` |
-| `std/rand` | file | `lib/std/rand.tjlb` | — |
-| `std/sort` | file | `lib/std/sort.tjlb` | `std/c/string` |
-| `std/string` | directory | `lib/std/string/String.tjlb` | `std/c/stdlib`, `std/c/string` |
-| `std/vec` | directory | `lib/std/vec/vec_i32.tjlb` | `std/c/stdlib` |
-| `std/collections` | directory | `lib/std/collections/map_str_i64.tjlb` | `std/c/stdlib`, `std/c/string` |
+| `std/c/stdio` | file | `lib/std/c/stdio.ap` | — |
+| `std/c/stdlib` | file | `lib/std/c/stdlib.ap` | — |
+| `std/c/string` | file | `lib/std/c/string.ap` | — |
+| `std/io` | directory | `lib/std/io/print.ap` | `std/c/stdio` |
+| `std/math` | file | `lib/std/math.ap` | — |
+| `std/mem` | directory | `lib/std/mem/alloc.ap` | `std/c/stdlib` |
+| `std/rand` | file | `lib/std/rand.ap` | — |
+| `std/sort` | file | `lib/std/sort.ap` | `std/c/string` |
+| `std/string` | directory | `lib/std/string/String.ap` | `std/c/stdlib`, `std/c/string` |
+| `std/vec` | directory | `lib/std/vec/vec_i32.ap` | `std/c/stdlib` |
+| `std/collections` | directory | `lib/std/collections/map_str_i64.ap` | `std/c/stdlib`, `std/c/string` |
 
 Note the consequence of enforced non-transitivity: `$import std/sort`
 gives you `sort_bytes` and `sort_cstr`, but **not** `strcmp` — if your

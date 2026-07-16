@@ -1,0 +1,8 @@
+# The other half of `pair`: declares no imports of its own, but uses
+# `hidden` symbols — legal because a module's imports are shared by all of
+# its files (see ./importer.ap).
+$module pair
+
+fn pair_value() -> i32 {
+    return pair_base() + hidden_value() + hidden_global
+}

@@ -1,7 +1,7 @@
 use crate::lexer::{Keyword, Position, TokenKind};
 use crate::parser::expressions::Parser;
 use crate::parser::{ExprKind, Expression, ParserError, Statement, StatementKind};
-use tjlb_macros::parse_rule;
+use aspect_macros::parse_rule;
 
 type StatementPred = fn(&Parser) -> bool;
 type StatementHandler = fn(&mut Parser) -> Result<Statement, ParserError>;

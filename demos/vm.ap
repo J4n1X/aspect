@@ -1,0 +1,263 @@
+#-
+  vm.ap — a stack-based bytecode virtual machine.
+
+  The instruction set is dispatched through an array of function
+  pointers indexed by opcode — `ops[opcode](vm)` — the same shape real
+  interpreters use before they graduate to computed goto. Each opcode
+  handler is a plain function taking the machine state by pointer.
+
+  Machine model:
+    * operand stack of i64 (push/pop)
+    * 8 local variable slots
+    * bytecode = flat i64 array, operands inlined after their opcode
+    * absolute jump targets
+
+  Two programs run below, on the same machine:
+    1. factorial(12)     — a STORE/LOAD/JZ/JMP countdown loop
+    2. sum 1..=1000      — same loop skeleton, ADD instead of MUL
+
+  Run:   aspc interpret -I lib demos/vm.ap
+-#
+
+$import std/io
+$import std/c/stdlib
+
+# ── instruction set ──────────────────────────────────────────────────────
+
+const i64 OP_HALT  = 0      #                stop the machine
+const i64 OP_PUSH  = 1      # PUSH  <imm>    push constant
+const i64 OP_ADD   = 2      #                pop b, pop a, push a+b
+const i64 OP_SUB   = 3      #                pop b, pop a, push a-b
+const i64 OP_MUL   = 4      #                pop b, pop a, push a*b
+const i64 OP_LOAD  = 5      # LOAD  <slot>   push locals[slot]
+const i64 OP_STORE = 6      # STORE <slot>   locals[slot] = pop
+const i64 OP_JMP   = 7      # JMP   <addr>   pc = addr
+const i64 OP_JZ    = 8      # JZ    <addr>   pc = addr if pop == 0
+const i64 OP_PRINT = 9      #                print top of stack (peek)
+const i64 OP_COUNT = 10
+
+const u64 STACK_CAP = 256
+const u64 LOCAL_SLOTS = 8
+
+# ── machine state ────────────────────────────────────────────────────────
+# Fields are public: the opcode handlers are free functions (a function
+# pointer can only name a free function), so they need direct access.
+
+type VM {
+    public i64* code
+    public u64 code_len
+    public u64 pc
+    public i64* stack
+    public u64 sp
+    public i64* locals
+    public bool halted
+    public bool trap        # set on stack over/underflow or bad fetch
+}
+
+fn vm_boot(i64* code, u64 code_len) -> VM {
+    return VM {
+        code = code,
+        code_len = code_len,
+        pc = 0,
+        stack = malloc(STACK_CAP * sizeof(i64)),
+        sp = 0,
+        locals = calloc(LOCAL_SLOTS, sizeof(i64)),
+        halted = false,
+        trap = false
+    }
+}
+
+fn vm_free(VM* vm) {
+    free(vm.stack)
+    free(vm.locals)
+}
+
+# ── stack and fetch primitives (used by every handler) ───────────────────
+
+fn vpush(VM* vm, i64 v) {
+    if vm.sp >= STACK_CAP {
+        vm.trap = true
+        return
+    }
+    vm.stack[vm.sp] = v
+    vm.sp = vm.sp + 1
+}
+
+fn vpop(VM* vm) -> i64 {
+    if vm.sp == 0 {
+        vm.trap = true
+        return 0
+    }
+    vm.sp = vm.sp - 1
+    return vm.stack[vm.sp]
+}
+
+# Fetch the operand following the current opcode.
+fn fetch(VM* vm) -> i64 {
+    if vm.pc >= vm.code_len {
+        vm.trap = true
+        return 0
+    }
+    i64 v = vm.code[vm.pc]
+    vm.pc = vm.pc + 1
+    return v
+}
+
+# ── opcode handlers, one per instruction ─────────────────────────────────
+
+fn op_halt(VM* vm) {
+    vm.halted = true
+}
+
+fn op_push(VM* vm) {
+    vpush(vm, fetch(vm))
+}
+
+fn op_add(VM* vm) {
+    i64 b = vpop(vm)
+    vpush(vm, vpop(vm) + b)
+}
+
+fn op_sub(VM* vm) {
+    i64 b = vpop(vm)
+    vpush(vm, vpop(vm) - b)
+}
+
+fn op_mul(VM* vm) {
+    i64 b = vpop(vm)
+    vpush(vm, vpop(vm) * b)
+}
+
+fn op_load(VM* vm) {
+    i64 slot = fetch(vm)
+    if slot < 0 || slot >= LOCAL_SLOTS as i64 {
+        vm.trap = true
+        return
+    }
+    vpush(vm, vm.locals[slot])
+}
+
+fn op_store(VM* vm) {
+    i64 slot = fetch(vm)
+    if slot < 0 || slot >= LOCAL_SLOTS as i64 {
+        vm.trap = true
+        return
+    }
+    vm.locals[slot] = vpop(vm)
+}
+
+fn op_jmp(VM* vm) {
+    i64 target = fetch(vm)
+    if target < 0 || target >= vm.code_len as i64 {
+        vm.trap = true
+        return
+    }
+    vm.pc = target as u64
+}
+
+fn op_jz(VM* vm) {
+    i64 target = fetch(vm)
+    if vpop(vm) == 0 {
+        if target < 0 || target >= vm.code_len as i64 {
+            vm.trap = true
+            return
+        }
+        vm.pc = target as u64
+    }
+}
+
+fn op_print(VM* vm) {
+    if vm.sp == 0 {
+        vm.trap = true
+        return
+    }
+    print("  vm output: ")
+    println_i64(vm.stack[vm.sp - 1])
+}
+
+# ── the dispatch loop ────────────────────────────────────────────────────
+
+fn vm_run(VM* vm) {
+    # opcode -> handler, indexed by the OP_* constants above
+    (fn(VM*))[10] ops = {
+        &op_halt, &op_push, &op_add, &op_sub, &op_mul,
+        &op_load, &op_store, &op_jmp, &op_jz, &op_print
+    }
+
+    u64 fuel = 1000000               # runaway-program guard
+    while !vm.halted && !vm.trap && fuel > 0 {
+        if vm.pc >= vm.code_len {
+            vm.trap = true
+            break
+        }
+        i64 op = vm.code[vm.pc]
+        vm.pc = vm.pc + 1
+        if op < 0 || op >= OP_COUNT {
+            vm.trap = true
+            break
+        }
+        ops[op](vm)                  # indirect call through the table
+        fuel = fuel - 1
+    }
+    if fuel == 0 { vm.trap = true }
+}
+
+# Boot, run, report, and clean up one program; returns the top of stack.
+fn vm_execute(u8* label, i64* code, u64 code_len) -> i64 {
+    println(label)
+    VM vm = vm_boot(code, code_len)
+    vm_run(&vm)
+    i64 result = 0
+    if vm.trap {
+        println("  TRAP: the machine stopped abnormally")
+    } else {
+        result = vm.stack[vm.sp - 1]
+    }
+    vm_free(&vm)
+    return result
+}
+
+# ── programs ─────────────────────────────────────────────────────────────
+
+fn main(u32 argc, u8** argv) -> i32 {
+    #-
+      locals: 0 = counter, 1 = accumulator
+
+      addr  instr        addr  instr         addr  instr
+      0     PUSH n       12    LOAD 1        21    PUSH 1
+      2     STORE 0      14    LOAD 0        23    SUB
+      4     PUSH init    16    MUL|ADD       24    STORE 0
+      6     STORE 1      17    STORE 1       26    JMP 8
+      8     LOAD 0       19    LOAD 0        28    LOAD 1
+      10    JZ 28                            30    PRINT
+                                             31    HALT
+    -#
+    i64[32] factorial = {
+        OP_PUSH, 12,  OP_STORE, 0,  OP_PUSH, 1,  OP_STORE, 1,
+        OP_LOAD, 0,   OP_JZ, 28,
+        OP_LOAD, 1,   OP_LOAD, 0,   OP_MUL,  OP_STORE, 1,
+        OP_LOAD, 0,   OP_PUSH, 1,   OP_SUB,  OP_STORE, 0,
+        OP_JMP, 8,
+        OP_LOAD, 1,   OP_PRINT,     OP_HALT
+    }
+
+    i64[32] summation = {
+        OP_PUSH, 1000,  OP_STORE, 0,  OP_PUSH, 0,  OP_STORE, 1,
+        OP_LOAD, 0,     OP_JZ, 28,
+        OP_LOAD, 1,     OP_LOAD, 0,   OP_ADD,  OP_STORE, 1,
+        OP_LOAD, 0,     OP_PUSH, 1,   OP_SUB,  OP_STORE, 0,
+        OP_JMP, 8,
+        OP_LOAD, 1,     OP_PRINT,     OP_HALT
+    }
+
+    i64 fact = vm_execute("factorial(12), bytecode countdown loop:", factorial, 32)
+    i64 sum = vm_execute("sum 1..=1000, same skeleton with ADD:", summation, 32)
+
+    i32 fails = 0
+    if fact != 479001600 { fails += 1 }
+    if sum != 500500 { fails += 1 }
+    if fails == 0 {
+        println("both programs verified")
+    }
+    return fails
+}

@@ -1,0 +1,10 @@
+# expected: "cannot resolve import `no/such/module`", "no/such/module.ap"
+# compile_args: "-I", "tests/modules"
+# An import no search root can satisfy is an error listing every candidate
+# path tried (file form and directory form, per root).
+
+$import no/such/module
+
+fn main(u32 argc, u8** argv) -> i32 {
+    return 0
+}

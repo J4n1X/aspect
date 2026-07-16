@@ -75,7 +75,7 @@ Simple lookup in the flat `functions` HashMap.
 
 ## Scope Example
 
-```tjlb
+```aspect
 fn example() {
     i32 x = 10          # scope 1: {x: i32}
     {

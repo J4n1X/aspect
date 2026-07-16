@@ -1,0 +1,128 @@
+#-
+  std/io — minimal print/println built on `putchar` + `puts`.
+  Avoids `printf` (variadic — unsupported in aspect today). Each integer
+  printer is a tiny recursive function that writes ASCII digits and a
+  trailing newline; signed flavours handle the leading minus and avoid
+  INT_MIN overflow by detouring through a wider unsigned type.
+-#
+$module std/io
+
+$import std/c/stdio
+
+# Write `s` followed by a newline.
+fn println(u8* s) -> i32 {
+    return puts(s)
+}
+
+# Write `s` with no terminator — useful for building up a line.
+fn print(u8* s) -> u0 {
+    u64 n = 0
+    while s[n] != 0 {
+        putchar(s[n] as i32)
+        n = n + 1
+    }
+}
+
+# Internal: emit the decimal digits of `n` to stdout, no newline.
+fn print_digits_u64(u64 n) -> u0 {
+    if n >= 10 { print_digits_u64(n / 10) }
+    putchar((n % 10 + 48) as i32)             # ASCII '0' = 48
+}
+
+fn print_u64(u64 n) -> u0 { print_digits_u64(n) }
+fn println_u64(u64 n) -> u0 {
+    print_digits_u64(n)
+    putchar(10)                               # '\n'
+}
+
+fn print_u32(u32 n) -> u0 { print_digits_u64(n as u64) }
+fn println_u32(u32 n) -> u0 {
+    print_digits_u64(n as u64)
+    putchar(10)
+}
+
+# Signed: handle the sign, then defer to the unsigned path. Widening to i64
+# before negation keeps INT_MIN safe (negating it in i32 would overflow).
+fn print_i32(i32 n) -> u0 {
+    if n < 0 {
+        putchar(45)                           # '-'
+        i64 m = 0 - (n as i64)
+        print_digits_u64(m as u64)
+    } else {
+        print_digits_u64(n as u64)
+    }
+}
+fn println_i32(i32 n) -> u0 {
+    print_i32(n)
+    putchar(10)
+}
+
+fn print_i64(i64 n) -> u0 {
+    if n < 0 {
+        putchar(45)
+        # `n` could be I64_MIN; flip the bits then bump by one to land at
+        # the correct unsigned magnitude without overflow.
+        u64 m = ((~n) as u64) + 1
+        print_digits_u64(m)
+    } else {
+        print_digits_u64(n as u64)
+    }
+}
+fn println_i64(i64 n) -> u0 {
+    print_i64(n)
+    putchar(10)
+}
+
+# Internal: write `n` as exactly six ASCII decimal digits, zero-padded
+# (matches C's `%06d`). Used by `print_f64` for the fractional part.
+fn print_u64_padded_6(u64 n) -> u0 {
+    u64 div = 100000
+    while div > 0 {
+        putchar(((n / div) % 10 + 48) as i32)
+        div = div / 10
+    }
+}
+
+# Print a finite f64 to six decimal places (matches C's `%f` default).
+#
+# Limitations:
+#   * `|x|` must be representable as `i64` (so roughly < 2^63 ~ 9.2e18).
+#     Beyond that, `x as i64` is UB at the LLVM level.
+#   * NaN and infinities are printed as `nan` / `inf` / `-inf`. No
+#     scientific notation; very small numbers round to `0.000000`.
+#
+# Until aspect has variadic `extern`, this is the simplest correct path
+# that avoids smuggling printf with a bogus signature.
+fn print_f64(f64 x) -> u0 {
+    # NaN: a value not equal to itself.
+    if x != x {
+        putchar(110) putchar(97) putchar(110)    # "nan"
+        return
+    }
+    if x < 0.0 {
+        putchar(45)                                # '-'
+        x = 0.0 - x
+    }
+    # Crude infinity check: anything that overflows i64 is treated as inf.
+    f64 i64_max = 9223372036854775000.0            # ~i64::MAX, generous margin
+    if x > i64_max {
+        putchar(105) putchar(110) putchar(102)    # "inf"
+        return
+    }
+    i64 int_part = x as i64
+    f64 frac = x - (int_part as f64)
+    # Round to six decimals; carry into int_part on 0.9999995-style edges.
+    i64 cents = (frac * 1000000.0 + 0.5) as i64
+    if cents >= 1000000 {
+        int_part = int_part + 1
+        cents = 0
+    }
+    print_digits_u64(int_part as u64)
+    putchar(46)                                    # '.'
+    print_u64_padded_6(cents as u64)
+}
+
+fn println_f64(f64 x) -> u0 {
+    print_f64(x)
+    putchar(10)
+}

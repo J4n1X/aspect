@@ -179,17 +179,17 @@ Each stage is independently usable; each proof feature exercises exactly one hoo
 
 ## 12. Execution Model — how metaprograms run inside the compiler
 
-This section is the answer to the question the earlier drafts skipped: *all three hooks are user TJLB code that must execute inside the compiler.* Scrutiny found this is the real work — and that most of it is already de-risked.
+This section is the answer to the question the earlier drafts skipped: *all three hooks are user Aspect code that must execute inside the compiler.* Scrutiny found this is the real work — and that most of it is already de-risked.
 
-**JIT is a solved primitive.** The compiler is Rust over **inkwell 0.9 / LLVM 19.1** (`Cargo.toml`). `CodeGenerator::generate(program) -> Module` (`src/codegen/generator.rs`) builds an LLVM module, and `jit_execute` / `jit_execute_main` already JIT-run TJLB — that is exactly what the `interpret` subcommand does (`src/main.rs`). There is **no AST interpreter** to extend; metaprograms compile to LLVM and run via `ExecutionEngine`, reusing the existing path.
+**JIT is a solved primitive.** The compiler is Rust over **inkwell 0.9 / LLVM 19.1** (`Cargo.toml`). `CodeGenerator::generate(program) -> Module` (`src/codegen/generator.rs`) builds an LLVM module, and `jit_execute` / `jit_execute_main` already JIT-run Aspect — that is exactly what the `interpret` subcommand does (`src/main.rs`). There is **no AST interpreter** to extend; metaprograms compile to LLVM and run via `ExecutionEngine`, reusing the existing path.
 
-**The marshalling ABI is the actual gap.** JIT'd TJLB must read and build the compiler's AST without touching raw Rust memory. Design:
+**The marshalling ABI is the actual gap.** JIT'd Aspect must read and build the compiler's AST without touching raw Rust memory. Design:
 
 - AST/program nodes are **opaque handles** (`u0*` or an integer id) into a compiler-side arena. The special structs (`Ast`, `Expr`, `Stmt`, `Fn`, `TokenTree`, `Program`, `Judgments`, and concrete list types) are thin handle-wrappers.
 - `quote` / `Ast.*` constructors / every query function are `extern` **builtins implemented in Rust**, operating on handles. A metaprogram imports `std/meta`, whose signatures are `extern fn`s the compiler resolves to native implementations at JIT time.
 - Consequence: the "query API is the real product" (§7) is literally this builtin surface. Its stability is what keeps compiler internals rewritable.
 
-**Staged compilation driver.** Because expansions run during *parse* of their users, and all hooks are TJLB compiled ahead of use, the driver must: (1) resolve modules (via the Preprocessor-Infrastructure module system), (2) topologically order them so hook-*providing* modules precede hook-*using* ones, (3) parse → typecheck → codegen → JIT each hook module into an in-process **handler registry**, (4) compile user modules against that registry. This co-designs with `$module`/`$import`.
+**Staged compilation driver.** Because expansions run during *parse* of their users, and all hooks are Aspect compiled ahead of use, the driver must: (1) resolve modules (via the Preprocessor-Infrastructure module system), (2) topologically order them so hook-*providing* modules precede hook-*using* ones, (3) parse → typecheck → codegen → JIT each hook module into an in-process **handler registry**, (4) compile user modules against that registry. This co-designs with `$module`/`$import`.
 
 **Hygiene & safety (v1 honesty).** `quote` must **gensym** the identifiers it introduces or spliced user code is captured. A handler can still hang or crash the compiler (bounded fixpoint rounds cap the *loop*, not a single wild handler) and can call libc if it imports it, so "pure" is asserted, not enforced (§9). Accept for v1; a per-handler watchdog and an import allowlist are later work.
 
@@ -204,7 +204,7 @@ Consolidated from a heavy design review; each amends the section named.
 - **Amends §6/§8 — coercion transforms are governed.** A user-defined `From -> To` coercion is an implicit conversion — the C++/Scala footgun, made worse by the flat module namespace (an import could change your coercions). Guardrails: a coercion fires **only after built-in coercion fails**, and **only where a rule opts the module in** (`allow coercion String -> u8*`). This folds coercion into the governance thesis (§8) instead of fighting it. *If in doubt, coercion transforms are the one sub-feature worth deferring past v1.*
 - **Amends §7 — query API is two-tiered.** Tier-1 (dictionaries, gate-worthy) vs Tier-2 (flow-sensitive analyses the compiler must build, warning-only). Do not ship Tier-2 rules as hard errors.
 - **New core-language dependency — value-blocks.** A `{ … }` in expression position whose `return` yields the block value is the primitive every wrapping transform stands on (it lets a decoration wrap a whole body without rewriting its control flow). It is a *language* feature, not a metasystem one, and needs its own short design note. Semantics to pin: disambiguation from list-init `{a, b}`, type = join of all `return`s, all-paths-return with a **void exception**, `return` binds to nearest block, `break`/`continue` pass through to enclosing loops.
-- **Metalanguage ergonomics are a real prerequisite.** TJLB today has no `for-in`, generics, closures, or `match` (verified). Metaprograms are therefore verbose (index loops over concrete list structs), which makes **`quote` mandatory, not sugar**. `for-in` as a general language feature would help broadly; it is not a blocker.
+- **Metalanguage ergonomics are a real prerequisite.** Aspect today has no `for-in`, generics, closures, or `match` (verified). Metaprograms are therefore verbose (index loops over concrete list structs), which makes **`quote` mandatory, not sugar**. `for-in` as a general language feature would help broadly; it is not a blocker.
 
 ---
 
@@ -215,7 +215,7 @@ Phased, checkbox form. Each phase is independently useful; earlier phases de-ris
 ### Phase 0 — Prerequisites (language + infra)
 
 - [x] **Module system** — finish Preprocessor-Infrastructure (`$module`/`$import`, `-I`). Two-pass prototype registration already landed. (M)
-- [x] **Value-blocks** — *landed 2026-07-14.* `ExprKind::ValueBlock`; parser disambiguates vs list-init by speculative list parse with rollback (`parse_brace_expression`); checker: target-directed / first-return-synthesized typing + conservative all-paths-return (loops never count; bare `return` rejected — no void exception, a value block always yields a value); codegen: entry-block result slot + `vblock.exit`, `return` rerouted via `value_block_stack`. Spec: doc/09 §Value blocks. Regression: `tests/programs/value_block.tjlb`.
+- [x] **Value-blocks** — *landed 2026-07-14.* `ExprKind::ValueBlock`; parser disambiguates vs list-init by speculative list parse with rollback (`parse_brace_expression`); checker: target-directed / first-return-synthesized typing + conservative all-paths-return (loops never count; bare `return` rejected — no void exception, a value block always yields a value); codegen: entry-block result slot + `vblock.exit`, `return` rerouted via `value_block_stack`. Spec: doc/09 §Value blocks. Regression: `tests/programs/value_block.ap`.
 - [ ] **Attributes** — `@` lexer token (`src/lexer/scanner.rs`, `tokens.rs`); `Attribute { name, args }`; `attrs` on `Stmt`/items; consume `@ident(args?)` before statement dispatch (`src/parser/statements.rs`); outside-in stacking. (M)
 - [ ] **Metaprogramming std (`std/meta`)** — opaque-handle special structs + `extern` builtins (`Ast`/`Expr`/`Stmt`/`Fn`/`TokenTree`/`Program`/`Judgments` + `*List` with `.count()/.at()`); compiler-side arena + handle registry. (L)
 - [ ] **`quote` / `$(…)`** — parse contract, desugar to `Ast.*` builders, **hygienic gensym**. (L)
@@ -233,7 +233,7 @@ Phased, checkbox form. Each phase is independently useful; earlier phases de-ris
 - [ ] **Tier-1 query API** (`call_sites_of`, `instantiations_of`, `has_attr`, `module_of`). (M)
 - [ ] `rule <anchor> <fn>` + block form; anchor enum (`type | attribute`, extensible). (S–M)
 - [ ] **Hygiene rule** — every attribute must be claimed by a rule/expansion; did-you-mean on unclaimed. (S)
-- [ ] **De-risk:** implement the first rule (`singleton`) as a **Rust built-in** to validate the query API + governance value *before* committing to TJLB-authored + JIT'd rules. Then port it to TJLB. Ship the trust/audit trio as proof. (M)
+- [ ] **De-risk:** implement the first rule (`singleton`) as a **Rust built-in** to validate the query API + governance value *before* committing to Aspect-authored + JIT'd rules. Then port it to Aspect. Ship the trust/audit trio as proof. (M)
 
 ### Phase 3 — Expansions (parent §10.4)
 

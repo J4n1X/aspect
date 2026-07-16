@@ -1,0 +1,202 @@
+#-
+  calc.ap — a precedence-climbing arithmetic evaluator.
+
+  One self-recursive `parse(min_prec)` method handles the whole grammar:
+
+      expr   ::= atom (op expr)*          op: + - * / %  (usual precedence)
+      atom   ::= number | '(' expr ')' | '-' atom
+
+  Interesting bits:
+    * The evaluator is a type-struct (`Calc`) whose cursor state is
+      private — the only entry point is the static `Calc.eval(...)`.
+    * aspect resolves calls at parse time with no forward references, so
+      the classic expr/term/factor trio of mutually recursive functions
+      can't be written. Precedence climbing needs only SELF-recursion,
+      which works — the technique is a perfect fit for the constraint.
+    * Errors (bad chars, unbalanced parens, division by zero, trailing
+      garbage) travel in the result struct, not in an exit().
+
+  Run:   aspc interpret -I lib demos/calc.ap
+-#
+
+$import std/io
+
+type EvalResult {
+    public i64 value
+    public bool ok
+}
+
+type Calc {
+    u8* src         # private — the expression bytes
+    u64 pos         # private — cursor
+    bool err        # private — sticky error flag
+
+    # ── lexing helpers (defined first: no forward references) ──────────
+
+    fn peek(this) -> u8 {
+        return this.src[this.pos]
+    }
+
+    fn bump(this) {
+        this.pos = this.pos + 1
+    }
+
+    fn skip_ws(this) {
+        while this.peek() == 32 || this.peek() == 9 {
+            this.bump()
+        }
+    }
+
+    fn is_digit(this, u8 c) -> bool {
+        return c >= 48 && c <= 57
+    }
+
+    fn number(this) -> i64 {
+        i64 acc = 0
+        while this.is_digit(this.peek()) {
+            acc = acc * 10 + ((this.peek() - 48) as i64)
+            this.bump()
+        }
+        return acc
+    }
+
+    # Binding power of an infix operator byte; 0 marks "not an operator"
+    # (also what ')' and the terminating NUL fall into).
+    fn prec_of(this, u8 op) -> i32 {
+        if op == 43 || op == 45 { return 1 }        # + -
+        if op == 42 || op == 47 || op == 37 { return 2 }   # * / %
+        return 0
+    }
+
+    fn apply(this, i64 lhs, u8 op, i64 rhs) -> i64 {
+        if op == 43 { return lhs + rhs }
+        if op == 45 { return lhs - rhs }
+        if op == 42 { return lhs * rhs }
+        if (op == 47 || op == 37) && rhs == 0 {
+            this.err = true                          # division by zero
+            return 0
+        }
+        if op == 47 { return lhs / rhs }
+        if op == 37 { return lhs % rhs }
+        this.err = true
+        return 0
+    }
+
+    # ── the parser: one self-recursive precedence climber ──────────────
+
+    fn parse(this, i32 min_prec) -> i64 {
+        this.skip_ws()
+
+        # atom
+        i64 lhs = 0
+        u8 c = this.peek()
+        if c == 40 {                                 # '(' subexpression
+            this.bump()
+            lhs = this.parse(1)
+            this.skip_ws()
+            if this.peek() == 41 {
+                this.bump()
+            } else {
+                this.err = true                      # missing ')'
+            }
+        } elif c == 45 {                             # unary minus
+            this.bump()
+            lhs = 0 - this.parse(3)                  # binds tighter than * /
+        } elif this.is_digit(c) {
+            lhs = this.number()
+        } else {
+            this.err = true                          # expected an atom
+            return 0
+        }
+
+        # infix loop: consume operators while they bind at least min_prec
+        while !this.err {
+            this.skip_ws()
+            u8 op = this.peek()
+            i32 p = this.prec_of(op)
+            if p == 0 || p < min_prec { break }
+            this.bump()
+            i64 rhs = this.parse(p + 1)              # left-associative
+            lhs = this.apply(lhs, op, rhs)
+        }
+        return lhs
+    }
+
+    # ── entry point ─────────────────────────────────────────────────────
+
+    public fn eval(u8* src) -> EvalResult {
+        Calc c = Calc { src = src, pos = 0, err = false }
+        i64 v = c.parse(1)
+        c.skip_ws()
+        if c.peek() != 0 { c.err = true }            # trailing garbage
+        if c.err {
+            return EvalResult { value = 0, ok = false }
+        }
+        return EvalResult { value = v, ok = true }
+    }
+}
+
+# ── demo driver ──────────────────────────────────────────────────────────
+
+fn show(u8* expr, i64 want) -> i32 {
+    EvalResult r = Calc.eval(expr)
+    print("  ")
+    print(expr)
+    print(" = ")
+    if !r.ok {
+        println("<error>")
+        return 1
+    }
+    print_i64(r.value)
+    if r.value == want {
+        println("")
+        return 0
+    }
+    print("   (expected ")
+    print_i64(want)
+    println(")")
+    return 1
+}
+
+fn show_error(u8* expr) -> i32 {
+    EvalResult r = Calc.eval(expr)
+    print("  ")
+    print(expr)
+    if r.ok {
+        print(" = ")
+        print_i64(r.value)
+        println("   (expected an error!)")
+        return 1
+    }
+    println(" -> rejected, as it should be")
+    return 0
+}
+
+fn main(u32 argc, u8** argv) -> i32 {
+    i32 fails = 0
+
+    println("precedence and grouping:")
+    fails += show("2+3*4", 14)
+    fails += show("(2+3)*4", 20)
+    fails += show("10-4-3", 3)
+    fails += show("100/5/2", 10)
+    fails += show("17%5", 2)
+    fails += show("3*(4+5)-2*(1+1)", 23)
+    fails += show("((((7))))", 7)
+
+    println("unary minus:")
+    fails += show("-5+20/4", 0)
+    fails += show("-(2+3)*-4", 20)
+    fails += show("6*-2", 0 - 12)
+
+    println("malformed input:")
+    fails += show_error("2+")
+    fails += show_error("(1+2")
+    fails += show_error("4/0")
+    fails += show_error("2 3")
+
+    if fails == 0 {
+        println("all evaluations correct")
+    }
+    return fails
+}

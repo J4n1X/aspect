@@ -1,17 +1,17 @@
 [workspace]
-members = [".", "tjlb-macros"]
+members = [".", "aspect-macros"]
 
 [package]
-name = "tjlb-rust"
+name = "aspect"
 version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "tjlb-parser"
+name = "aspc"
 path = "src/main.rs"
 
 [lib]
-name = "tjlb_rust"
+name = "aspect"
 path = "src/lib.rs"
 
 [dependencies]
@@ -20,7 +20,7 @@ clap = { version = "4.6.1", features = ["derive"] }
 inkwell = { version = "0.9.0", default-features = false, features = ["llvm19-1", "target-x86"] }
 anyhow = "1.0.102"
 indexmap = "2"
-tjlb-macros = { path = "tjlb-macros" }
+aspect-macros = { path = "aspect-macros" }
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"

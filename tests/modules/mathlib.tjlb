@@ -1,8 +1,0 @@
-# Module fixture (file form): `$import mathlib` resolves to this single
-# file at `<root>/mathlib.tjlb`. No `# expected:` annotation — the test
-# generator skips fixtures.
-$module mathlib
-
-fn ml_add(i32 a, i32 b) -> i32 {
-    return a + b
-}

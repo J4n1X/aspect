@@ -1,0 +1,13 @@
+# expected: 33
+# compile_args: "-I", "tests/modules"
+# Two-module import end-to-end: `mathlib` resolves via the file form
+# (tests/modules/mathlib.ap), `strutil` via the directory form
+# (tests/modules/strutil/*.ap). ml_add(10, 20) + 3 = 33 proves every
+# file of both modules loaded.
+
+$import mathlib
+$import strutil
+
+fn main(u32 argc, u8** argv) -> i32 {
+    return ml_add(su_first(), su_second()) + 3
+}

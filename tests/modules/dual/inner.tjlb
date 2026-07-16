@@ -1,6 +1,0 @@
-# Directory-form half of the `dual` ambiguity fixture (see ../dual.tjlb).
-$module dual
-
-fn dual_dir_value() -> i32 {
-    return 2
-}

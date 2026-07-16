@@ -1,0 +1,9 @@
+# One half of the two-file `pair` module: contributes the module's
+# `$import hidden` edge. Imports accrue to the *module*, so ./user.ap
+# shares this one without importing anything itself.
+$module pair
+$import hidden
+
+fn pair_base() -> i32 {
+    return hidden_value()
+}

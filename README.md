@@ -1,8 +1,8 @@
-# TJLB Compiler
+# Aspect Compiler
 
 **A while ago, I thought "Rust is too sophisticated, C is too simple, and I am bored. Why not try to make something that takes many aspects I like and create my own language?" Anyway, that was a massive mistake, and now we're here, trying to deliver on that premise.**
 
-A compiler for the TJLB programming language, written in Rust. TJLB is a statically-typed systems programming language that compiles to LLVM IR.
+A compiler for the Aspect programming language, written in Rust. Aspect is a statically-typed systems programming language that compiles to LLVM IR.
 
 ## Features
 
@@ -27,7 +27,7 @@ A compiler for the TJLB programming language, written in Rust. TJLB is a statica
 cargo build --release
 ```
 
-The compiler binary will be available as `target/release/tjlb-parser`.
+The compiler binary will be available as `target/release/aspc`.
 
 ## Usage
 
@@ -38,12 +38,12 @@ The compiler provides four main commands:
 Tokenize a source file and print the tokens:
 
 ```bash
-tjlb-parser lex <FILE>
+aspc lex <FILE>
 ```
 
 Example:
 ```bash
-tjlb-parser lex program.tjlb
+aspc lex program.ap
 ```
 
 ### Parsing (AST Generation)
@@ -51,12 +51,12 @@ tjlb-parser lex program.tjlb
 Parse a source file and print the Abstract Syntax Tree:
 
 ```bash
-tjlb-parser parse <FILE>
+aspc parse <FILE>
 ```
 
 Example:
 ```bash
-tjlb-parser parse program.tjlb
+aspc parse program.ap
 ```
 
 ### Compilation
@@ -64,7 +64,7 @@ tjlb-parser parse program.tjlb
 Compile a source file and choose what artifact to emit:
 
 ```bash
-tjlb-parser compile <FILE> [OPTIONS]
+aspc compile <FILE> [OPTIONS]
 ```
 
 Options:
@@ -79,22 +79,22 @@ Options:
 Examples:
 ```bash
 # Print IR to stdout
-tjlb-parser compile program.tjlb
+aspc compile program.ap
 
 # Write IR to a file
-tjlb-parser compile program.tjlb -o program.ll
+aspc compile program.ap -o program.ll
 
 # Emit an object file (defaults to program.o when -o is omitted)
-tjlb-parser compile program.tjlb --emit obj
+aspc compile program.ap --emit obj
 
 # Compile with optimization level 2
-tjlb-parser compile program.tjlb -O 2
+aspc compile program.ap -O 2
 
 # Compile with O3 and verify after each pass
-tjlb-parser compile program.tjlb -O 3 --verify-each
+aspc compile program.ap -O 3 --verify-each
 
 # Write to file and also print to stdout
-tjlb-parser compile program.tjlb -o program.ll --print
+aspc compile program.ap -o program.ll --print
 ```
 
 ### Interpretation (JIT)
@@ -103,7 +103,7 @@ Compile and immediately execute the program in-process via LLVM's JIT — no
 intermediate files, no external runtime required:
 
 ```bash
-tjlb-parser interpret <FILE> [-O LEVEL] [-- ARGS...]
+aspc interpret <FILE> [-O LEVEL] [-- ARGS...]
 ```
 
 Options:
@@ -120,22 +120,22 @@ returned by `main` is reported as the execution result.
 Examples:
 ```bash
 # Run with no extra args
-tjlb-parser interpret program.tjlb
+aspc interpret program.ap
 
 # Pass args through to main
-tjlb-parser interpret demos/concat_args.tjlb -- hello world foo
+aspc interpret demos/concat_args.ap -- hello world foo
 
 # Run with optimizations
-tjlb-parser interpret program.tjlb -O 2 -- arg1 arg2
+aspc interpret program.ap -O 2 -- arg1 arg2
 ```
 
 ## Compiling to Native Executable
 
-To compile a TJLB program to a native executable, proceed as follows:
+To compile a Aspect program to a native executable, proceed as follows:
 
 ```bash
 # Emit object code directly
-tjlb-parser compile program.tjlb -e obj -o program.o
+aspc compile program.ap -e obj -o program.o
 
 # Link to executable
 gcc -o program program.o
@@ -145,11 +145,11 @@ gcc -o program program.o
 
 Here's a simple "Hello World" style program:
 
-```tjlb
+```aspect
 $import std/io
 
 fn main(u32 argc, u8 **argv) -> i32 {
-    const u8 *message = "Hello, TJLB!"
+    const u8 *message = "Hello, Aspect!"
     println(message)
     return 0
 }
@@ -174,7 +174,7 @@ See LICENSE file for details.
 This project uses or used AI for the following purposes:
 
 1. Documentation of the codebase, including the maintaining of the documentation directory
-2. The creation of the vscode-tjlb syntax highlighting extension and some demos.
+2. The creation of the vscode-aspect syntax highlighting extension and some demos.
 3. Assistance in planning of features (implementations are done by hand)
 4. Research into required topics for compiler development.
 5. Some inline comments to improve readability 

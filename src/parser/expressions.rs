@@ -7,7 +7,7 @@ use crate::parser::{
 };
 use crate::symbol::module::ModuleSymbols;
 use crate::symbol::table::SymbolTable;
-use tjlb_macros::parse_rule;
+use aspect_macros::parse_rule;
 
 #[derive(Clone, Copy)]
 enum OpKind {

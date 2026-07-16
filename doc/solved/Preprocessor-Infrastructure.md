@@ -73,11 +73,11 @@ of producing baffling "undefined function" errors. Ship it first.
 *(Landed 2026-07-14: `do_parse_program` prescans struct names and aliases,
 registers every prototype in pass 1 while brace-skipping bodies, and parses
 bodies in pass 2. Only global-variable initializers remain order-sensitive.
-Regression: `tests/programs/forward_references.tjlb`.)*
+Regression: `tests/programs/forward_references.ap`.)*
 
 ### 3. `$module` is authoritative; paths only locate files
 
-If `search/std/math/vector.tjlb` declares `$module std/math`, the compiler
+If `search/std/math/vector.ap` declares `$module std/math`, the compiler
 trusts the declaration — but if a file loaded for import `std/math`
 declares anything *else*, that's a hard error naming both. Keeps the
 declared identity and the on-disk location from drifting apart silently.
@@ -95,7 +95,7 @@ was recognised anywhere in the stream.
 
 ### Defines
 
-```tjlb
+```aspect
 $define DEBUG                      # flag define (no value)
 $define MAX_SIZE 1024              # value = rest-of-line token sequence
 $define GREETING "hello"           # any tokens, string literals included
@@ -126,14 +126,14 @@ $undefine DEBUG                    # removes; no-op if not defined
 |---|---|
 | `OS_LINUX` / `OS_WINDOWS` / `OS_MACOS` | target OS |
 | `ARCH_X86_64` / `ARCH_AARCH64` | target arch |
-| `TJLB_VERSION_MAJOR` / `_MINOR` | compiler version, integer tokens |
+| `ASPECT_VERSION_MAJOR` / `_MINOR` | compiler version, integer tokens |
 
 **CLI:** `-D NAME` and `-D NAME=VALUE` (repeatable) inject defines before
 the entry file is processed — the standard build-system hook.
 
 ### Conditionals
 
-```tjlb
+```aspect
 $ifdef OS_LINUX
     extern fn epoll_create1(i32 flags) -> i32
 $elseifdef OS_MACOS
@@ -172,14 +172,14 @@ $endif
 
 ### Modules
 
-```tjlb
-# in lib/std/math/basic.tjlb:
+```aspect
+# in lib/std/math/basic.ap:
 $module std/math
 
 fn gcd_u64(u64 a, u64 b) -> u64 { ... }
 ```
 
-```tjlb
+```aspect
 # in an application file:
 $import std/math
 $import std/collections
@@ -195,7 +195,7 @@ fn main(u32 argc, u8** argv) -> i32 {
   Bare tokens, no quotes — one form only.
 - At most one `$module` per file, before any non-directive token.
 - Multiple files may declare the same module: a module is the SET of
-  files that declare it. (`std/math` can be `basic.tjlb` + `trig.tjlb`.)
+  files that declare it. (`std/math` can be `basic.ap` + `trig.ap`.)
 - A file with no `$module` belongs to the anonymous root module (fine for
   entry points and one-off scripts).
 - Nesting is purely hierarchical naming: importing `std` does NOT import
@@ -209,8 +209,8 @@ fn main(u32 argc, u8** argv) -> i32 {
 **Resolution is convention + verification** (decided 2026-07-14). Per `-I`
 root, in flag order, `$import std/math` looks for:
 
-- **file form:** `<root>/std/math.tjlb`, or
-- **directory form:** every `.tjlb` file directly inside `<root>/std/math/`
+- **file form:** `<root>/std/math.ap`, or
+- **directory form:** every `.ap` file directly inside `<root>/std/math/`
   (non-recursive).
 
 The first root that yields either form wins; a root offering *both* forms
@@ -280,7 +280,7 @@ src/preprocessor/
   start a line").
 - `main.rs`: add `-D` / `-I` flags (clap, repeatable) to `compile`,
   `interpret`, `parse`, `lex`; thread them into the preprocessor. Keep the
-  `preprocess`-style debugging story via `tjlb-parser lex` (tokens are the
+  `preprocess`-style debugging story via `aspc lex` (tokens are the
   preprocessor's output — a separate `-E` equivalent is `lex` now).
 
 ## Killing `$include`
@@ -288,10 +288,10 @@ src/preprocessor/
 1. Land defines + conditionals + modules.
 2. Port `demos/std/**` to `$module std/...` declarations; move it to a
    real `lib/std/` tree; demos say `$import std/io` and the demo runner
-   grows `-I lib`. `tests/programs/stdlib_check.tjlb` imports the same way
+   grows `-I lib`. `tests/programs/stdlib_check.ap` imports the same way
    (its `../../demos/std` relative includes disappear — that coupling was
    always a smell).
-3. Port the `include_*.tjlb` test programs to import tests.
+3. Port the `include_*.ap` test programs to import tests.
 4. Delete `src/preprocessor/include.rs` and the `$include` docs section.
    No deprecation period — the language is pre-1.0 and single-user;
    keeping two mechanisms is worse than one breaking change.
@@ -335,7 +335,7 @@ Integration (`tests/programs/`):
    type-structs, aliases, globals; `ParserError::NotImported`).
 7. ~~Stdlib/demos/test migration; delete `$include`~~ — **done 2026-07-14**
    (stdlib moved to `lib/std/**` with `$module` declarations, demos and
-   `stdlib_check.tjlb` import it with `-I lib`, include tests re-expressed
+   `stdlib_check.ap` import it with `-I lib`, include tests re-expressed
    as module tests, `src/preprocessor/include.rs` and
    `LexerError::IncludeError` deleted).
 8. ~~Docs~~ — **done 2026-07-14** (`doc/09` §Preprocessor rewritten,
@@ -348,7 +348,7 @@ data structures.
 ## Resolved questions (2026-07-14)
 
 - **Module discovery**: convention + verification — the import path maps
-  to a file (`<path>.tjlb`) or directory (`<path>/`) under the `-I` roots,
+  to a file (`<path>.ap`) or directory (`<path>/`) under the `-I` roots,
   and every loaded file's `$module` declaration is verified against the
   import path. No declaration-based tree scanning.
 - **Import visibility**: non-transitivity is *enforced* in v1 at parse-time

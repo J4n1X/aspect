@@ -1,0 +1,77 @@
+#-
+  mandelbrot.ap — ASCII Mandelbrot set renderer.
+
+  Walks a 76x28 character grid over the complex rectangle
+  [-2.1, 0.7] x [-1.2, 1.2], iterates z <- z^2 + c up to 96 rounds per
+  cell, and picks a density character by escape speed. Pure f64
+  arithmetic in a tight loop — this is the float-codegen showcase.
+
+  Run:   aspc interpret -I lib demos/mandelbrot.ap
+-#
+
+$import std/io
+$import std/c/stdio      # putchar
+
+const i32 WIDTH = 76
+const i32 HEIGHT = 28
+const i32 MAX_ITER = 96
+
+# Iterate z <- z^2 + c; return the iteration count at escape (|z| > 2),
+# or MAX_ITER when c never escapes (interior of the set).
+fn escape_time(f64 cr, f64 ci) -> i32 {
+    f64 zr = 0.0
+    f64 zi = 0.0
+    i32 iter = 0
+    while iter < MAX_ITER {
+        f64 zr2 = zr * zr
+        f64 zi2 = zi * zi
+        if zr2 + zi2 > 4.0 { return iter }
+        zi = 2.0 * zr * zi + ci
+        zr = zr2 - zi2 + cr
+        iter = iter + 1
+    }
+    return MAX_ITER
+}
+
+fn main(u32 argc, u8** argv) -> i32 {
+    # Darkest-to-brightest density ramp; interior cells use the last char.
+    u8* palette = " .,:;-=+*#%@"
+    i32 palette_len = 12
+
+    f64 x_min = 0.0 - 2.1
+    f64 x_max = 0.7
+    f64 y_min = 0.0 - 1.2
+    f64 y_max = 1.2
+
+    f64 dx = (x_max - x_min) / (WIDTH as f64)
+    f64 dy = (y_max - y_min) / (HEIGHT as f64)
+
+    println("The Mandelbrot set, 76x28, z <- z^2 + c, 96 iterations:")
+    println("")
+
+    i32 interior = 0
+    for (i32 row = 0; row < HEIGHT; row += 1) {
+        f64 ci = y_min + (row as f64) * dy + dy * 0.5
+        for (i32 col = 0; col < WIDTH; col += 1) {
+            f64 cr = x_min + (col as f64) * dx + dx * 0.5
+            i32 iter = escape_time(cr, ci)
+            if iter == MAX_ITER {
+                interior = interior + 1
+                putchar(palette[palette_len - 1] as i32)
+            } else {
+                # Escape times cluster at the low end, so a straight
+                # iter/MAX scale would leave the ramp mostly unused;
+                # a clamped iter/3 spreads the gradient over the edge.
+                i32 idx = iter / 3
+                if idx > palette_len - 2 { idx = palette_len - 2 }
+                putchar(palette[idx] as i32)
+            }
+        }
+        putchar(10)
+    }
+
+    println("")
+    print("interior cells: ")
+    println_i32(interior)
+    return 0
+}

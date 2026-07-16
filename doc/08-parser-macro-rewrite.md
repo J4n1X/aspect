@@ -17,7 +17,7 @@ src/parser/
   errors.rs        — ParserError enum + position() helper
   types.rs         — type-parsing helpers
 
-tjlb-macros/
+aspect-macros/
   src/lib.rs       — #[parse_rule] attribute macro
   src/expand.rs    — DSL macro expansions (DslRewriter)
 ```
@@ -177,7 +177,7 @@ symbol-table mutations are not rolled back on backtrack.
 
 | Phase | What changed |
 |---|---|
-| 1 | `tjlb-macros` crate scaffolding; no-op `#[parse_rule]` |
+| 1 | `aspect-macros` crate scaffolding; no-op `#[parse_rule]` |
 | 2 | `parse_postfix` loop fix; `parse_cast_or_alloc` backtracking fix; `compound_op_for_token` extraction |
 | 3 | Stateless DSL primitives: `pos!`, `kw!`, `token!`, `token_if!`, `kw_if!`, `skip_nl!`, `term!`, `ident!`, `lang_type!`, `opt_unless_term!`, `block_body!` |
 | 4 | Backtracking combinators: `opt!`, `alt!`, `many!`, `scoped!` |

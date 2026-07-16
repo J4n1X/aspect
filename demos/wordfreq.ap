@@ -1,0 +1,117 @@
+#-
+  wordfreq.ap — word frequency counting, three std modules composed.
+
+    * std/collections/map_str_i64   counts (the map copies its keys)
+    * std/sort                      alphabetical output via sort_cstr
+    * for_each + function pointer   draining the map into a flat array
+
+  The tokenizer lowercases as it scans, so "The" and "the" are one word.
+  Iteration order of a hash map is slot order — meaningless — so the
+  words are collected, sorted, and only then printed.
+
+  Run:   aspc interpret -I lib demos/wordfreq.ap
+-#
+
+$import std/io
+$import std/collections
+$import std/sort
+$import std/c/stdlib    # malloc/free
+$import std/c/string    # strlen
+$import std/c/stdio     # putchar
+
+# for_each callbacks are plain function pointers — no closures — so the
+# collection target lives in globals.
+u8** g_words
+u64 g_word_count = 0
+
+fn collect_word(u8* word, i64 count) {
+    g_words[g_word_count] = word
+    g_word_count = g_word_count + 1
+}
+
+# Scan `line`, lowercase every alphabetic run, and bump its count.
+fn count_words(MapStrI64* freq, u8* line) {
+    u8[64] word
+    u64 len = 0
+    u64 i = 0
+    bool done = false
+    while !done {
+        u8 c = line[i]
+        if c == 0 { done = true }
+        if c >= 65 && c <= 90 { c = c + 32 }         # 'A'-'Z' -> 'a'-'z'
+        if c >= 97 && c <= 122 && len < 63 {
+            word[len] = c
+            len = len + 1
+        } else {
+            if len > 0 {
+                word[len] = 0
+                freq.put(word, freq.get_or(word, 0) + 1)
+                len = 0
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn pad_to(u8* s, u64 width) {
+    print(s)
+    u64 n = strlen(s)
+    while n < width {
+        putchar(32)
+        n = n + 1
+    }
+}
+
+fn main(u32 argc, u8** argv) -> i32 {
+    (u8*)[4] text = {
+        "How much wood would a woodchuck chuck",
+        "if a woodchuck could chuck wood?",
+        "A woodchuck would chuck all the wood he could chuck",
+        "if a woodchuck could chuck wood."
+    }
+
+    MapStrI64 freq = MapStrI64.new()
+    for (u64 i = 0; i < 4; i += 1) {
+        count_words(&freq, text[i])
+    }
+
+    # Drain the key set into a flat array, then sort it.
+    g_words = malloc(freq.len() * sizeof(u8*))
+    freq.for_each(&collect_word)
+    sort_cstr(g_words, g_word_count)
+
+    println("word frequencies (alphabetical):")
+    i64 total = 0
+    i64 top_count = 0
+    u8* top_word = null
+    for (u64 i = 0; i < g_word_count; i += 1) {
+        u8* w = g_words[i]
+        i64 n = freq.get_or(w, 0)
+        total = total + n
+        if n > top_count {
+            top_count = n
+            top_word = w
+        }
+        print("  ")
+        pad_to(w, 12)
+        println_i64(n)
+    }
+
+    println("")
+    print("distinct words: ")
+    println_u64(g_word_count)
+    print("total words:    ")
+    println_i64(total)
+    print("most frequent:  ")
+    pad_to(top_word, 12)
+    println_i64(top_count)
+
+    free(g_words)
+    freq.destroy()
+
+    # sanity for the curious: 4 lines, 29 words, "chuck" x5
+    if total != 29 || top_count != 5 {
+        return 1
+    }
+    return 0
+}

@@ -6,7 +6,7 @@ Add brace-list syntax for initializing fixed-size array variables at declaration
 Currently `u8[8] buf` allocates an array but leaves every element zero-initialized with
 no way to set values inline. The new syntax lets the programmer write:
 
-```tjlb
+```aspect
 u8[5] vowels = {'a' as u8, 'e' as u8, 'i' as u8, 'o' as u8, 'u' as u8}
 i32[3] coords = {10, 20, 30}
 ```
@@ -17,7 +17,7 @@ constant global initializers, which would need a separate constant-folding pass)
 
 ## Syntax
 
-```tjlb
+```aspect
 <array-type> <name> = { <expr>, <expr>, ... }
 ```
 
@@ -225,7 +225,7 @@ fn generate_list_init(
 > the first element, and a list of indices. With a flat array and a single integer index
 > this directly yields a pointer to `array_ptr[i]`.
 
-### 5. Syntax Highlighting — `vscode-tjlb/syntaxes/tjlb.tmLanguage.json`
+### 5. Syntax Highlighting — `vscode-aspect/syntaxes/aspect.tmLanguage.json`
 
 No changes needed: `{` and `}` are already tokenised as punctuation and the grammar
 does not need to distinguish expression braces from block braces.
@@ -262,8 +262,8 @@ does not need to distinguish expression braces from block braces.
 
 ### Integration test
 
-Add `demos/list_init.tjlb` that exercises several array types and returns a checkable
-exit code, following the pattern of `demos/types.tjlb`.
+Add `demos/list_init.ap` that exercises several array types and returns a checkable
+exit code, following the pattern of `demos/types.ap`.
 
 ## Implementation Order
 
@@ -271,4 +271,4 @@ exit code, following the pattern of `demos/types.tjlb`.
 2. `src/parser/expressions.rs` — parse `{ ... }` in `parse_primary`
 3. `src/typechecker/checker.rs` + error types — handle `ListInit` in `VarDecl`, add `ListInitLengthMismatch`
 4. `src/codegen/generator.rs` — patch guard + implement `generate_list_init`
-5. Write unit / integration tests and `demos/list_init.tjlb`
+5. Write unit / integration tests and `demos/list_init.ap`

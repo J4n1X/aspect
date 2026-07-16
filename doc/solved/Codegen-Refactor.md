@@ -41,7 +41,7 @@ refactor step changes IR output, revert that step and try a smaller decompositio
 - No public API changes to `CodeGenerator::new`, `generate`, `optimize`,
   `module`, `get_target_machine`, `print_ir_to_string`, `write_ir_to_file` —
   `src/main.rs:197` and downstream callers must continue to work unchanged.
-- Do not touch `src/parser/`, `src/lexer/`, `src/typechecker/`, or `tjlb-macros/`.
+- Do not touch `src/parser/`, `src/lexer/`, `src/typechecker/`, or `aspect-macros/`.
 
 ## Current Smells Inventory
 
@@ -406,12 +406,12 @@ In addition, after steps 6–13, do an IR diff against the pre-refactor baseline
 
 ```bash
 # Before starting refactor (from master), once:
-for f in tests/programs/*.tjlb; do
+for f in tests/programs/*.ap; do
     cargo run --quiet -- "$f" > /tmp/baseline/$(basename $f).ll 2>/dev/null || true
 done
 
 # After each post-step-5 commit:
-for f in tests/programs/*.tjlb; do
+for f in tests/programs/*.ap; do
     cargo run --quiet -- "$f" > /tmp/current/$(basename $f).ll 2>/dev/null || true
     diff /tmp/baseline/$(basename $f).ll /tmp/current/$(basename $f).ll
 done

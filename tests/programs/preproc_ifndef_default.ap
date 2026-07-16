@@ -1,0 +1,12 @@
+# expected: 4
+# The `$ifndef` overridable-default pattern: no `-D BUCKETS` is passed, so
+# the guarded `$define` supplies the default. The override twin is
+# preproc_ifndef_override.ap.
+
+$ifndef BUCKETS
+$define BUCKETS 4
+$endif
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return BUCKETS
+}

@@ -1,11 +1,11 @@
 use std::path::Path;
 
 use inkwell::context::Context;
-use tjlb_macros::generate_tests;
-use tjlb_rust::codegen::CodeGenerator;
-use tjlb_rust::preprocessor::{PreprocessedSource, Preprocessor};
-use tjlb_rust::parser::{Parser, Program};
-use tjlb_rust::typechecker::TypeChecker;
+use aspect_macros::generate_tests;
+use aspect::codegen::CodeGenerator;
+use aspect::preprocessor::{PreprocessedSource, Preprocessor};
+use aspect::parser::{Parser, Program};
+use aspect::typechecker::TypeChecker;
 
 /// Preprocess a source file with extra compiler flags from a
 /// `# compile_args:` annotation. Supported flags: `-D NAME[=VALUE]` (seeds
@@ -100,7 +100,7 @@ fn assert_compile_error_contains(
     }
 }
 
-/// Compile and JIT-execute a TJLB program in-process, returning `main`'s
+/// Compile and JIT-execute a Aspect program in-process, returning `main`'s
 /// `i32` return value. `args` is the program's argv tail; the source path is
 /// prepended as the conventional `argv[0]`. `compile_args` holds
 /// `# compile_args:` flags for the preprocessor (`-D`/`-I`).

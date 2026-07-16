@@ -224,7 +224,7 @@ impl LangType {
     pub const U64: Self = Self::plain(TypeBase::UInt, 64, 0);
     /// The default float type (`f64`).
     pub const F64: Self = Self::plain(TypeBase::SFloat, 64, 0);
-    /// The TJLB boolean: an `i1` logical value stored as `i8`.
+    /// The Aspect boolean: an `i1` logical value stored as `i8`.
     pub const BOOL: Self = Self::plain(TypeBase::Bool, 8, 0);
     /// `u8*` — byte pointer; the type of string literals and the parser's
     /// placeholder stamp for `null`.

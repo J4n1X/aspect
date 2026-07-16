@@ -9,8 +9,8 @@
  * Compile:  gcc -O3 -o demos/bench_c demos/bench.c
  * Run:      ./demos/bench_c
  *
- * Compare against the TJLB version:
- *   cargo run --release -- compile demos/bench.tjlb -o /tmp/bench.ll -O3
+ * Compare against the Aspect version:
+ *   cargo run --release -- compile demos/bench.ap -o /tmp/bench.ll -O3
  *   lli-19 /tmp/bench.ll
  */
 
@@ -92,7 +92,7 @@ static int matmul_c00(void)
 /* ---- Task 3: sum 1/k^2 (converges to pi^2/6 ~= 1.6449340668) ---- */
 /*
  * Returns the partial sum scaled by 1e10 as int64 so both the C and
- * TJLB versions can print an identical integer for comparison.
+ * Aspect versions can print an identical integer for comparison.
  */
 static int64_t pi2_over6_scaled(void)
 {

@@ -1,0 +1,92 @@
+#-
+  std/vec - a dynamic array of `i32`.
+
+  Phase 3 of the stdlib: the first non-trivial container. Without generics
+  every element type needs its own version (`vec_i32`, `vec_u8`, ...);
+  whether that's "fine" or "we need templates" is the open question this
+  module is meant to answer concretely.
+
+  Manual-monomorphization recipe (for the eventual `vec_T.ap`):
+    * pick a concrete element type `T`,
+    * substitute `i32` -> T in field types, return types, and arguments,
+    * substitute `sizeof(i32)` -> sizeof(T) in growth math,
+    * the rest of the body is type-agnostic.
+
+  Bounds-checked: `at` / `set` / `pop` call `abort()` on out-of-range
+  access. No panic message yet (no varargs) - exit-by-abort is the bar.
+-#
+$module std/vec
+
+$import std/c/stdlib
+
+type VecI32 {
+    i32* data         # private - heap buffer (NULL when capacity == 0)
+    u64 length        # private - element count
+    u64 capacity      # private - allocated slots (in elements, not bytes)
+
+    # Empty vector with no backing buffer. Pushing onto it allocates lazily.
+    public fn new() -> VecI32 {
+        return VecI32 { data = null, length = 0, capacity = 0 }
+    }
+
+    # Pre-allocated vector. Cheaper push amortisation when you know N up front.
+    public fn with_capacity(u64 cap) -> VecI32 {
+        if cap == 0 {
+            return VecI32.new()
+        }
+        i32* buf = malloc(cap * sizeof(i32))
+        return VecI32 { data = buf, length = 0, capacity = cap }
+    }
+
+    public const fn len(this) -> u64 { return this.length }
+    public const fn capacity(this) -> u64 { return this.capacity }
+
+    # Bounds-checked element access. Aborts on out-of-range.
+    public const fn at(this, u64 i) -> i32 {
+        if i >= this.length { abort() }
+        return this.data[i]
+    }
+
+    # Bounds-checked element mutation.
+    public fn set(this, u64 i, i32 v) {
+        if i >= this.length { abort() }
+        this.data[i] = v
+    }
+
+    # Ensure room for at least `need_total` elements. Doubles, then jumps
+    # to the exact size if the ask is bigger than 2x - keeps amortised
+    # push O(1) without overshooting on a one-off bulk reserve.
+    fn reserve(this, u64 need_total) {
+        if need_total <= this.capacity { return; }
+        u64 new_cap = this.capacity * 2
+        if new_cap < 4 { new_cap = 4 }
+        if new_cap < need_total { new_cap = need_total }
+        this.data = realloc(this.data, new_cap * sizeof(i32))
+        this.capacity = new_cap
+    }
+
+    # Append a value at the end.
+    public fn push(this, i32 value) {
+        this.reserve(this.length + 1)
+        this.data[this.length] = value
+        this.length = this.length + 1
+    }
+
+    # Remove and return the last value. Aborts on empty.
+    public fn pop(this) -> i32 {
+        if this.length == 0 { abort() }
+        this.length = this.length - 1
+        return this.data[this.length]
+    }
+
+    # Release the buffer and zero metadata. `realloc(NULL, n)` is malloc, but
+    # `free(NULL)` is fine too - so the cap-guard is cosmetic, not required.
+    public fn destroy(this) {
+        if this.capacity > 0 {
+            free(this.data)
+        }
+        this.data = null
+        this.length = 0
+        this.capacity = 0
+    }
+}
