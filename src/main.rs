@@ -135,8 +135,70 @@ enum Commands {
     },
 }
 
+/// Splice `ASPC_<MODE>_FLAGS` into the argument list before clap parses it.
+///
+/// `<MODE>` is the upper-cased subcommand name, so `ASPC_COMPILE_FLAGS` feeds
+/// `compile`, `ASPC_INTERPRET_FLAGS` feeds `interpret`, and so on. The value is
+/// split with shell-word rules (quotes and escapes honoured) and inserted
+/// immediately after the subcommand token — the point of the feature is to stop
+/// retyping project-wide flags like `-I lib` on every invocation.
+///
+/// Injected flags land *before* the user's own arguments for that subcommand, so
+/// an explicit command-line value still overrides them for any single-valued
+/// flag (clap keeps the last occurrence), while repeatable flags such as
+/// `-I`/`-D` accumulate. A value that is not valid shell syntax is reported on
+/// stderr and ignored rather than aborting the run.
+fn args_with_env_flags() -> Vec<String> {
+    inject_env_flags(std::env::args().collect(), |var| std::env::var(var).ok())
+}
+
+/// The environment-free core of [`args_with_env_flags`]: `lookup` stands in for
+/// `std::env::var` so the splicing rules can be tested without mutating the
+/// process environment (which is global and unsound to touch from tests).
+fn inject_env_flags(mut args: Vec<String>, lookup: impl Fn(&str) -> Option<String>) -> Vec<String> {
+    // The subcommand is the first argument (after argv[0]) that names one: the
+    // top-level command takes no options of its own, so nothing legitimately
+    // precedes it. If none is present (`aspc --help`, `aspc --version`, a bare
+    // `aspc`), there is no mode to key the variable on.
+    let subcommands: Vec<String> = Cli::command()
+        .get_subcommands()
+        .map(|c| c.get_name().to_string())
+        .collect();
+    let Some(sub_idx) = args
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, a)| subcommands.iter().any(|s| s == *a))
+        .map(|(i, _)| i)
+    else {
+        return args;
+    };
+
+    let var = format!("ASPC_{}_FLAGS", args[sub_idx].to_ascii_uppercase());
+    let Some(value) = lookup(&var) else {
+        return args;
+    };
+    if value.trim().is_empty() {
+        return args;
+    }
+
+    match shlex::split(&value) {
+        Some(extra) => {
+            // Splice the tokens in directly after the subcommand so they precede
+            // the user's own arguments for it.
+            let tail = args.split_off(sub_idx + 1);
+            args.extend(extra);
+            args.extend(tail);
+        }
+        None => {
+            eprintln!("aspc: warning: {var} is not valid shell syntax and was ignored");
+        }
+    }
+    args
+}
+
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(args_with_env_flags());
 
     match cli.command {
         Commands::Lex { file, preproc } => lex_file(&file, &preproc)?,
@@ -429,4 +491,113 @@ fn interpret_file(
     println!("Execution result: {result}");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build an owned `Vec<String>` argv from string slices.
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(ToString::to_string).collect()
+    }
+
+    /// A `lookup` that answers a single variable and nothing else.
+    fn one(name: &'static str, value: &'static str) -> impl Fn(&str) -> Option<String> {
+        move |var: &str| (var == name).then(|| value.to_string())
+    }
+
+    #[test]
+    fn splices_mode_flags_in_after_the_subcommand() {
+        let out = inject_env_flags(
+            argv(&["aspc", "compile", "foo.ap"]),
+            one("ASPC_COMPILE_FLAGS", "-I lib"),
+        );
+        assert_eq!(out, argv(&["aspc", "compile", "-I", "lib", "foo.ap"]));
+    }
+
+    #[test]
+    fn injected_flags_precede_user_flags_so_the_command_line_wins() {
+        // Both set `-O`; the user's explicit `-O3` comes after the injected
+        // `-O1`, and clap keeps the last occurrence — so the CLI overrides env.
+        let out = inject_env_flags(
+            argv(&["aspc", "compile", "-O3", "foo.ap"]),
+            one("ASPC_COMPILE_FLAGS", "-O1"),
+        );
+        assert_eq!(out, argv(&["aspc", "compile", "-O1", "-O3", "foo.ap"]));
+    }
+
+    #[test]
+    fn honours_shell_quoting_in_the_value() {
+        let out = inject_env_flags(
+            argv(&["aspc", "compile", "foo.ap"]),
+            one("ASPC_COMPILE_FLAGS", "-I \"dir with spaces\""),
+        );
+        assert_eq!(
+            out,
+            argv(&["aspc", "compile", "-I", "dir with spaces", "foo.ap"])
+        );
+    }
+
+    #[test]
+    fn keys_the_variable_off_the_actual_subcommand() {
+        // `ASPC_COMPILE_FLAGS` must not leak into an `interpret` run.
+        let out = inject_env_flags(
+            argv(&["aspc", "interpret", "foo.ap"]),
+            one("ASPC_COMPILE_FLAGS", "-I lib"),
+        );
+        assert_eq!(out, argv(&["aspc", "interpret", "foo.ap"]));
+
+        let out = inject_env_flags(
+            argv(&["aspc", "interpret", "foo.ap"]),
+            one("ASPC_INTERPRET_FLAGS", "-O2"),
+        );
+        assert_eq!(out, argv(&["aspc", "interpret", "-O2", "foo.ap"]));
+    }
+
+    #[test]
+    fn does_nothing_without_a_subcommand() {
+        // A top-level `--help` names no mode, so no variable can apply — even
+        // one that happens to be set.
+        let out = inject_env_flags(
+            argv(&["aspc", "--help"]),
+            |_: &str| Some("-I lib".to_string()),
+        );
+        assert_eq!(out, argv(&["aspc", "--help"]));
+    }
+
+    #[test]
+    fn an_unset_or_blank_value_changes_nothing() {
+        let unchanged = argv(&["aspc", "compile", "foo.ap"]);
+        assert_eq!(
+            inject_env_flags(unchanged.clone(), |_: &str| None),
+            unchanged
+        );
+        assert_eq!(
+            inject_env_flags(unchanged.clone(), one("ASPC_COMPILE_FLAGS", "   ")),
+            unchanged
+        );
+    }
+
+    #[test]
+    fn a_malformed_value_is_ignored_not_fatal() {
+        // Unbalanced quote: shlex refuses to split it, so the args are left as
+        // they were rather than aborting the build.
+        let unchanged = argv(&["aspc", "compile", "foo.ap"]);
+        assert_eq!(
+            inject_env_flags(unchanged.clone(), one("ASPC_COMPILE_FLAGS", "-I \"oops")),
+            unchanged
+        );
+    }
+
+    #[test]
+    fn a_file_named_like_a_subcommand_does_not_confuse_detection() {
+        // The subcommand is the *first* token that names one; a later argument
+        // that happens to be `parse` is an operand, not a second mode.
+        let out = inject_env_flags(
+            argv(&["aspc", "compile", "parse"]),
+            one("ASPC_COMPILE_FLAGS", "-O2"),
+        );
+        assert_eq!(out, argv(&["aspc", "compile", "-O2", "parse"]));
+    }
 }

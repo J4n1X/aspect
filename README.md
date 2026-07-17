@@ -10,6 +10,7 @@ A compiler for the Aspect programming language, written in Rust. Aspect is a sta
 - **Types - The poor man's classes** which can have functions but are not capable of polymorphism by design.
 - **Low-level control** with pointers and manual memory management
 - **LLVM backend** for optimized machine code generation
+- **Cross-compilation** via `--target`, including freestanding 32-bit x86 (i386) for OS development
 - **C interoperability** through extern function declarations
 - **Multiple optimization levels** (O0-O3)
 
@@ -79,6 +80,9 @@ Options:
 - `--verify-each` - Verify IR after each optimization pass (slower, useful for debugging)
 - `-I, --include-dir` - Include a directory for module search
 - `-D, --define` - Define a preprocessor value
+- `--target <TRIPLE>` - Compilation target triple (default: the host). Selects the
+  LLVM target machine and seeds the `OS_*`/`ARCH_*` preprocessor defines. See
+  [Cross-Compilation](#cross-compilation) below.
 
 Examples:
 ```bash
@@ -144,6 +148,58 @@ aspc compile program.ap -e obj -o program.o
 # Link to executable
 gcc -o program program.o
 ```
+
+## Cross-Compilation
+
+`aspc` is a cross-compiler by construction: LLVM emits object code for the
+`--target` triple in-process, so producing code for another architecture needs
+no separate assembler — only a linker for the final step. The `x86` backend
+covers both 64-bit (`x86_64-*`) and 32-bit (`i386`/`i486`/`i586`/`i686-*`)
+targets.
+
+### 32-bit x86 (i386)
+
+Every 32-bit x86 triple resolves to a 32-bit ABI (4-byte pointers) and seeds the
+`ARCH_I386` preprocessor define, so `$ifdef ARCH_I386` selects i386-specific
+code paths. Inline `asm fn`/`naked fn` are supported: the register model is the
+32-bit file (`eax`/`ax`/`al`, `esi`/`si`, …), with no `r8`-`r15`, no REX-only
+low bytes (`sil`/`dil`/…), and no SSE (`xmm*`), none of which i386 can encode.
+
+```bash
+# Freestanding kernel object — no OS, no CRT. Link with your own linker script.
+aspc compile kernel.ap --target i386-unknown-none-elf --emit obj -o kernel.o
+ld -m elf_i386 -T linker.ld -o kernel.elf kernel.o        # GNU ld
+# or: ld.lld -m elf_i386 -T linker.ld -o kernel.elf kernel.o
+
+# Hosted 32-bit Linux binary
+aspc compile program.ap --target i686-unknown-linux-gnu --emit obj -o program.o
+ld -m elf_i386 -o program program.o                       # if freestanding (_start)
+```
+
+`_start` (like `main`) is implicitly public and survives dead-code elimination,
+so a freestanding entry point is preserved. `--emit exe` (invoking a linker for
+you) is not yet implemented — link the emitted object yourself, as above.
+
+## Environment Variables
+
+### `ASPC_<MODE>_FLAGS`
+
+Flags in `ASPC_<MODE>_FLAGS` — where `<MODE>` is the upper-cased subcommand name
+(`ASPC_COMPILE_FLAGS`, `ASPC_INTERPRET_FLAGS`, `ASPC_LEX_FLAGS`,
+`ASPC_PARSE_FLAGS`) — are spliced into that subcommand's arguments before parsing.
+The value is split with shell-word rules (quotes and escapes honoured). This is
+the way to stop repeating project-wide flags like `-I lib` on every invocation:
+
+```bash
+export ASPC_COMPILE_FLAGS="-I lib --target i386-unknown-none-elf"
+aspc compile kernel.ap --emit obj -o kernel.o     # -I lib and --target applied automatically
+```
+
+Injected flags land *before* your command-line arguments, so an explicit flag
+still wins for single-valued options (e.g. a command-line `-O3` overrides an
+env-supplied `-O1`), while repeatable options such as `-I`/`-D` accumulate. A
+value that is not valid shell syntax is reported on stderr and ignored rather
+than aborting the run.
 
 ## Example
 
