@@ -209,7 +209,13 @@ the host triple; seeds the `OS_*`/`ARCH_*` defines that drive `$ifdef` in
 *every* subcommand, and additionally selects the LLVM target machine for
 `compile`/`interpret`). `--target` is what decides which per-platform stdlib
 backend a build sees — `lib/std/io/linux.ap` vs `lib/std/io/posix.ap` — and is
-implemented in `src/target.rs`.
+implemented in `src/target.rs`. Every 32-bit x86 triple (`i386`/`i486`/`i586`/
+`i686`) is a supported cross target, seeding `ARCH_I386`.
+
+The `ASPC_<MODE>_FLAGS` environment variable (`<MODE>` = upper-cased subcommand,
+e.g. `ASPC_COMPILE_FLAGS`) is shell-split and spliced in ahead of the real
+argv before parsing, so project-wide flags like `-I lib` or a fixed `--target`
+need not be retyped; an explicit command-line flag still wins.
 
 Programs that `$import std/...` need `-I lib`:
 

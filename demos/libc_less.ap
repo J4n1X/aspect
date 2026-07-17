@@ -1,0 +1,37 @@
+#-
+
+    libc_less.ap - A demonstration of a program that does not use the C standard library.
+    To accomplish this, we provide our own _start() function that sets up the stack and calls main().
+    Then, we just print out the informations passed to the program as a demonstration. 
+    
+-#
+
+$import std/io
+
+naked fn _start() {
+  "mov rdi, [rsp]"  # argc
+  "lea rsi, [rsp + 8]"  # argv, so far so good
+  "lea rdx, [rsi+rdi*8+8]" # envp, the crazy part. envp = argv + argc*8 + 8 (+8 to skip the null pointer at the end of argv)
+  "call main"
+  # Now we have to exit properly
+  "mov rdi, rax"  # exit code
+  "mov rax, 60"   # syscall: exit
+  "syscall"
+}
+
+fn main(u32 argc, u8 **argv, u8** envp) -> i32 {
+  # Check if the envp we've been given matches what we could derive ourselves.
+  if envp != &argv[argc + 1] {
+    println("envp does not match argv + argc + 1")
+  }
+
+  println("Passed Arguments:")
+  for (u32 i = 0; i < argc; i+=1) {
+    println(argv[i])
+  }
+  println("Environment Variables:")
+  for (u32 i = 0; envp[i] != null; i+=1){
+    println(envp[i])
+  }
+  return 0;
+}

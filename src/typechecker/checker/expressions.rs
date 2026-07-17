@@ -568,6 +568,23 @@ impl TypeChecker {
                 }
             }
 
+            // `null` adopts whatever pointer type the context demands. The
+            // parser stamps a `u8*` placeholder that only survives in synth
+            // position (no contextual target); here we upgrade it to the
+            // target so `u8** p = null`, `Point* q = null`, and
+            // `fn() -> R f = null` all yield a null of the correct type —
+            // structural depth otherwise blocks the `u8*` placeholder from
+            // coercing into a deeper or function pointer. A non-pointer (or
+            // array) target falls through to the coercibility check, which
+            // rejects it.
+            ExprKind::Null
+                if !target.is_array()
+                    && (target.pointer_depth > 0
+                        || matches!(target.base, TypeBase::FnPtr(_))) =>
+            {
+                expr.expr_type = *target;
+            }
+
             // Comparison, unary-not, cast, function call, variable, alloc, and
             // binary ops with a non-numeric (pointer) target: the expression's
             // type is not the target's type, so synthesise and assert

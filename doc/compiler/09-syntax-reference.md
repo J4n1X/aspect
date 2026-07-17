@@ -316,8 +316,8 @@ $undefine DEBUG                    # removes; no-op if not defined
 
 | Define | When |
 |---|---|
-| `OS_LINUX` / `OS_WINDOWS` / `OS_MACOS` | target OS |
-| `ARCH_X86_64` / `ARCH_AARCH64` | target arch |
+| `OS_LINUX` / `OS_WINDOWS` / `OS_MACOS` | target OS (a triple with no OS component, e.g. `i386-unknown-none-elf`, seeds none) |
+| `ARCH_X86_64` / `ARCH_AARCH64` / `ARCH_I386` | target arch (every 32-bit x86 spelling — `i386`/`i486`/`i586`/`i686` — collapses to `ARCH_I386`) |
 | `ASPECT_VERSION_MAJOR` / `ASPECT_VERSION_MINOR` | compiler version, integer tokens |
 
 **CLI:** `-D NAME` and `-D NAME=VALUE` (repeatable) inject defines before
@@ -797,9 +797,12 @@ fn sys_write(i32 fd, u8* buf, u64 len) -> i64 {
 - **Register names are contextual**, meaningful only after `:` or inside
   `clobbers(...)`. They are not keywords — `i64 rax = 1` still compiles.
 - **Registers are validated against `--target`.** `rax` under
-  `--target aarch64-*` is a compile error, not a silent accept. `rsp`/`rbp`
-  are rejected, as are two operands naming one physical register under
-  different spellings (`rax` and `eax`).
+  `--target aarch64-*` is a compile error, not a silent accept, and each x86
+  width has its own register file: a 32-bit target (`--target i386-*`) names
+  `eax`/`esi`/… and rejects the 64-bit-only `rax`/`r8`-`r15`, SSE `xmm*`, and
+  REX low bytes (`sil`/`dil`) as unknown registers. `rsp`/`rbp` — and
+  `esp`/`ebp` on i386 — are reserved, and two operands naming one physical
+  register under different spellings (`rax` and `eax`) collide.
 - **`memory`** is legal only in `clobbers(...)`. Name it whenever the
   instructions read or write through a pointer, or LLVM may cache a load
   across the block.
@@ -842,8 +845,9 @@ naked fn add_abi(i32 a, i32 b) -> i32 {
   and must issue its own `ret`/`jmp`/`syscall` — nothing is generated around it.
 - **`naked` is a keyword** and cannot be combined with `asm` or `extern`.
 - **Arch-specific.** The assembly is target-specific; gate a naked fn with
-  `$ifdef ARCH_X86_64` (and provide a portable `$else` path) exactly as the
-  syscall layer does.
+  `$ifdef ARCH_X86_64` — or `$ifdef ARCH_I386` for a 32-bit freestanding build,
+  where the spellings are `eax`/`esp`/… not `rax`/`rsp`/… — and provide a
+  portable `$else` path, exactly as the syscall layer does.
 
 The motivating use is a freestanding entry point: a `naked fn _start()` reads
 `argc` from `[rsp]` and `argv` from `[rsp+8]`, sets up the C ABI, and jumps to

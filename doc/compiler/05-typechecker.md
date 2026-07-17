@@ -293,12 +293,12 @@ Returns `Result<(), Vec<TypeCheckError>>` — collects **all** errors before rep
 
 | Error Variant | Trigger |
 |--------------|---------|
-| `AsmUnsupportedTarget` | `asm fn` not supported for the `--target` |
-| `AsmUnknownRegister` | Register name unknown for the target |
+| `AsmUnsupportedTarget` | `asm fn` not supported for the `--target` — fires for non-x86 targets. Both 64-bit and 32-bit x86 are supported, so a 64-bit register named on an i386 target is `AsmUnknownRegister`, not this |
+| `AsmUnknownRegister` | Register name unknown for the target (e.g. `rax` under `--target i386-*`) |
 | `AsmDuplicateRegister` | Two parameters pinned to one register family |
 | `AsmClobberIsOperand` | Clobbered register is also pinned to an operand |
 | `AsmDuplicateClobber` | Register (or `memory`) clobbered twice |
-| `AsmReservedRegister` | `rsp`/`rbp` pinned or clobbered |
+| `AsmReservedRegister` | `rsp`/`rbp` — or `esp`/`ebp` on i386 — pinned or clobbered |
 | `AsmUnpinnableType` | Type cannot live in a register |
 | `AsmRegisterClassMismatch` | Type needs a different register class (e.g. `f64` in a GP register) |
 | `AsmRegisterTooNarrow` | Register too narrow for the declared type |

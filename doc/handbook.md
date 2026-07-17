@@ -112,6 +112,54 @@ aspc parse -I lib hello.ap   # print the AST
 These need `-I lib` too: imports are resolved during tokenization, so
 even `lex` has to find `std/io`.
 
+### Cross-compilation and project flags
+
+`aspc` is a cross-compiler: LLVM emits code for whatever `--target` triple you
+pass, so building for another architecture needs no separate assembler — only a
+linker for the final step. The backend covers 64-bit x86 (`x86_64-*`) and
+32-bit x86 (`i386`/`i486`/`i586`/`i686-*`); a 32-bit triple seeds the
+`ARCH_I386` define ([§11](#11-the-preprocessor)) and gives you a freestanding
+entry point suitable for OS work:
+
+```bash
+# Freestanding 32-bit kernel object — link it with your own linker script.
+aspc compile kernel.ap --target i386-unknown-none-elf -e obj -o kernel.o
+ld -m elf_i386 -T linker.ld -o kernel.elf kernel.o
+```
+
+To stop retyping project-wide flags like `-I lib` (or a fixed `--target`), set
+`ASPC_<MODE>_FLAGS`, where `<MODE>` is the upper-cased subcommand — e.g.
+`ASPC_COMPILE_FLAGS` or `ASPC_INTERPRET_FLAGS`. Its shell-split contents are
+spliced in *before* your command line, so an explicit flag still overrides it
+and repeatable options (`-I`/`-D`) accumulate:
+
+```bash
+export ASPC_COMPILE_FLAGS="-I lib"
+aspc compile hello.ap -e obj -o hello.o     # -I lib applied automatically
+```
+
+The README covers both in full — linker invocations, `_start` survival, hosted
+vs. freestanding: [Cross-Compilation](../README.md#cross-compilation).
+
+### Shell completions
+
+`aspc completions <shell>` prints a completion script to stdout for `bash`,
+`zsh`, `fish`, `elvish`, or `powershell`. Install it wherever your shell looks
+for completions, then start a fresh shell:
+
+```bash
+# bash (needs the bash-completion package; file must be named `aspc`)
+mkdir -p ~/.local/share/bash-completion/completions
+aspc completions bash > ~/.local/share/bash-completion/completions/aspc
+
+# zsh (a directory on your $fpath; file named `_aspc`)
+aspc completions zsh  > ~/.zfunc/_aspc
+```
+
+Completion fires for a command named `aspc`, so the binary must be on `PATH`
+under that name. The script is generated from the live CLI, so it always matches
+the binary that produced it — regenerate after upgrading.
+
 ---
 
 ## 2. A whirlwind tour
@@ -670,8 +718,12 @@ Things worth knowing:
   pointer, as any syscall does. Omit it and the optimizer may cache a load
   across the block and hand you stale data.
 - **Registers are checked against `--target`.** `rax` under
-  `--target aarch64-*` is a compile error, not a surprise at link time.
-  Gate arch-specific code behind `$ifdef ARCH_X86_64` ([§11](#11-the-preprocessor)).
+  `--target aarch64-*` is a compile error, not a surprise at link time. Each
+  x86 width has its own register file: a 32-bit target (`--target i386-*`,
+  `$ifdef ARCH_I386`) names `eax`/`esi`/… and rejects the 64-bit-only `rax`,
+  `r8`-`r15`, SSE `xmm*`, and REX low bytes (`sil`/`dil`), none of which i386
+  can encode. Gate arch-specific code behind `$ifdef ARCH_X86_64` /
+  `$ifdef ARCH_I386` ([§11](#11-the-preprocessor)).
 - Only pinned operands are supported — the compiler won't pick a register
   for you — and `extern` and `asm` can't be combined.
 
@@ -718,7 +770,9 @@ Worth knowing:
 
 - **`naked` is a keyword** and can't be combined with `asm` or `extern`.
 - **The assembly is target-specific.** Gate it behind `$ifdef ARCH_X86_64`
-  ([§11](#11-the-preprocessor)) and offer a portable path in the `$else`.
+  — or `$ifdef ARCH_I386` for a 32-bit freestanding build, where the
+  spellings are `eax`/`esp`/… not `rax`/`rsp`/… ([§11](#11-the-preprocessor)) —
+  and offer a portable path in the `$else`.
 - **You own the calling convention.** Nothing is generated around your
   instructions — load parameters and return entirely by hand.
 
@@ -1003,8 +1057,11 @@ $endif
 ```
 
 Compiler-provided defines: `OS_LINUX` / `OS_WINDOWS` / `OS_MACOS`,
-`ARCH_X86_64` / `ARCH_AARCH64`, `ASPECT_VERSION_MAJOR` /
-`ASPECT_VERSION_MINOR`. The CLI can inject more with `-D NAME[=VALUE]`.
+`ARCH_X86_64` / `ARCH_AARCH64` / `ARCH_I386` (every 32-bit x86 spelling —
+`i386`/`i486`/`i586`/`i686` — collapses to a single `ARCH_I386`),
+`ASPECT_VERSION_MAJOR` / `ASPECT_VERSION_MINOR`. A freestanding triple with no
+OS component (`i386-unknown-none-elf`) seeds no `OS_*` define at all. The CLI
+can inject more with `-D NAME[=VALUE]`.
 
 ### Conditionals
 
@@ -1370,6 +1427,9 @@ Aspect:
 
 - **Formal grammar, precedence, every edge case:**
   [`doc/compiler/09-syntax-reference.md`](compiler/09-syntax-reference.md)
+- **Cross-compiling, freestanding 32-bit builds, and the `ASPC_*_FLAGS`
+  environment variables:** [Cross-Compilation](../README.md#cross-compilation)
+  in the README.
 - **Module system in full:** [`doc/compiler/10-modules.md`](compiler/10-modules.md)
 - **Runnable, annotated example programs:** [`demos/`](../demos/README.md) —
   start with `hello.ap`, `types.ap`, and `list_init.ap` for a language

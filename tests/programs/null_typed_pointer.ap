@@ -1,0 +1,36 @@
+# expected: 42
+#-
+  null_typed_pointer.ap — regression test: in a *checked* position `null`
+  adopts the contextual pointer type instead of the parser's `u8*`
+  placeholder.
+
+  Before the fix, `check_expression` had no `null` arm, so `null` kept its
+  placeholder and only had to be *coercible* to the target. Since pointer
+  coercion matches on depth, `u8** p = null` (and every deeper or
+  function-pointer target) failed with a spurious
+  "expected 'u8**' but found 'u8*'" mismatch. A one-level target like
+  `u8* p = null` happened to work only because the depths already matched.
+-#
+
+fn answer() -> i32 {
+    return 42
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    u8**  two    = null       # depth 2 — the reported bug
+    u8*** three  = null       # depth 3
+    u0*   opaque = null       # opaque pointer target
+    fn() -> i32 f = null      # function-pointer target
+
+    # Every one of them is a genuine null pointer of its own type.
+    i32 checks = 0
+    if !two    { checks = checks + 1 }
+    if !three  { checks = checks + 1 }
+    if !opaque { checks = checks + 1 }
+    if !f      { checks = checks + 1 }
+    if checks != 4 { return 1 }
+
+    # A null-initialised function pointer can be reassigned and called.
+    f = answer
+    return f()                # 42
+}

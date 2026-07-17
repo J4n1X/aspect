@@ -137,6 +137,32 @@ aspc interpret demos/concat_args.ap -- hello world foo
 aspc interpret program.ap -O 2 -- arg1 arg2
 ```
 
+### Shell Completions
+
+`aspc completions <SHELL>` prints a completion script for `<SHELL>` to stdout.
+Supported shells: `bash`, `zsh`, `fish`, `elvish`, `powershell`. Install the
+script where your shell looks for completions, then start a fresh shell:
+
+```bash
+# bash — needs the `bash-completion` package; file must be named `aspc`.
+# Loaded lazily on first `aspc <Tab>`.
+mkdir -p ~/.local/share/bash-completion/completions
+aspc completions bash > ~/.local/share/bash-completion/completions/aspc
+
+# zsh — drop into a directory on your $fpath (add `fpath=(~/.zfunc $fpath)`
+# before `compinit` in ~/.zshrc if it isn't already), file named `_aspc`.
+mkdir -p ~/.zfunc
+aspc completions zsh > ~/.zfunc/_aspc
+
+# fish — auto-loaded, no extra setup.
+aspc completions fish > ~/.config/fish/completions/aspc.fish
+```
+
+Completion fires for a command named `aspc`, so the binary must be on `PATH`
+under that name. The script is generated from the live CLI, so it always matches
+the subcommands and flags of the binary that produced it — regenerate it after
+upgrading `aspc`.
+
 ## Compiling to Native Executable
 
 To compile a Aspect program to a native executable, proceed as follows:
