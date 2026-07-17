@@ -96,12 +96,18 @@ impl TargetSpec {
 
     /// The `ARCH_*` preprocessor define this target seeds, or `None` if the
     /// triple's leading architecture component isn't recognised.
+    ///
+    /// Every 32-bit x86 spelling LLVM emits (`i386`/`i486`/`i586`/`i686`)
+    /// collapses to a single `ARCH_I386`: they name the same 32-bit ABI and
+    /// register file, differing only in the baseline CPU LLVM assumes, which
+    /// is a codegen concern (`-mcpu`), not a source-level `$ifdef` one.
     #[must_use]
     pub fn arch_define(&self) -> Option<&'static str> {
         let arch = self.triple.split('-').next().unwrap_or("");
         match arch.to_ascii_lowercase().as_str() {
             "x86_64" | "amd64" => Some("ARCH_X86_64"),
             "aarch64" | "arm64" => Some("ARCH_AARCH64"),
+            "i386" | "i486" | "i586" | "i686" => Some("ARCH_I386"),
             _ => None,
         }
     }
@@ -110,5 +116,43 @@ impl TargetSpec {
 impl std::fmt::Display for TargetSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.triple)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_x86_64_and_aarch64_arches() {
+        assert_eq!(
+            TargetSpec::parse("x86_64-unknown-linux-gnu").arch_define(),
+            Some("ARCH_X86_64")
+        );
+        assert_eq!(
+            TargetSpec::parse("aarch64-unknown-linux-gnu").arch_define(),
+            Some("ARCH_AARCH64")
+        );
+    }
+
+    #[test]
+    fn every_32_bit_x86_spelling_maps_to_arch_i386() {
+        for arch in ["i386", "i486", "i586", "i686"] {
+            let triple = format!("{arch}-unknown-none-elf");
+            assert_eq!(
+                TargetSpec::parse(&triple).arch_define(),
+                Some("ARCH_I386"),
+                "{triple} should seed ARCH_I386"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bare_metal_i386_triple_names_no_os_but_a_known_arch() {
+        // `i386-unknown-none-elf` — the freestanding kernel target — has no OS
+        // component, so no `OS_*` define is seeded, but the arch is known.
+        let spec = TargetSpec::parse("i386-unknown-none-elf");
+        assert_eq!(spec.os_define(), None);
+        assert_eq!(spec.arch_define(), Some("ARCH_I386"));
     }
 }

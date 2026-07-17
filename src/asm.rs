@@ -147,6 +147,43 @@ static X86_64_SSE: &[(&str, &str, u32)] = &[
     ("xmm15", "xmm15", 128),
 ];
 
+/// i386 (32-bit x86) general-purpose registers as `(spelling, family, width_bits)`.
+///
+/// The 32-bit spelling is the family — there is no 64-bit register above it —
+/// so `eax`/`ax`/`al` all alias family `eax`. Two banks of x86-64 spellings are
+/// deliberately absent because i386 cannot encode them: the `r8`-`r15` file
+/// (introduced with x86-64) and the low-byte spellings `sil`/`dil`/`spl`/`bpl`
+/// (they require a REX prefix, which does not exist in 32-bit mode). The legacy
+/// high-byte registers `ah`/`bh`/`ch`/`dh` are omitted for the same reason they
+/// are on x86-64 — kept out of the model to avoid encoder-level surprises.
+///
+/// No SSE table accompanies this one: SSE/SSE2 is baseline on x86-64 but *not*
+/// on i386, so under the `generic` 32-bit CPU no `xmm` register is guaranteed —
+/// pinning a float on i386 is therefore an unknown-register error, not a silent
+/// accept.
+static I386_GPRS: &[(&str, &str, u32)] = &[
+    ("eax", "eax", 32),
+    ("ax", "eax", 16),
+    ("al", "eax", 8),
+    ("ebx", "ebx", 32),
+    ("bx", "ebx", 16),
+    ("bl", "ebx", 8),
+    ("ecx", "ecx", 32),
+    ("cx", "ecx", 16),
+    ("cl", "ecx", 8),
+    ("edx", "edx", 32),
+    ("dx", "edx", 16),
+    ("dl", "edx", 8),
+    ("esi", "esi", 32),
+    ("si", "esi", 16),
+    ("edi", "edi", 32),
+    ("di", "edi", 16),
+    ("ebp", "ebp", 32),
+    ("bp", "ebp", 16),
+    ("esp", "esp", 32),
+    ("sp", "esp", 16),
+];
+
 /// The pseudo-register naming "this asm touches memory". Legal only in
 /// `clobbers(...)`, never as an operand pin — as a pin it is not in the
 /// register table and so reports as an unknown register.
@@ -158,12 +195,16 @@ pub const MEMORY_CLOBBER: &str = "memory";
 /// Returns `None` for an unknown name, or for any architecture whose
 /// register table we do not model — which is what makes `rax` under
 /// `--target aarch64-*` a clean compile error rather than a silent accept.
+/// It is likewise what makes `rax` under `--target i686-*` an unknown-register
+/// error: i386 is modelled, but the 64-bit spelling does not exist on it.
 #[must_use]
 pub fn lookup_register(arch_define: &str, name: &str) -> Option<RegInfo> {
-    if arch_define != "ARCH_X86_64" {
-        return None;
+    match arch_define {
+        "ARCH_X86_64" => find_in(X86_64_GPRS, name, RegClass::Gpr)
+            .or_else(|| find_in(X86_64_SSE, name, RegClass::Sse)),
+        "ARCH_I386" => find_in(I386_GPRS, name, RegClass::Gpr),
+        _ => None,
     }
-    find_in(X86_64_GPRS, name, RegClass::Gpr).or_else(|| find_in(X86_64_SSE, name, RegClass::Sse))
 }
 
 fn find_in(
@@ -187,11 +228,14 @@ fn find_in(
 /// and so cannot answer this.
 #[must_use]
 pub fn pointer_width_bits(arch_define: &str) -> u32 {
-    debug_assert!(
-        matches!(arch_define, "ARCH_X86_64" | "ARCH_AARCH64"),
-        "pointer width asked for unmodelled arch '{arch_define}'"
-    );
-    64
+    match arch_define {
+        "ARCH_I386" => 32,
+        "ARCH_X86_64" | "ARCH_AARCH64" => 64,
+        other => {
+            debug_assert!(false, "pointer width asked for unmodelled arch '{other}'");
+            64
+        }
+    }
 }
 
 /// True for the stack- and frame-pointer families, which may never be pinned
@@ -200,11 +244,13 @@ pub fn pointer_width_bits(arch_define: &str) -> u32 {
 /// `rsp` is the live hardware stack pointer the calling convention depends on
 /// continuously; `rbp` may address spill slots under the default frame
 /// lowering — which is exactly what an unoptimised `asm fn` uses before
-/// `alwaysinline` folds it away. Checked per *family*, so `esp` is rejected
-/// for the same reason `rsp` is.
+/// `alwaysinline` folds it away. The 32-bit families `esp`/`ebp` are their i386
+/// counterparts and reserved for the identical reason; on x86-64 `esp`/`ebp`
+/// already resolve to the `rsp`/`rbp` families, so listing them here only adds
+/// coverage for the i386 table, where the family *is* the 32-bit spelling.
 #[must_use]
 pub fn is_reserved_family(family: &str) -> bool {
-    matches!(family, "rsp" | "rbp")
+    matches!(family, "rsp" | "rbp" | "esp" | "ebp")
 }
 
 #[cfg(test)]
@@ -258,6 +304,57 @@ mod tests {
         assert!(lookup_register("ARCH_AARCH64", "rax").is_none());
         assert!(lookup_register("ARCH_AARCH64", "x0").is_none());
         assert!(lookup_register("ARCH_RISCV64", "rax").is_none());
+    }
+
+    #[test]
+    fn resolves_i386_spellings_to_their_32_bit_family() {
+        assert_eq!(lookup_register("ARCH_I386", "eax").unwrap().family, "eax");
+        // The narrower spellings alias the same physical register, so collision
+        // checks must see `ax`/`al` as the `eax` family too.
+        assert_eq!(lookup_register("ARCH_I386", "ax").unwrap().family, "eax");
+        assert_eq!(lookup_register("ARCH_I386", "al").unwrap().family, "eax");
+        assert_eq!(lookup_register("ARCH_I386", "esi").unwrap().family, "esi");
+    }
+
+    #[test]
+    fn records_the_width_of_each_i386_spelling() {
+        assert_eq!(lookup_register("ARCH_I386", "eax").unwrap().width_bits, 32);
+        assert_eq!(lookup_register("ARCH_I386", "ax").unwrap().width_bits, 16);
+        assert_eq!(lookup_register("ARCH_I386", "al").unwrap().width_bits, 8);
+    }
+
+    #[test]
+    fn i386_has_no_64_bit_rex_only_or_sse_registers() {
+        // The 64-bit file, the REX-only low bytes, and the extended GPRs cannot
+        // be encoded in 32-bit mode; `rax`/`sil`/`r8` are unknown, not accepted.
+        for name in ["rax", "rbx", "rsi", "sil", "dil", "spl", "bpl", "r8", "r15", "r8d"] {
+            assert!(
+                lookup_register("ARCH_I386", name).is_none(),
+                "{name} must be unknown on i386"
+            );
+        }
+        // No SSE bank on baseline i386 either.
+        assert!(lookup_register("ARCH_I386", "xmm0").is_none());
+    }
+
+    #[test]
+    fn i386_stack_and_frame_pointers_are_reserved() {
+        for name in ["esp", "sp", "ebp", "bp"] {
+            let info = lookup_register("ARCH_I386", name)
+                .unwrap_or_else(|| panic!("{name} should be a known i386 register"));
+            assert!(
+                is_reserved_family(info.family),
+                "{name} (family {}) must be reserved",
+                info.family
+            );
+        }
+    }
+
+    #[test]
+    fn pointer_width_follows_the_arch() {
+        assert_eq!(pointer_width_bits("ARCH_I386"), 32);
+        assert_eq!(pointer_width_bits("ARCH_X86_64"), 64);
+        assert_eq!(pointer_width_bits("ARCH_AARCH64"), 64);
     }
 
     #[test]

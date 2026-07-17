@@ -58,23 +58,47 @@ asm fn add2(i64 a: rax, i64 b: rbx) -> i64: rax
         assert!(check_for_target(SYSCALL_ASM_FN, "x86_64-unknown-linux-gnu").is_ok());
     }
 
+    /// The i386 counterpart of [`SYSCALL_ASM_FN`]: 32-bit types pinned to the
+    /// 32-bit register file, which is all that exists on i386.
+    const SYSCALL_ASM_FN_I386: &str = r#"
+asm fn add2(i32 a: eax, i32 b: ebx) -> i32: eax
+{
+    "add eax, ebx"
+}
+"#;
+
     #[test]
-    fn asm_fn_is_rejected_for_a_32_bit_x86_target() {
+    fn asm_fn_naming_x86_64_registers_is_rejected_on_i386() {
         // i686 is the case that fails *open* if the target never reaches the
         // checker: LLVM has the backend, accepts the triple, and emits a
         // 32-bit module in which `{rax}` does not exist — surfacing only as a
-        // raw, positionless backend error. `arch_define()` returns None for
-        // i686, so the checker must reject it like any other non-x86-64 arch.
+        // raw, positionless backend error. i386 is now a *modelled* target, so
+        // the diagnosis is sharper than "unsupported target": the 64-bit
+        // spellings `rax`/`rbx` are simply unknown registers on it.
         let errors = check_for_target(SYSCALL_ASM_FN, "i686-unknown-linux-gnu")
-            .expect_err("an asm fn naming rax must not compile for 32-bit x86");
+            .expect_err("64-bit register spellings must not compile for 32-bit x86");
         assert!(
-            matches!(
-                errors.as_slice(),
-                [TypeCheckError::AsmUnsupportedTarget { triple, .. }]
-                    if triple == "i686-unknown-linux-gnu"
-            ),
-            "expected a single AsmUnsupportedTarget error, got {errors:?}"
+            errors
+                .iter()
+                .all(|e| matches!(e, TypeCheckError::AsmUnknownRegister { arch, .. } if arch == "ARCH_I386")),
+            "expected only AsmUnknownRegister errors for ARCH_I386, got {errors:?}"
         );
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                TypeCheckError::AsmUnknownRegister { register, .. } if register == "rax"
+            )),
+            "expected `rax` to be reported as unknown on i386, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn asm_fn_naming_i386_registers_is_accepted_for_a_32_bit_x86_target() {
+        // The positive case that proves i386 is a first-class inline-asm target,
+        // not merely "no longer a hard error": 32-bit spellings resolve and the
+        // register contract type-checks clean.
+        assert!(check_for_target(SYSCALL_ASM_FN_I386, "i686-unknown-linux-gnu").is_ok());
+        assert!(check_for_target(SYSCALL_ASM_FN_I386, "i386-unknown-none-elf").is_ok());
     }
 
     #[test]

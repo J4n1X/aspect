@@ -22,8 +22,14 @@ impl TypeChecker {
         asm: &AsmSpec,
     ) {
         // An arch whose register model we don't have cannot be validated at
-        // all, so there is no point resolving x86 names against it.
-        let Some(arch) = self.target.arch_define().filter(|a| *a == "ARCH_X86_64") else {
+        // all, so there is no point resolving x86 names against it. Both x86
+        // flavours are modelled; the register table then decides which names
+        // are legal (e.g. `rax` exists on x86-64 but not i386).
+        let Some(arch) = self
+            .target
+            .arch_define()
+            .filter(|a| matches!(*a, "ARCH_X86_64" | "ARCH_I386"))
+        else {
             self.errors.push(TypeCheckError::AsmUnsupportedTarget {
                 name: proto.name.clone(),
                 triple: self.target.triple().to_string(),
