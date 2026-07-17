@@ -1,4 +1,4 @@
-# expected: "extern and asm cannot be combined"
+# expected: "cannot be combined on one function"
 # `extern` reaches the dispatch first and is caught there.
 
 extern asm fn f(i64 a: rax) -> i64: rax {

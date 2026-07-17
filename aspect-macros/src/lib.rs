@@ -1,3 +1,4 @@
+mod error_position;
 mod expand;
 mod generate_tests;
 
@@ -74,4 +75,22 @@ pub fn parse_rule(_attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn generate_tests(input: TokenStream) -> TokenStream {
     generate_tests::generate_tests_impl(input)
+}
+
+/// Derive `fn position(&self) -> Option<crate::lexer::Position>` for an error
+/// enum, replacing the hand-written `match` matchers.
+///
+/// For each variant the canonical position is chosen as:
+/// * the field annotated `#[position]` — which delegates via `field.position()`
+///   when that field is a nested error rather than a `Position`;
+/// * otherwise the sole `Position`-typed field, or, when several are present,
+///   the one named `pos`, else `position`, else the first;
+/// * `None` when the variant carries no position.
+///
+/// The generated method matches the previous hand-written signature exactly
+/// (`#[must_use] pub fn position`).
+#[proc_macro_derive(ErrorPosition, attributes(position))]
+pub fn derive_error_position(item: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(item as syn::DeriveInput);
+    error_position::derive_error_position(input).into()
 }

@@ -1,8 +1,30 @@
 # Codebase Refactor — Positions, Runtime/Constant Split, File Decomposition
 
-Status: **design proposal, not yet implemented**. Three independent focus
-areas, each shippable on its own. No language-surface changes; this is
-internal code-health work only.
+Status: **largely landed** (branch `refactor/file-decomposition`). Three
+independent focus areas, each shippable on its own. No language-surface changes;
+this is internal code-health work only.
+
+Progress:
+- **§1**: R1 (derive `position()`), R3 (type-lowering position at the boundary),
+  R4 (position-less synthetic errors) landed. R2 (drop error-only `pos` params)
+  applied only where behaviour-preserving — the codegen indirect-call trio now
+  read `callee.pos`; the remaining named helpers keep `pos` because they receive
+  extracted primitives (`LangType`, `&str`), not a redundant pos-bearing node, so
+  dropping it would move the diagnostic (a change the fragment-based failure tests
+  would not catch).
+- **§2**: landed as a **code-motion separation**, *not* the fully IR-independent
+  `ConstValue` redesign sketched in §2.2 below. Rationale: `ConstValue` requires
+  re-architecting constant-value storage; the lower-risk move was to extract
+  `const_eval` (`src/codegen/const_eval.rs`) as the constant walker and make
+  `walk_expression` runtime-only, deleting `EmitMode`/`emitter()`/`require_runtime`.
+  Both paths still return `BasicValueEnum` and share `ConstantEmitter`/
+  `RuntimeEmitter` via the `ValueEmitter` trait. Emitted IR is byte-identical to
+  the pre-refactor baseline. Treat §2.2's `ConstValue`/`materialize` design as a
+  *future* direction, not what shipped.
+- **§3**: Tier 1 + Tier 2 (parser and checker splits) landed.
+- **Prerequisite** (the original TODO gate — "solve the two bugs first"): met.
+  Both blocking bugs are fixed in the accompanying feature work — `if p {}` /
+  `while p` pointer truthiness and stack/BSS literal-count `alloc`.
 
 This document is the canonical plan for three refactors requested together:
 

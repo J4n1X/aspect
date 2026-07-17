@@ -43,6 +43,7 @@
 pub mod conditional;
 pub mod defines;
 pub mod errors;
+pub mod expr_eval;
 pub mod modules;
 
 use std::collections::{HashMap, HashSet};
@@ -54,6 +55,8 @@ use crate::target::TargetSpec;
 
 pub use defines::{Define, DefineOrigin, DefineTable};
 pub use errors::PreprocessError;
+
+use defines::ScopedDefines;
 
 /// The output of the preprocessor: the fully-expanded token stream plus the
 /// file registry that maps each token's `pos.file_id` back to a source path.
@@ -425,7 +428,23 @@ impl Preprocessor {
                             TokenKind::CloseBrace => brace_depth = brace_depth.saturating_sub(1),
                             _ => {}
                         }
-                        defines::expand_into(&mut self.tokens, token, &self.defines);
+                        {
+                            // Substitute using the current file's scope: its
+                            // own module and direct imports, plus globals.
+                            let ctx = self.file_stack.last().expect(
+                                "a file context is always active while tokens are processed",
+                            );
+                            let module = self.file_modules[ctx.file_id as usize]
+                                .as_deref()
+                                .unwrap_or("");
+                            let scoped = ScopedDefines::new(
+                                &self.defines,
+                                module,
+                                &ctx.imports,
+                                &self.file_modules,
+                            );
+                            scoped.expand_into(&mut self.tokens, token);
+                        }
                         // The file now has non-directive content — `$module`
                         // can no longer appear (newlines don't count). Only
                         // *emitted* tokens count: content inside a skipped
@@ -468,7 +487,18 @@ impl Preprocessor {
             name.as_str(),
             "ifdef" | "ifndef" | "if" | "elseif" | "elseifdef" | "else" | "endif"
         ) {
-            return self.conditionals.handle(&name, rest, pos, &self.defines);
+            // `$if`/`$ifdef` see only the current file's own module and its
+            // direct imports (plus globals) — the same scope as substitution.
+            let ctx = self
+                .file_stack
+                .last()
+                .expect("a file context is always active while tokens are processed");
+            let module = self.file_modules[ctx.file_id as usize]
+                .as_deref()
+                .unwrap_or("");
+            let scoped =
+                ScopedDefines::new(&self.defines, module, &ctx.imports, &self.file_modules);
+            return self.conditionals.handle(&name, rest, pos, &scoped);
         }
         if !self.conditionals.active() {
             return Ok(());
@@ -502,10 +532,13 @@ impl Preprocessor {
                 pos: name_token.pos,
             });
         };
+        // The origin's `file_id` (this file) tags the define with its home
+        // module; `file_modules` resolves that id for the collision check.
         self.defines.define(
             name.clone(),
             value.to_vec(),
             DefineOrigin::Directive(name_token.pos),
+            &self.file_modules,
         )
     }
 
@@ -529,7 +562,12 @@ impl Preprocessor {
                 pos: extra.pos,
             });
         }
-        self.defines.undefine(name);
+        let this_file = self
+            .file_stack
+            .last()
+            .expect("a file context is always active while tokens are processed")
+            .file_id;
+        self.defines.undefine(name, this_file, &self.file_modules);
         Ok(())
     }
 

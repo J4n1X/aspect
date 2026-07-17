@@ -2,10 +2,10 @@ use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicValueEnum, IntValue, PointerValue};
 use inkwell::IntPredicate;
 
-use crate::codegen::expressions::{walk_expression, EmitMode};
+use crate::codegen::const_eval::const_eval;
 use crate::codegen::generator::CodeGenerator;
 use crate::codegen::value_emitter::{ConstantEmitter, ValueEmitter};
-use crate::codegen::{CodegenError, LangTypeExt};
+use crate::codegen::{CodegenError, LangTypeExt, TypeLoweringError};
 use crate::parser::LangType;
 use crate::parser::{ExprKind, Expression, Statement, StatementKind};
 
@@ -81,7 +81,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             ExprKind::IndirectCall { callee, args } => {
                 // Statement form accepts a void return; the expression form
                 // would have errored on MissingReturn instead.
-                self.generate_indirect_call_statement(callee, args, expr.pos)
+                self.generate_indirect_call_statement(callee, args)
             }
             _ => {
                 self.generate_expression(expr)?;
@@ -99,11 +99,13 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<(), CodegenError> {
         let llvm_type = if var_type.is_array() {
             // Cache-aware: resolves type-struct elements (`Pair[2]`) too.
-            self.lang_type_to_llvm_array(var_type, pos)?.into()
+            self.lang_type_to_llvm_array(var_type)
+                .map_err(|e| e.with_pos(pos))?
+                .into()
         } else {
             // `lang_type_to_llvm` resolves type-struct values through the cache;
             // it falls back to `to_llvm` for scalars/pointers.
-            self.lang_type_to_llvm(var_type, pos)?
+            self.lang_type_to_llvm(var_type).map_err(|e| e.with_pos(pos))?
         };
 
         // Allocate in the entry block for mem2reg compatibility
@@ -144,7 +146,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         if let Some(init_expr) = initializer
             && let Some(folded) = self.try_fold_constant_expression(init_expr)
         {
-            let target_llvm = self.lang_type_to_llvm(var_type, pos)?;
+            let target_llvm = self.lang_type_to_llvm(var_type).map_err(|e| e.with_pos(pos))?;
             let coerced = if folded.get_type() == target_llvm {
                 folded
             } else {
@@ -172,7 +174,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.add_variable(name.to_string(), alloca, llvm_type, *var_type, None);
 
         if let Some(init_expr) = initializer {
-            let init_value = self.generate_coerced_value(init_expr, Some(var_type), EmitMode::Runtime)?;
+            let init_value = self.generate_coerced_value(init_expr, Some(var_type))?;
             self.builder.build_store(alloca, init_value)?;
         } else {
             self.builder.build_store(alloca, llvm_type.const_zero())?;
@@ -195,7 +197,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             (v.ptr(), v.lang_type())
         };
 
-        let value_llvm = self.generate_coerced_value(value, Some(&var_lang_type), EmitMode::Runtime)?;
+        let value_llvm = self.generate_coerced_value(value, Some(&var_lang_type))?;
         self.builder.build_store(var_ptr, value_llvm)?;
         Ok(())
     }
@@ -210,7 +212,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let ptr = self.generate_expression(ptr_expr)?;
                 // Coerce to the pointee type so that e.g. storing a literal i32
                 // into a `u8 *` slot emits an i8 store, not a 4-byte i32 store.
-                let value_llvm = self.generate_coerced_value(value, Some(&target.expr_type), EmitMode::Runtime)?;
+                let value_llvm = self.generate_coerced_value(value, Some(&target.expr_type))?;
                 self.builder
                     .build_store(ptr.into_pointer_value(), value_llvm)?;
                 Ok(())
@@ -229,7 +231,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         value: &Expression,
     ) -> Result<(), CodegenError> {
         let (field_ptr, field_ty) = self.emit_address(target)?;
-        let value_llvm = self.generate_coerced_value(value, Some(&field_ty), EmitMode::Runtime)?;
+        let value_llvm = self.generate_coerced_value(value, Some(&field_ty))?;
         self.builder.build_store(field_ptr, value_llvm)?;
         Ok(())
     }
@@ -250,7 +252,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     pos,
                 )
             })?;
-            let value = self.generate_coerced_value(expr, Some(&result_type), EmitMode::Runtime)?;
+            let value = self.generate_coerced_value(expr, Some(&result_type))?;
             self.builder.build_store(slot, value)?;
             self.builder.build_unconditional_branch(exit_bb)?;
             // Park subsequent (unreachable) statements in a dead block, the
@@ -272,7 +274,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )
             })?;
             let ret_type = self.current_function_return_type;
-            let value = self.generate_coerced_value(expr, ret_type.as_ref(), EmitMode::Runtime)?;
+            let value = self.generate_coerced_value(expr, ret_type.as_ref())?;
             self.builder.build_store(sret_ptr, value)?;
             self.builder.build_return(None)?;
             return Ok(());
@@ -280,7 +282,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         if let Some(expr) = expr {
             let ret_type = self.current_function_return_type;
-            let value = self.generate_coerced_value(expr, ret_type.as_ref(), EmitMode::Runtime)?;
+            let value = self.generate_coerced_value(expr, ret_type.as_ref())?;
             self.builder.build_return(Some(&value))?;
         } else {
             self.builder.build_return(None)?;
@@ -313,7 +315,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let function = self
             .current_function
             .ok_or(CodegenError::UnexpectedStatement(pos))?;
-        let llvm_type = self.lang_type_to_llvm(&result_type, pos)?;
+        let llvm_type = self
+            .lang_type_to_llvm(&result_type)
+            .map_err(|e| e.with_pos(pos))?;
 
         // Result slot in the entry block (mem2reg-friendly), mirroring
         // `generate_var_decl`'s alloca placement.
@@ -545,6 +549,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 zero,
                 "tobool",
             )?)
+        } else if value.is_pointer_value() {
+            // `if p` / `while p` on a pointer: true iff non-null — the inverse
+            // of `!p` (which tests null). Comparing the pointer to a null of its
+            // own type yields the i1 the conditional wants.
+            let ptr = value.into_pointer_value();
+            let null = ptr.get_type().const_null();
+            Ok(self
+                .builder
+                .build_int_compare(IntPredicate::NE, ptr, null, "tobool")?)
         } else {
             Err(CodegenError::TypeError(
                 "Cannot convert value to boolean".to_string(),
@@ -565,9 +578,8 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(crate) fn get_zero_value(
         &self,
         ty: &crate::lexer::LangType,
-        pos: crate::lexer::Position,
-    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-        let llvm_type = ty.to_llvm(self.context, pos)?;
+    ) -> Result<BasicValueEnum<'ctx>, TypeLoweringError> {
+        let llvm_type = ty.to_llvm(self.context)?;
         Ok(llvm_type.const_zero())
     }
 
@@ -601,6 +613,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         &mut self,
         expr: &Expression,
     ) -> Option<BasicValueEnum<'ctx>> {
-        walk_expression(expr, self, EmitMode::Constant).ok()
+        const_eval(expr, self).ok()
     }
 }

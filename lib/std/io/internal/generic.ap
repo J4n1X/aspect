@@ -1,0 +1,86 @@
+#-
+  std/io/internal — number/string formatting primitives for std/io.
+
+  These are pure computation: they render into a caller-supplied buffer and
+  touch no OS. std/io keeps them here, in a submodule it imports but does
+  not re-export, so `$import std/io` sees only the public printers
+  (`println_i64`, `print`, …) and not this machinery — imports are
+  non-transitive, so a submodule std/io imports does not leak through it.
+
+  Each `fmt_*` writes at `buf[at]` and returns the offset one past what it
+  wrote, so calls chain. Buffers are the caller's; the sizes chosen at the
+  call sites in std/io are the worst case for each type (u64 is 20 digits,
+  i64 is 19 plus a sign).
+-#
+$module std/io/internal
+
+fn fmt_u64(u8 *buf, u64 at, u64 n) -> u64 {
+    if n >= 10 { at = fmt_u64(buf, at, n / 10) }
+    buf[at] = (n % 10 + 48) as u8                  # ASCII '0' = 48
+    return at + 1
+}
+
+# Exactly six digits, zero-padded (C's `%06d`). Digits above the sixth are
+# dropped, as they always have been.
+fn fmt_u64_pad6(u8 *buf, u64 at, u64 n) -> u64 {
+    u64 div = 100000
+    while div > 0 {
+        buf[at] = ((n / div) % 10 + 48) as u8
+        at = at + 1
+        div = div / 10
+    }
+    return at
+}
+
+fn fmt_i64(u8 *buf, u64 at, i64 n) -> u64 {
+    if n >= 0 { return fmt_u64(buf, at, n as u64) }
+    buf[at] = 45                                   # '-'
+    # `n` could be I64_MIN; flip the bits then bump by one to land at the
+    # correct unsigned magnitude without overflowing on the negation.
+    return fmt_u64(buf, at + 1, ((~n) as u64) + 1)
+}
+
+# A finite f64 to six decimal places (matches C's `%f` default).
+#
+# Limitations:
+#   * `|x|` must be representable as `i64` (so roughly < 2^63 ~ 9.2e18).
+#     Beyond that, `x as i64` is UB at the LLVM level.
+#   * NaN and infinities render as `nan` / `inf` / `-inf`. No scientific
+#     notation; very small numbers round to `0.000000`.
+fn fmt_f64(u8 *buf, u64 at, f64 x) -> u64 {
+    # NaN: a value not equal to itself.
+    if x != x {
+        buf[at] = 110 buf[at + 1] = 97 buf[at + 2] = 110      # "nan"
+        return at + 3
+    }
+    # `x < 0.0` is false for -0.0, so the sign bit is read off 1/x: -inf for
+    # -0.0, +inf for +0.0. C's %f prints -0.000000 and so does this.
+    if x < 0.0 || (x == 0.0 && 1.0 / x < 0.0) {
+        buf[at] = 45
+        at = at + 1
+        x = 0.0 - x
+    }
+    # Crude infinity check: anything that overflows i64 is treated as inf.
+    f64 i64_max = 9223372036854775000.0            # ~i64::MAX, generous margin
+    if x > i64_max {
+        buf[at] = 105 buf[at + 1] = 110 buf[at + 2] = 102     # "inf"
+        return at + 3
+    }
+    i64 int_part = x as i64
+    f64 frac = x - (int_part as f64)
+    # Round to six decimals; carry into int_part on 0.9999995-style edges.
+    i64 cents = (frac * 1000000.0 + 0.5) as i64
+    if cents >= 1000000 {
+        int_part = int_part + 1
+        cents = 0
+    }
+    at = fmt_u64(buf, at, int_part as u64)
+    buf[at] = 46                                   # '.'
+    return fmt_u64_pad6(buf, at + 1, cents as u64)
+}
+
+fn cstring_len(u8 *s) -> u64 {
+    u64 n = 0
+    while s[n] != 0 { n = n + 1 }
+    return n
+}

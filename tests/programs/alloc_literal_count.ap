@@ -1,0 +1,22 @@
+# expected: 42
+#-
+  Regression: `type[<literal>]` allocation spelling. The scanner folds
+  `u8[8]` into a single LangType token (array_size = Some(8)), which
+  parse_alloc used to reject with "Expected expression" — even though
+  `u8[n]`, `u8[(8)]`, and an identifier count all work. This is stack
+  (in a function) / BSS (module scope) allocation, not heap.
+  See TODO "heap alloc rejects a literal count".
+-#
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    # Folded literal count, u8 element — stack allocation.
+    u8 *bytes = u8[8]
+    bytes[0] = 40
+    bytes[7] = 2
+
+    # Folded literal count, wider element type.
+    i32 *words = i32[4]
+    words[3] = 0
+
+    return bytes[0] + bytes[7] + words[3]
+}

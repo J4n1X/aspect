@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use clap::{Args, Parser as ClapParser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser as ClapParser, Subcommand, ValueEnum};
 use inkwell::context::Context as LLVMContext;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
@@ -126,7 +126,13 @@ enum Commands {
         /// Use `--` to separate them from this CLI's own flags.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_name = "ARGS")]
         program_args: Vec<String>,
-    }
+    },
+    /// Generate a shell completion script to stdout
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum, value_name = "SHELL")]
+        shell: clap_complete::Shell,
+    },
 }
 
 fn main() -> Result<()> {
@@ -159,6 +165,9 @@ fn main() -> Result<()> {
             program_args,
         } => {
             interpret_file(&file, &preproc, opt_level, &program_args)?;
+        }
+        Commands::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "aspc", &mut std::io::stdout());
         }
     }
 
@@ -313,6 +322,12 @@ fn parse_file(path: &Path, preproc: &PreprocArgs) -> Result<()> {
             FunctionBody::Asm(asm) => {
                 println!("    [asm]");
                 for line in &asm.lines {
+                    println!("      {line}");
+                }
+            }
+            FunctionBody::Naked(naked) => {
+                println!("    [naked]");
+                for line in &naked.lines {
                     println!("      {line}");
                 }
             }

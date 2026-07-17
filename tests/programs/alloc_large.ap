@@ -1,0 +1,75 @@
+# expected: 0
+# compile_args: "-D", "STD_NO_LIBC", "-I", "lib"
+# requires_arch: ARCH_X86_64
+#-
+  alloc_large.ap — the dedicated-mapping path for big requests (>= 128 KiB),
+  which bypass the region for their own `page_map`. One large allocation is
+  written end to end and read back; several coexist and stay independent; and
+  each stays 16-byte aligned. Freeing them releases the mappings (no leak into
+  the region's free list). Exit code is the failed-check count.
+-#
+$import std/mem
+
+fn fail_if(bool bad) -> i32 {
+    if bad { return 1 }
+    return 0
+}
+
+fn main(u32 argc, u8** argv) -> i32 {
+    i32 fails = 0
+
+    # One large allocation, written across its whole span and verified.
+    u64 n = 1000000                 # ~1 MiB, well past the 128 KiB threshold
+    u8* big = malloc(n)
+    fails += fail_if(big == null)
+    fails += fail_if(((big as u64) & 15) != 0)
+    if big != null {
+        for (u64 i = 0; i < n; i += 1) {
+            big[i] = ((i * 2654435761) >> 24) as u8
+        }
+        bool ok = true
+        for (u64 i = 0; i < n; i += 1) {
+            if big[i] != ((i * 2654435761) >> 24) as u8 { ok = false break }
+        }
+        fails += fail_if(!ok)
+        free(big)
+    }
+
+    # Several large mappings live at once and do not alias one another.
+    (u8*)[6] bufs
+    u64[6] lens = {150000, 262144, 300000, 500000, 180000, 1048576}
+    for (u64 k = 0; k < 6; k += 1) {
+        u8* p = malloc(lens[k])
+        bufs[k] = p
+        fails += fail_if(p == null)
+        fails += fail_if(((p as u64) & 15) != 0)
+        if p != null {
+            p[0] = (k + 1) as u8
+            p[lens[k] - 1] = (k + 100) as u8
+        }
+    }
+    bool distinct = true
+    for (u64 k = 0; k < 6; k += 1) {
+        u8* p = bufs[k]
+        if p != null {
+            if p[0] != (k + 1) as u8 { distinct = false }
+            if p[lens[k] - 1] != (k + 100) as u8 { distinct = false }
+        }
+    }
+    fails += fail_if(!distinct)
+    for (u64 k = 0; k < 6; k += 1) {
+        free(bufs[k])
+    }
+
+    # A large block freed and re-requested still comes back usable (mapping
+    # churn, not a region reuse).
+    u8* again = malloc(400000)
+    fails += fail_if(again == null)
+    if again != null {
+        again[399999] = 5
+        fails += fail_if(again[399999] != 5)
+        free(again)
+    }
+
+    return fails
+}

@@ -1,8 +1,9 @@
 use crate::lexer::Position;
+use aspect_macros::ErrorPosition;
 use thiserror::Error;
 
 /// Code generation error types
-#[derive(Error, Debug)]
+#[derive(Error, Debug, ErrorPosition)]
 pub enum CodegenError {
     #[error("Undefined variable '{0}' at {1}")]
     UndefinedVariable(String, Position),
@@ -38,23 +39,39 @@ pub enum CodegenError {
     /// whole compilation was invoked with, not any one place in the source.
     #[error("unsupported compilation target '{triple}': {reason}")]
     UnsupportedTarget { triple: String, reason: String },
+
+    /// A codegen failure with no meaningful source location: whole-module
+    /// backend operations (running LLVM passes, emitting the object file) and
+    /// registration-time type lowering that runs before any statement context.
+    /// Position-less by design, so diagnostics print the bare message instead
+    /// of a fabricated `0:0` prefix.
+    #[error("{0}")]
+    Internal(String),
 }
 
-impl CodegenError {
-    /// Extract the source position from this error, if any.
+/// A type-lowering failure with **no** source position attached.
+///
+/// The codegen type-lowering call graph (`LangTypeExt::to_llvm` and friends)
+/// is value-only — a `LangType` carries no position — so those helpers cannot
+/// name a source location on their own. They return this position-less error;
+/// the caller grafts the relevant position on at the phase boundary via
+/// [`TypeLoweringError::with_pos`], mirroring how `ParserError::from_symbol`
+/// attaches a position to a position-less `SymbolError`.
+#[derive(Debug)]
+pub struct TypeLoweringError(pub String);
+
+impl TypeLoweringError {
+    /// Attach `pos`, yielding a positioned [`CodegenError::TypeError`].
     #[must_use]
-    pub fn position(&self) -> Option<Position> {
-        match self {
-            Self::UndefinedVariable(_, pos)
-            | Self::UndefinedFunction(_, pos)
-            | Self::TypeError(_, pos)
-            | Self::InvalidOperation(_, pos)
-            | Self::UnexpectedStatement(pos)
-            | Self::MissingReturn(_, pos) => Some(*pos),
-            Self::LLVMError(_)
-            | Self::MainNotFound
-            | Self::InvalidMainSignature
-            | Self::UnsupportedTarget { .. } => None,
-        }
+    pub fn with_pos(self, pos: Position) -> CodegenError {
+        CodegenError::TypeError(self.0, pos)
+    }
+
+    /// Convert to a position-less [`CodegenError::Internal`], for the few call
+    /// sites (struct-field registration, arg-less sret lowering) that have no
+    /// source location to attach.
+    #[must_use]
+    pub fn without_pos(self) -> CodegenError {
+        CodegenError::Internal(self.0)
     }
 }

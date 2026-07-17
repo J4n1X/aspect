@@ -550,4 +550,53 @@ mod tests {
         let src = run("$import mathlib\n", &[fixture_root()]).unwrap();
         assert_eq!(src.search_roots, vec![fixture_root()]);
     }
+
+    // ── Define scoping ──────────────────────────────────────────────────
+
+    /// True iff any emitted token is the identifier `name` (i.e. it was left
+    /// unexpanded), false when every occurrence was substituted away.
+    fn has_identifier(src: &PreprocessedSource, name: &str) -> bool {
+        src.tokens
+            .iter()
+            .any(|t| matches!(&t.kind, TokenKind::Identifier(n) if n == name))
+    }
+
+    #[test]
+    fn a_directly_imported_modules_define_is_visible() {
+        // `macdefiner` defines MD_MACRO; a file that imports it sees it, so
+        // the trailing `MD_MACRO` is substituted (to 40) rather than surviving
+        // as a bare identifier.
+        let src = run("$import macdefiner\nMD_MACRO\n", &[fixture_root()]).unwrap();
+        assert!(
+            src.tokens
+                .iter()
+                .any(|t| matches!(t.kind, TokenKind::Integer(40))),
+            "MD_MACRO must expand to 40 for a direct importer"
+        );
+        assert!(
+            !has_identifier(&src, "MD_MACRO"),
+            "no unexpanded MD_MACRO should remain"
+        );
+    }
+
+    #[test]
+    fn same_name_defines_in_unrelated_modules_do_not_collide() {
+        // `macdefiner` and `othermod` both `$define MD_MACRO`. Module-scoped
+        // defines make this legal — importing both is not a redefinition.
+        let src = run("$import macdefiner\n$import othermod\n", &[fixture_root()]).unwrap();
+        assert_eq!(imports_of(&src, ""), ["macdefiner", "othermod"]);
+    }
+
+    #[test]
+    fn a_define_is_not_visible_through_a_transitive_import() {
+        // The entry imports only `mdbridge`; `mdbridge` imports `macdefiner`
+        // (and so expands MD_MACRO to 40 inside its own code), but the entry
+        // does not directly import `macdefiner`, so its `MD_MACRO` is left
+        // unexpanded — non-transitive, mirroring symbol visibility.
+        let src = run("$import mdbridge\nMD_MACRO\n", &[fixture_root()]).unwrap();
+        assert!(
+            has_identifier(&src, "MD_MACRO"),
+            "MD_MACRO must NOT be visible to a file that only transitively imports its module"
+        );
+    }
 }

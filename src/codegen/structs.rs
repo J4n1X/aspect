@@ -6,7 +6,7 @@ use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::values::PointerValue;
 
 use crate::codegen::generator::CodeGenerator;
-use crate::codegen::{CodegenError, LangTypeExt};
+use crate::codegen::{CodegenError, LangTypeExt, TypeLoweringError};
 use crate::lexer::{LangType, Position, TypeBase};
 use crate::parser::{ExprKind, Expression, Program};
 
@@ -35,7 +35,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             let field_types: Result<Vec<BasicTypeEnum<'ctx>>, _> = info
                 .fields
                 .iter()
-                .map(|f| self.lang_type_to_llvm(&f.ty, Position::new(0, 0)))
+                .map(|f| {
+                    self.lang_type_to_llvm(&f.ty)
+                        .map_err(|e| e.without_pos())
+                })
                 .collect();
             let field_types = field_types?;
             self.struct_types[&info.id].set_body(&field_types, false);
@@ -48,21 +51,17 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(crate) fn lang_type_to_llvm(
         &self,
         ty: &LangType,
-        pos: Position,
-    ) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+    ) -> Result<BasicTypeEnum<'ctx>, TypeLoweringError> {
         if ty.pointer_depth == 0
             && ty.array_size.is_none()
             && let TypeBase::Struct(id) = ty.base
         {
             let st = self.struct_types.get(&id).ok_or_else(|| {
-                CodegenError::TypeError(
-                    format!("unregistered type-struct id {id}"),
-                    pos,
-                )
+                TypeLoweringError(format!("unregistered type-struct id {id}"))
             })?;
             return Ok((*st).into());
         }
-        ty.to_llvm(self.context, pos)
+        ty.to_llvm(self.context)
     }
 
     /// Lower an array `LangType` to `[N x T]`, resolving type-struct elements
@@ -70,18 +69,17 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(crate) fn lang_type_to_llvm_array(
         &self,
         ty: &LangType,
-        pos: Position,
-    ) -> Result<inkwell::types::ArrayType<'ctx>, CodegenError> {
-        let array_size = ty.array_size.ok_or_else(|| {
-            CodegenError::TypeError("Expected array type".to_string(), pos)
-        })?;
+    ) -> Result<inkwell::types::ArrayType<'ctx>, TypeLoweringError> {
+        let array_size = ty
+            .array_size
+            .ok_or_else(|| TypeLoweringError("Expected array type".to_string()))?;
         // The element strips only the array dimension; pointer depth stays part
         // of the element type (`(i32*)[3]` allocates `[3 x ptr]`).
         let elem_ty = LangType {
             array_size: None,
             ..*ty
         };
-        Ok(self.lang_type_to_llvm(&elem_ty, pos)?.array_type(array_size))
+        Ok(self.lang_type_to_llvm(&elem_ty)?.array_type(array_size))
     }
 
     /// Field layout index and type for `field` of struct `id`.
@@ -207,7 +205,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.emit_address(base)?.0
                 } else {
                     let val = self.generate_expression(base)?;
-                    let struct_ty = self.lang_type_to_llvm(&bt, base.pos)?;
+                    let struct_ty = self
+                        .lang_type_to_llvm(&bt)
+                        .map_err(|e| e.with_pos(base.pos))?;
                     let tmp = self.builder.build_alloca(struct_ty, "struct.tmp")?;
                     self.builder.build_store(tmp, val)?;
                     tmp

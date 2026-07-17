@@ -1,0 +1,38 @@
+# expected: 121
+#-
+  A module-scope global array whose initializer is a list of struct literals.
+  Every element is constant, so the whole array lowers to an LLVM ConstantArray
+  of ConstantStructs (`@pairs = global [3 x %Pair] [ %Pair { .. }, .. ]`) with no
+  runtime cost — `generate_constant_array_value` (src/codegen/globals.rs) folds
+  each element through the const-evaluator (src/codegen/const_eval.rs).
+
+  Also exercises the zero-pad path: `more` is declared `[4]` but initialised
+  with two elements, so the last two structs are zero-filled.
+-#
+
+type Pair {
+    public i32 x
+    public i32 y
+}
+
+Pair[3] pairs = { Pair { x = 1, y = 2 }, Pair { x = 3, y = 4 }, Pair { x = 5, y = 6 } }
+
+# Fewer initializers than the declared size -> trailing structs zero-padded.
+Pair[4] more = { Pair { x = 10, y = 20 }, Pair { x = 30, y = 40 } }
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    i32 total = 0
+
+    # 1+2 + 3+4 + 5+6 = 21
+    for (u64 i = 0; i < 3; i += 1) {
+        total = total + pairs[i].x + pairs[i].y
+    }
+
+    # 10+20 + 30+40 = 100  ->  121
+    total = total + more[0].x + more[0].y + more[1].x + more[1].y
+
+    # Zero-padded entries contribute nothing; if the pad regressed this drifts.
+    total = total + more[2].x + more[2].y + more[3].x + more[3].y
+
+    return total  # 121
+}

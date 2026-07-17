@@ -7,10 +7,11 @@ The codegen module (`src/codegen/`) emits LLVM IR via Inkwell (pinned to LLVM 19
 | File | Purpose |
 |------|---------|
 | `generator.rs` | `CodeGenerator` struct + orchestration (`new`, `generate`, public API) |
-| `expressions.rs` | `walk_expression` unified expression walker + `CodeGenerator` expression entry-points |
+| `expressions.rs` | `walk_expression` — the runtime expression walker + `CodeGenerator` expression entry-points |
+| `const_eval.rs` | `const_eval` — the compile-time-constant expression evaluator (folds via `ConstantEmitter`) |
 | `statements.rs` | `generate_statement` and all statement generators |
 | `functions.rs` | `declare_function`, `generate_function`, `FunctionScope` RAII |
-| `asm.rs` | `asm fn` lowering: `constraint_string`, `generate_asm_function` |
+| `asm.rs` | `asm fn` and `naked fn` lowering: `constraint_string`, `generate_asm_function`, `generate_naked_function` |
 | `globals.rs` | `generate_global_variable`, `generate_string_literal`, `generate_constant_array_value`, `generate_list_initializer` |
 | `structs.rs` | Type-struct codegen: LLVM type registration, lowering through the struct cache, and the address (lvalue) path behind field access, field assignment, and `&expr` |
 | `scope.rs` | `ScopeStack`, `LocalVar`, `GlobalVarInfo`, `VarRef` |
@@ -127,30 +128,44 @@ Two implementations:
 - **`RuntimeEmitter<'a,'ctx>`** — borrows `builder: &'a Builder<'ctx>` + `context`; emits actual LLVM IR
 - **`ConstantEmitter<'ctx>`** — borrows only `context`; performs Rust-level constant folding and returns LLVM constants without touching the builder
 
-## Expression Walker (`expressions.rs`)
+## Expression Walker (`expressions.rs`) and Constant Evaluator (`const_eval.rs`)
 
-`walk_expression(expr, gen, mode)` is the single recursive expression tree walker.
+Runtime and compile-time-constant code generation are handled by two distinct
+recursive walkers that share the same leaf-level `ValueEmitter` operations:
+
+- **`walk_expression(expr, gen)`** (`expressions.rs`) — the walker for *runtime*
+  expressions; emits LLVM IR via `RuntimeEmitter`.
+- **`const_eval(expr, gen)`** (`const_eval.rs`) — the evaluator for *constant*
+  expressions; folds via `ConstantEmitter` and returns LLVM constants without
+  touching the builder. It errors — with the same diagnostics the runtime-only
+  kinds always produced — on expression kinds that have no constant form
+  (function/indirect calls, comparisons, dereferences, field access,
+  value-blocks, pointer arithmetic, address-of-field/non-lvalue).
 
 ```rust
-pub(crate) enum EmitMode { Runtime, Constant }
-
 pub(crate) fn walk_expression<'ctx>(
     expr: &Expression,
     gen: &mut CodeGenerator<'ctx>,
-    mode: EmitMode,
+) -> Result<BasicValueEnum<'ctx>, CodegenError>
+
+pub(crate) fn const_eval<'ctx>(
+    expr: &Expression,
+    gen: &mut CodeGenerator<'ctx>,
 ) -> Result<BasicValueEnum<'ctx>, CodegenError>
 ```
 
-`EmitMode::Runtime` uses `RuntimeEmitter`; `EmitMode::Constant` uses `ConstantEmitter`. Emitters are created transiently (after all recursive sub-expression calls return) to avoid borrow-checker conflicts.
-
-The constant `Variable` case checks local const values first, then falls back to global initializers.
+Emitters are created transiently (after all recursive sub-expression calls
+return) to avoid borrow-checker conflicts. The constant `Variable` case checks
+local const values first, then falls back to global initializers. The shared
+per-op dispatch (`emit_binary_dispatch`) is parameterised over a `&dyn
+ValueEmitter`, so both walkers reuse it with their respective emitter.
 
 ### Public Entry-Points on `CodeGenerator`
 
 | Method | Purpose |
 |--------|---------|
-| `generate_expression` | Walk with `EmitMode::Runtime` |
-| `generate_coerced_value` | Walk in the given `EmitMode` + auto-widen to target type; literal fast-path via `generate_literal_typed` |
+| `generate_expression` | Runtime walk via `walk_expression` |
+| `generate_coerced_value` | Runtime walk + auto-widen to target type; literal fast-path via `generate_literal_typed` |
 | `generate_literal_typed` | Overflow-checked literal at a known target type |
 | `generate_function_call` | Emit a call instruction |
 | `generate_function_call_statement` | Call in statement position (handles void) |
@@ -251,6 +266,38 @@ case) stays an ordinary untied `{rax}`; the numeric-tie form (`0`) exists to
 constrain the register *allocator*, and nothing is left to allocate once both
 ends are pinned by name.
 
+## `naked fn` Lowering (`asm.rs`)
+
+A `naked fn` also becomes a real LLVM function, but the opposite of an `asm fn`
+in one decisive way: it carries LLVM's **`naked`** attribute (plus `noinline`),
+so the backend emits **no prologue or epilogue**. There is no register contract
+and no operands — with no prologue, arguments stay in their platform-ABI
+incoming registers (SysV: `rdi`, `rsi`, …) and any result leaves through the
+ABI return register, so the assembly body owns the *entire* calling convention:
+
+```llvm
+; Function Attrs: naked noinline
+define internal i32 @add_abi(i32 %a, i32 %b) #0 {
+entry:
+  call void asm sideeffect inteldialect "mov eax, edi\0Aadd eax, esi\0Aret", ""()
+  unreachable
+}
+```
+
+The body is a single side-effecting, no-operand inline-asm block followed by
+`unreachable` — control leaves only through the asm's own `ret`/`jmp`/`syscall`,
+never by falling through. `generate_naked_function` sets the attributes, builds
+that one asm call, and terminates with `unreachable`; linkage stays whatever
+declaration decided (so `_start`, being implicitly public, is external).
+
+Because it is still an ordinary function, call sites are ordinary calls. This is
+the piece `asm fn` deliberately cannot be: an `asm fn` passes operands *into* a
+function that has a prologue, whereas a naked fn has none — which is exactly what
+a freestanding `_start` needs to read `argc`/`argv` off the stack (`argc` at
+`[rsp]`, `argv` at `[rsp+8]`) and jump to `main`. The `unreachable` terminator is
+safe against noreturn-inference killing callers — verified by the corpus running
+every program at both `-O0` and `-O2` and requiring they agree.
+
 ## Statement Codegen (`statements.rs`)
 
 | Statement | Handler |
@@ -269,7 +316,7 @@ ends are pinned by name.
 
 ### `try_fold_constant_expression`
 
-Delegates to `walk_expression(expr, self, EmitMode::Constant).ok()`.
+Delegates to `const_eval(expr, self).ok()`.
 Returns `Option<BasicValueEnum>` — `None` for any non-constant sub-expression.
 
 If folding succeeds, `generate_var_decl` stores the constant to the alloca and records it in `LocalVar::const_value`. Subsequent reads bypass the `load` instruction.
@@ -281,7 +328,7 @@ If folding succeeds, `generate_var_decl` stores the constant to the alloca and r
 All code paths that generate a value destined for a known target type (var-decl initializer, var-assign RHS, return value, function arguments, array element initializers) go through:
 
 ```rust
-fn generate_coerced_value(expr: &Expression, target: Option<&LangType>, mode: EmitMode) -> BasicValueEnum
+fn generate_coerced_value(expr: &Expression, target: Option<&LangType>) -> BasicValueEnum
 ```
 
 - If `expr` is a numeric literal and `target` is a scalar type → `generate_literal_typed` (overflow-checked, typed directly to target)
@@ -390,14 +437,14 @@ All `alloca` instructions are placed in the **function entry block**, not at the
 1. Compute LLVM type (arrays → `CodeGenerator::lang_type_to_llvm_array`, scalars → `lang_type_to_llvm`; both cache-aware for type-structs)
 2. `module.add_global()`
 3. For **array** initializers: `generate_constant_array_value` → LLVM `ConstantArray`
-4. For **scalar** initializers: `walk_expression(expr, self, EmitMode::Constant)`
+4. For **scalar** initializers: `const_eval(expr, self)`
 5. For no initializer: `const_zero()`
 6. Register in scope
 
 ### Constant Folding
 
 All constant expression evaluation (global initializers, `const` local folding) goes through
-`walk_expression(expr, gen, EmitMode::Constant)`, which uses `ConstantEmitter`.
+`const_eval(expr, gen)` (`const_eval.rs`), which uses `ConstantEmitter`.
 
 LLVM 19 removed almost all `LLVMConst*` arithmetic functions. `ConstantEmitter` performs
 all arithmetic in Rust and reconstructs LLVM constants via `IntType::const_int` /

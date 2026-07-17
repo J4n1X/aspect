@@ -1,0 +1,12 @@
+# expected: 83
+# compile_args: "-I", "tests/modules"
+# Define visibility, the legal shape: this file `$import`s `macdefiner`, so
+# its `$define MD_MACRO 40` is visible here (a direct importer sees the
+# macro). macdefiner also uses MD_MACRO inside its own `md_add`. MD_MACRO is
+# 40, md_add(3) is 43 → 83.
+
+$import macdefiner
+
+fn main(u32 argc, u8** argv) -> i32 {
+    return MD_MACRO + md_add(3)
+}

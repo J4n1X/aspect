@@ -1,5 +1,5 @@
-use crate::codegen::CodegenError;
-use crate::lexer::{LangType, Position, TypeBase};
+use crate::codegen::TypeLoweringError;
+use crate::lexer::{LangType, TypeBase};
 use crate::parser::ComparisonOp;
 use inkwell::builder::{Builder, BuilderError};
 use inkwell::context::Context;
@@ -29,19 +29,21 @@ pub trait LangTypeExt {
     ///
     /// Array types decay to `ptr` (same as pointers). For the backing array
     /// allocation type use [`LangTypeExt::to_llvm_array`].
-    fn to_llvm<'ctx>(&self, ctx: &'ctx Context, pos: Position)
-        -> Result<BasicTypeEnum<'ctx>, CodegenError>;
+    ///
+    /// Returns a position-less [`TypeLoweringError`]; the caller attaches a
+    /// source position via [`TypeLoweringError::with_pos`].
+    fn to_llvm<'ctx>(&self, ctx: &'ctx Context)
+        -> Result<BasicTypeEnum<'ctx>, TypeLoweringError>;
 
     /// Convert to the LLVM `[N x T]` array type. Errors if the type is not an array.
-    fn to_llvm_array<'ctx>(&self, ctx: &'ctx Context, pos: Position)
-        -> Result<ArrayType<'ctx>, CodegenError>;
+    fn to_llvm_array<'ctx>(&self, ctx: &'ctx Context)
+        -> Result<ArrayType<'ctx>, TypeLoweringError>;
 
     /// Return the element LLVM type — stripping away array size and pointer depth.
     fn element_to_llvm<'ctx>(
         &self,
         ctx: &'ctx Context,
-        pos: Position,
-    ) -> Result<BasicTypeEnum<'ctx>, CodegenError>;
+    ) -> Result<BasicTypeEnum<'ctx>, TypeLoweringError>;
 
     /// Return a `LangType` one pointer-depth less (the pointee type).
     fn pointee(&self) -> LangType;
@@ -72,7 +74,7 @@ impl LangTypeExt for LangType {
         matches!(self.base, TypeBase::Void) && self.pointer_depth == 0
     }
 
-    fn to_llvm<'ctx>(&self, ctx: &'ctx Context, pos: Position) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+    fn to_llvm<'ctx>(&self, ctx: &'ctx Context) -> Result<BasicTypeEnum<'ctx>, TypeLoweringError> {
         if self.pointer_depth > 0 || self.array_size.is_some() {
             return Ok(ctx.ptr_type(AddressSpace::default()).into());
         }
@@ -86,36 +88,34 @@ impl LangTypeExt for LangType {
                 32 => ctx.i32_type().into(),
                 64 => ctx.i64_type().into(),
                 _ => {
-                    return Err(CodegenError::TypeError(
-                        format!("Invalid integer size: {}", self.size_bits),
-                        pos,
-                    ))
+                    return Err(TypeLoweringError(format!(
+                        "Invalid integer size: {}",
+                        self.size_bits
+                    )))
                 }
             },
             TypeBase::SFloat => match self.size_bits {
                 32 => ctx.f32_type().into(),
                 64 => ctx.f64_type().into(),
                 _ => {
-                    return Err(CodegenError::TypeError(
-                        format!("Invalid float size: {}", self.size_bits),
-                        pos,
-                    ))
+                    return Err(TypeLoweringError(format!(
+                        "Invalid float size: {}",
+                        self.size_bits
+                    )))
                 }
             },
             TypeBase::Void => {
-                return Err(CodegenError::TypeError(
+                return Err(TypeLoweringError(
                     "Void type cannot be used as a value type".to_string(),
-                    pos,
                 ))
             }
             // Struct *values* are lowered via `CodeGenerator::lang_type_to_llvm`,
             // which consults the cached named `StructType`; this trait method has
             // no access to that cache. Pointer-to-struct decays to `ptr` above.
             TypeBase::Struct(id) => {
-                return Err(CodegenError::TypeError(
-                    format!("struct#{id} value must be lowered via lang_type_to_llvm"),
-                    pos,
-                ))
+                return Err(TypeLoweringError(format!(
+                    "struct#{id} value must be lowered via lang_type_to_llvm"
+                )))
             }
             // `fn(...) -> R` *is* a pointer — opaque `ptr` in LLVM. The
             // signature is needed only at call sites (resolved via the FnPtr id).
@@ -123,22 +123,18 @@ impl LangTypeExt for LangType {
         })
     }
 
-    fn to_llvm_array<'ctx>(&self, ctx: &'ctx Context, pos: Position) -> Result<ArrayType<'ctx>, CodegenError> {
-        let array_size = self.array_size.ok_or_else(|| {
-            CodegenError::TypeError(
-                "Expected array type".to_string(),
-                pos,
-            )
-        })?;
-        let element_type = self.element_to_llvm(ctx, pos)?;
+    fn to_llvm_array<'ctx>(&self, ctx: &'ctx Context) -> Result<ArrayType<'ctx>, TypeLoweringError> {
+        let array_size = self
+            .array_size
+            .ok_or_else(|| TypeLoweringError("Expected array type".to_string()))?;
+        let element_type = self.element_to_llvm(ctx)?;
         Ok(element_type.array_type(array_size))
     }
 
     fn element_to_llvm<'ctx>(
         &self,
         ctx: &'ctx Context,
-        pos: Position,
-    ) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+    ) -> Result<BasicTypeEnum<'ctx>, TypeLoweringError> {
         // The element strips only the array dimension; pointer depth is part
         // of the element type. `(i32*)[3]` must allocate `[3 x ptr]`, not
         // `[3 x i32]` — anything else stack-corrupts on the literal store.
@@ -153,33 +149,31 @@ impl LangTypeExt for LangType {
                 32 => ctx.i32_type().into(),
                 64 => ctx.i64_type().into(),
                 _ => {
-                    return Err(CodegenError::TypeError(
-                        format!("Invalid integer size: {}", self.size_bits),
-                        pos,
-                    ))
+                    return Err(TypeLoweringError(format!(
+                        "Invalid integer size: {}",
+                        self.size_bits
+                    )))
                 }
             },
             TypeBase::SFloat => match self.size_bits {
                 32 => ctx.f32_type().into(),
                 64 => ctx.f64_type().into(),
                 _ => {
-                    return Err(CodegenError::TypeError(
-                        format!("Invalid float size: {}", self.size_bits),
-                        pos,
-                    ))
+                    return Err(TypeLoweringError(format!(
+                        "Invalid float size: {}",
+                        self.size_bits
+                    )))
                 }
             },
             TypeBase::Void => {
-                return Err(CodegenError::TypeError(
+                return Err(TypeLoweringError(
                     "Void type cannot be used as a value type".to_string(),
-                    pos,
                 ))
             }
             TypeBase::Struct(id) => {
-                return Err(CodegenError::TypeError(
-                    format!("struct#{id} element must be lowered via lang_type_to_llvm"),
-                    pos,
-                ))
+                return Err(TypeLoweringError(format!(
+                    "struct#{id} element must be lowered via lang_type_to_llvm"
+                )))
             }
             // A function-pointer array element is `ptr` (opaque), same as
             // `to_llvm` above — see the comment there.

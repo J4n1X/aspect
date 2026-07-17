@@ -1,0 +1,34 @@
+# expected: 0
+# compile_args: "-I", "lib"
+#-
+  global_var_into_local.ap — a mutable global read into a LOCAL variable's
+  initializer must load the global's current runtime value, not fold to its
+  compile-time initializer. Regression: local var-decl initializers were
+  constant-folded, so `u64 d = g` captured g's start value (777) even after a
+  function had written 65536. Covers the plain read, an arithmetic form, and a
+  `const` global (which *is* foldable — its initializer is its value). Runs at
+  -O0 and -O2 (must agree). Exit code is the failed-check count.
+-#
+
+const u64 K = 500          # const global: folding to its initializer is correct
+u64 g = 777                # mutable global: must be loaded, never folded
+
+fn set_it() {
+    g = 65536
+}
+
+fn main(u32 argc, u8** argv) -> i32 {
+    i32 fails = 0
+    set_it()
+
+    u64 d = g              # plain read into a local — was wrongly folded to 777
+    if d != 65536 { fails += 1 }
+
+    u64 e = g + 1          # arithmetic over the global into a local
+    if e != 65537 { fails += 1 }
+
+    u64 k = K              # const global still folds to its value
+    if k != 500 { fails += 1 }
+
+    return fails
+}

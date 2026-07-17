@@ -5,7 +5,6 @@ use inkwell::values::{BasicValueEnum, FunctionValue};
 use inkwell::AddressSpace;
 
 use crate::codegen::generator::CodeGenerator;
-use crate::codegen::expressions::EmitMode;
 use crate::codegen::structs::is_struct_value;
 use crate::codegen::{CodegenError, LangTypeExt};
 use crate::lexer::{Position, TypeBase};
@@ -94,7 +93,12 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // sret: caller allocates the result slot and passes it as arg 0.
         let sret_slot = if let Some(rt) = ret_ty.filter(is_struct_value) {
-            let struct_ty = self.lang_type_to_llvm(&rt, args.first().map_or(Position::new(0,0), |a| a.pos))?;
+            let struct_ty = self
+                .lang_type_to_llvm(&rt)
+                .map_err(|e| match args.first() {
+                    Some(a) => e.with_pos(a.pos),
+                    None => e.without_pos(),
+                })?;
             let slot = self.builder.build_alloca(struct_ty, "sret.tmp")?;
             arg_values.push(slot.into());
             Some((slot, struct_ty))
@@ -106,13 +110,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             let target_ty = param_types.get(i);
             if let Some(t) = target_ty.filter(|t| is_struct_value(t)) {
                 // byval: materialise the value into a temp and pass its address.
-                let val = self.generate_coerced_value(arg, Some(t), EmitMode::Runtime)?;
-                let struct_ty = self.lang_type_to_llvm(t, arg.pos)?;
+                let val = self.generate_coerced_value(arg, Some(t))?;
+                let struct_ty = self.lang_type_to_llvm(t).map_err(|e| e.with_pos(arg.pos))?;
                 let tmp = self.builder.build_alloca(struct_ty, "byval.tmp")?;
                 self.builder.build_store(tmp, val)?;
                 arg_values.push(tmp.into());
             } else {
-                let val = self.generate_coerced_value(arg, target_ty, EmitMode::Runtime)?;
+                let val = self.generate_coerced_value(arg, target_ty)?;
                 arg_values.push(val.into());
             }
         }
@@ -156,7 +160,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             if is_struct_value(ty) {
                 llvm_params.push(ptr_ty.into());
             } else {
-                llvm_params.push(ty.to_llvm(self.context, func.proto.pos)?.into());
+                llvm_params.push(
+                    ty.to_llvm(self.context)
+                        .map_err(|e| e.with_pos(func.proto.pos))?
+                        .into(),
+                );
             }
         }
 
@@ -164,12 +172,38 @@ impl<'ctx> CodeGenerator<'ctx> {
         let fn_type = if ret_is_struct || ret_ty.is_void() {
             self.context.void_type().fn_type(&llvm_params, false)
         } else {
-            ret_ty.to_llvm(self.context, func.proto.pos)?.fn_type(&llvm_params, false)
+            ret_ty
+                .to_llvm(self.context)
+                .map_err(|e| e.with_pos(func.proto.pos))?
+                .fn_type(&llvm_params, false)
         };
 
         let function = self
             .module
             .add_function(&func.proto.name, fn_type, linkage_for(func));
+
+        // When the program defines its own allocator (STD_NO_LIBC), no function
+        // it emits may be optimized against libc's contracts: that `malloc`
+        // hands back pointers that alias its own arena metadata, and its inlined
+        // `calloc`, matched by name, would draw the optimizer's allocation-size
+        // and `noalias`/zeroed reasoning, silently miscompiling callers at -O2.
+        // `"no-builtins"` — the `-fno-builtin` function attribute — stops that
+        // name-based reasoning for calls made from within the function, and
+        // `nobuiltin` on the definition stops call-site simplification of it.
+        // Extern declarations are the libc entry points a *non*-freestanding
+        // build calls; `disable_builtins` is false there, so those keep every
+        // builtin optimization.
+        if self.disable_builtins && !matches!(func.body, FunctionBody::Extern) {
+            let kind_id = Attribute::get_named_enum_kind_id("nobuiltin");
+            function.add_attribute(
+                AttributeLoc::Function,
+                self.context.create_enum_attribute(kind_id, 0),
+            );
+            function.add_attribute(
+                AttributeLoc::Function,
+                self.context.create_string_attribute("no-builtins", ""),
+            );
+        }
 
         // Attach sret / byval type attributes and name the real parameters.
         let offset = u32::from(ret_is_struct);
@@ -229,7 +263,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             if is_struct_value(param_type) {
                 // `byval`: the incoming pointer already addresses a caller-made
                 // copy — use it directly as the variable's storage, no re-copy.
-                let struct_ty = cg.lang_type_to_llvm(param_type, func.proto.pos)?;
+                let struct_ty = cg
+                    .lang_type_to_llvm(param_type)
+                    .map_err(|e| e.with_pos(func.proto.pos))?;
                 cg.add_variable(
                     param_name.clone(),
                     param_value.into_pointer_value(),
@@ -238,7 +274,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     None,
                 );
             } else {
-                let param_llvm_type = param_type.to_llvm(cg.context, func.proto.pos)?;
+                let param_llvm_type = param_type
+                    .to_llvm(cg.context)
+                    .map_err(|e| e.with_pos(func.proto.pos))?;
                 let alloca = cg.builder.build_alloca(param_llvm_type, param_name)?;
                 cg.builder.build_store(alloca, param_value)?;
                 cg.add_variable(
@@ -260,14 +298,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         if !cg.block_has_terminator() {
             if ret_is_struct {
                 // Store a zeroed struct through the sret pointer, return void.
-                let struct_ty = cg.lang_type_to_llvm(&func.proto.return_type, func.proto.pos)?;
+                let struct_ty = cg
+                    .lang_type_to_llvm(&func.proto.return_type)
+                    .map_err(|e| e.with_pos(func.proto.pos))?;
                 let sret_ptr = cg.current_sret.expect("sret pointer set for struct return");
                 cg.builder.build_store(sret_ptr, struct_ty.const_zero())?;
                 cg.builder.build_return(None)?;
             } else if func.proto.return_type.is_void() {
                 cg.builder.build_return(None)?;
             } else {
-                let zero = cg.get_zero_value(&func.proto.return_type, func.proto.pos)?;
+                let zero = cg
+                    .get_zero_value(&func.proto.return_type)
+                    .map_err(|e| e.with_pos(func.proto.pos))?;
                 cg.builder.build_return(Some(&zero))?;
             }
         }
@@ -332,8 +374,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         &mut self,
         callee: &Expression,
         args: &[Expression],
-        pos: Position,
     ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        // The call-site position is the callee's own — the parser stamps an
+        // `IndirectCall` node with `callee.pos`.
+        let pos = callee.pos;
         let id = match callee.expr_type.base {
             TypeBase::FnPtr(id) if callee.expr_type.pointer_depth == 0 => id,
             _ => {
@@ -354,15 +398,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         let callee_ptr = callee_val.into_pointer_value();
 
         // Reconstruct the LLVM function type from the registered signature.
-        let param_types: Result<Vec<_>, _> =
-            sig.params.iter().map(|t| self.lang_type_to_llvm(t, pos)).collect();
+        let param_types: Result<Vec<_>, _> = sig
+            .params
+            .iter()
+            .map(|t| self.lang_type_to_llvm(t).map_err(|e| e.with_pos(pos)))
+            .collect();
         let param_types = param_types?;
         let param_metas: Vec<BasicMetadataTypeEnum<'ctx>> =
             param_types.iter().map(|t| (*t).into()).collect();
         let fn_ty = if sig.return_type.is_void() {
             self.context.void_type().fn_type(&param_metas, false)
         } else {
-            self.lang_type_to_llvm(&sig.return_type, pos)?
+            self.lang_type_to_llvm(&sig.return_type)
+                .map_err(|e| e.with_pos(pos))?
                 .fn_type(&param_metas, false)
         };
 
@@ -372,7 +420,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             Vec::with_capacity(args.len());
         for (i, arg) in args.iter().enumerate() {
             let target = sig.params.get(i);
-            let val = self.generate_coerced_value(arg, target, EmitMode::Runtime)?;
+            let val = self.generate_coerced_value(arg, target)?;
             arg_values.push(val.into());
         }
 
@@ -387,10 +435,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         &mut self,
         callee: &Expression,
         args: &[Expression],
-        pos: Position,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-        self.build_indirect_call_inner(callee, args, pos)?
-            .ok_or_else(|| CodegenError::MissingReturn("<indirect call>".to_string(), pos))
+        self.build_indirect_call_inner(callee, args)?
+            .ok_or_else(|| CodegenError::MissingReturn("<indirect call>".to_string(), callee.pos))
     }
 
     /// Indirect call used as a statement — void returns are accepted.
@@ -398,9 +445,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         &mut self,
         callee: &Expression,
         args: &[Expression],
-        pos: Position,
     ) -> Result<(), CodegenError> {
-        self.build_indirect_call_inner(callee, args, pos)?;
+        self.build_indirect_call_inner(callee, args)?;
         Ok(())
     }
 }

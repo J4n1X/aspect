@@ -241,6 +241,20 @@ pub struct AsmSpec {
     pub pos: Position,
 }
 
+/// The instruction-sequence body of a `naked fn`.
+///
+/// Unlike [`AsmSpec`], a naked function carries no register contract: it has
+/// no prologue/epilogue, so parameters arrive in — and results leave through —
+/// their platform-ABI registers, which the asm body addresses directly. There
+/// is therefore nothing to pin, and `lines` is the whole story.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NakedSpec {
+    /// One line per string literal, joined with `\n` for LLVM. Never empty.
+    pub lines: Vec<String>,
+    /// The `naked` keyword, where whole-declaration diagnostics are reported.
+    pub pos: Position,
+}
+
 /// Where a function's body comes from, and thus how it is lowered. A function
 /// is exactly one of these — the variants are what make `extern`-with-a-body,
 /// or `asm`-and-statements, unrepresentable rather than merely undocumented.
@@ -251,8 +265,11 @@ pub enum FunctionBody {
     Aspect(Vec<Statement>),
     /// `extern fn` — defined in another object file.
     Extern,
-    /// `asm fn` — the instructions are the body.
+    /// `asm fn` — the instructions are the body, with a register contract.
     Asm(AsmSpec),
+    /// `naked fn` — the instructions are the body, lowered with LLVM's `naked`
+    /// attribute (no prologue/epilogue), so args/results follow the raw ABI.
+    Naked(NakedSpec),
 }
 
 #[derive(Debug, Clone, PartialEq)]

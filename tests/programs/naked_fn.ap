@@ -1,0 +1,26 @@
+# expected: 42
+# requires_arch: ARCH_X86_64
+#-
+  `naked fn`: lowered with LLVM's `naked` attribute — no prologue/epilogue, the
+  body IS the function's assembly. Arguments arrive in their SysV ABI registers
+  (edi, esi, …) and results leave through eax, so a naked fn is called like any
+  other function. Runs at -O0 and -O2 (the harness requires they agree), which
+  guards against the naked body being mis-inferred as noreturn.
+-#
+
+# No parameters: load a constant into the ABI return register and return.
+naked fn ret_const() -> i32 {
+    "mov eax, 20"
+    "ret"
+}
+
+# Two i32 params arrive in edi/esi (SysV); sum them into eax and return.
+naked fn add_abi(i32 a, i32 b) -> i32 {
+    "mov eax, edi"
+    "add eax, esi"
+    "ret"
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return ret_const() + add_abi(15, 7)     # 20 + 22 = 42
+}

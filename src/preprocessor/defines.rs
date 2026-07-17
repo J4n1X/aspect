@@ -23,6 +23,19 @@
 //! and `-D` CLI defines count as prior defines exactly like a `$define`
 //! directive. Files that want overridable defaults write the `$ifndef`
 //! guard instead (Phase 2).
+//!
+//! ## Module scoping
+//!
+//! A `$define` is **module-scoped**, mirroring the non-transitive symbol
+//! rule the parser enforces: its macro is visible only from its **defining
+//! module** and any file that **directly `$import`s** that module. Two
+//! *unrelated* modules may therefore `$define` the same name without
+//! colliding — redefinition is an error only within one module (or against a
+//! global define). Compiler-provided and `-D` CLI defines have **no** module
+//! (they are global) and stay visible everywhere. Lookup and expansion go
+//! through a [`ScopedDefines`] view carrying the querying file's module and
+//! direct imports; the raw [`DefineTable::get`] / [`DefineTable::is_defined`]
+//! accessors are module-unaware and only meaningful for global defines.
 
 use std::collections::HashMap;
 
@@ -63,11 +76,19 @@ pub struct Define {
     pub origin: DefineOrigin,
 }
 
-/// The define table. Owned by the driver; Phase 2 conditionals consult it
-/// via [`DefineTable::is_defined`] / [`DefineTable::get`].
+/// The define table. Owned by the driver; conditionals and substitution
+/// consult it through a module-scoped [`ScopedDefines`] view.
+///
+/// A name maps to a **list** of defines rather than a single one: because
+/// `$define`s are module-scoped, the same name may be defined independently
+/// in several unrelated modules, and each such define is a distinct entry
+/// (each tagged, via its [`DefineOrigin::Directive`] position's `file_id`,
+/// with the file — hence module — that declared it). Globals occupy a
+/// single entry; the redefinition rule keeps every list free of colliding
+/// entries.
 #[derive(Debug, Default)]
 pub struct DefineTable {
-    map: HashMap<String, Define>,
+    map: HashMap<String, Vec<Define>>,
 }
 
 impl DefineTable {
@@ -109,10 +130,10 @@ impl DefineTable {
     fn insert_builtin_flag(&mut self, name: &str) {
         self.map.insert(
             name.to_string(),
-            Define {
+            vec![Define {
                 tokens: Vec::new(),
                 origin: DefineOrigin::Builtin,
-            },
+            }],
         );
     }
 
@@ -124,59 +145,102 @@ impl DefineTable {
         );
         self.map.insert(
             name.to_string(),
-            Define {
+            vec![Define {
                 tokens: vec![token],
                 origin: DefineOrigin::Builtin,
-            },
+            }],
         );
     }
 
-    /// True iff `name` is currently defined (flag or value). Phase 2's
-    /// `$ifdef` / `$ifndef` / `defined(NAME)` build on this.
+    /// True iff *any* define named `name` exists — **module-unaware**: it
+    /// ignores visibility and so is only meaningful for global defines (a
+    /// module-scoped `$ifdef`/`defined(NAME)` goes through [`ScopedDefines`]).
     #[must_use]
     pub fn is_defined(&self, name: &str) -> bool {
         self.map.contains_key(name)
     }
 
-    /// Look up a define by name.
+    /// The first define named `name`, if any — **module-unaware** (see
+    /// [`DefineTable::is_defined`]); use [`ScopedDefines::get`] for scoped
+    /// lookup.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&Define> {
-        self.map.get(name)
+        self.map.get(name).and_then(|defs| defs.first())
     }
 
-    /// Register `name` → `tokens`. Redefinition is an error regardless of
-    /// which origins collide (uniform rule); use `$undefine` first.
+    /// A module-unaware view of this table: only global/`-D` defines and
+    /// defines whose home module is the anonymous root `""` are visible.
+    /// Test-only — real evaluation always runs with a module-scoped view.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn global_view(&self) -> ScopedDefines<'_> {
+        ScopedDefines::new(self, "", &[], &[])
+    }
+
+    /// Register `name` → `tokens`, tagging the entry (via `origin`) with the
+    /// module that declared it. Redefinition is an error only when the new
+    /// define collides with a **visible-everywhere** global or with another
+    /// define **in the same module**; the same name in two unrelated modules
+    /// is not a collision. `file_modules` resolves each entry's home module
+    /// from the `file_id` in its origin position.
     ///
     /// # Errors
-    /// [`PreprocessError::Redefinition`] when a `$define` directive collides
-    /// with any prior define; [`PreprocessError::CliRedefinition`] when the
-    /// collision happens while seeding `-D` defines.
+    /// [`PreprocessError::Redefinition`] when a `$define` directive collides;
+    /// [`PreprocessError::CliRedefinition`] when the collision happens while
+    /// seeding `-D` defines.
     pub fn define(
         &mut self,
         name: String,
         tokens: Vec<Token>,
         origin: DefineOrigin,
+        file_modules: &[Option<String>],
     ) -> Result<(), PreprocessError> {
+        let new_home = home_module(origin, file_modules);
         if let Some(existing) = self.map.get(&name) {
-            let previous = existing.origin.describe();
-            return Err(match origin {
-                DefineOrigin::Directive(pos) => PreprocessError::Redefinition {
-                    name,
-                    previous,
-                    pos,
-                },
-                DefineOrigin::Builtin | DefineOrigin::Cli => {
-                    PreprocessError::CliRedefinition { name, previous }
+            for def in existing {
+                // A global on either side always collides (a module may
+                // neither shadow nor duplicate a compiler/CLI define); two
+                // module-scoped macros collide only within one module.
+                let collides = match (new_home, home_module(def.origin, file_modules)) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => true,
+                };
+                if collides {
+                    let previous = def.origin.describe();
+                    return Err(match origin {
+                        DefineOrigin::Directive(pos) => PreprocessError::Redefinition {
+                            name,
+                            previous,
+                            pos,
+                        },
+                        DefineOrigin::Builtin | DefineOrigin::Cli => {
+                            PreprocessError::CliRedefinition { name, previous }
+                        }
+                    });
                 }
-            });
+            }
         }
-        self.map.insert(name, Define { tokens, origin });
+        self.map.entry(name).or_default().push(Define { tokens, origin });
         Ok(())
     }
 
-    /// Remove `name` from the table; a no-op when it isn't defined.
-    pub fn undefine(&mut self, name: &str) {
-        self.map.remove(name);
+    /// Remove the current file's own module's `$define` of `name`; a no-op
+    /// when it isn't defined there. Only the module of `this_file` is
+    /// touched — an imported module's define and every global are left in
+    /// place (a `$undefine` in one file must not unbind another module's or
+    /// another file's macro). `file_modules` resolves home modules.
+    pub fn undefine(&mut self, name: &str, this_file: u32, file_modules: &[Option<String>]) {
+        let this_module = module_of(file_modules, this_file);
+        let Some(defs) = self.map.get_mut(name) else {
+            return;
+        };
+        defs.retain(|def| match def.origin {
+            DefineOrigin::Directive(pos) => module_of(file_modules, pos.file_id) != this_module,
+            DefineOrigin::Builtin | DefineOrigin::Cli => true,
+        });
+        if defs.is_empty() {
+            self.map.remove(name);
+        }
     }
 
     /// Parse a `-D NAME` / `-D NAME=VALUE` spec and register it. The value
@@ -201,36 +265,116 @@ impl DefineTable {
             Some(value) => lex_define_value(spec, value)?,
             None => Vec::new(),
         };
-        self.define(name.to_string(), tokens, DefineOrigin::Cli)
+        // CLI defines are global (no home module), so `file_modules` is
+        // irrelevant to their collision check.
+        self.define(name.to_string(), tokens, DefineOrigin::Cli, &[])
     }
 }
 
-/// Append `token` to `out`, splicing in its define expansion (recursively)
-/// when it is an identifier with an active define. Spliced tokens are
-/// re-stamped with the use-site position. Flag defines expand to nothing.
-pub(crate) fn expand_into(out: &mut Vec<Token>, token: &Token, table: &DefineTable) {
-    let mut active = Vec::new();
-    expand_token(out, token, table, &mut active);
+/// A single file's scoped view of the define table for lookup, `$if`/`$ifdef`
+/// evaluation, and identifier substitution. It bundles the shared table with
+/// the querying file's own module and direct imports (plus the file→module
+/// map used to resolve each define's home module), and applies the
+/// module-visibility rule described on this module: globals are visible
+/// everywhere, a `$define` macro only from its home module or a direct
+/// importer of that module.
+pub(crate) struct ScopedDefines<'a> {
+    table: &'a DefineTable,
+    /// The querying file's module (`""` for the anonymous root).
+    module: &'a str,
+    /// Modules the querying file has directly `$import`ed so far.
+    imports: &'a [String],
+    /// file_id → declared module, resolving a define's home from the file_id
+    /// embedded in its [`DefineOrigin::Directive`] position.
+    file_modules: &'a [Option<String>],
 }
 
-/// Recursive step for [`expand_into`]. `active` is the expansion chain:
-/// a name already on it does not expand again (self-reference guard), so
-/// mutually-recursive defines terminate with the inner name left verbatim.
-fn expand_token(out: &mut Vec<Token>, token: &Token, table: &DefineTable, active: &mut Vec<String>) {
-    if let TokenKind::Identifier(name) = &token.kind
-        && !active.iter().any(|n| n == name)
-        && let Some(define) = table.get(name)
-    {
-        active.push(name.clone());
-        for replacement in &define.tokens {
-            let mut stamped = replacement.clone();
-            stamped.pos = token.pos;
-            expand_token(out, &stamped, table, active);
+impl<'a> ScopedDefines<'a> {
+    pub(crate) fn new(
+        table: &'a DefineTable,
+        module: &'a str,
+        imports: &'a [String],
+        file_modules: &'a [Option<String>],
+    ) -> Self {
+        Self {
+            table,
+            module,
+            imports,
+            file_modules,
         }
-        active.pop();
-        return;
     }
-    out.push(token.clone());
+
+    /// Whether `define` is visible from this file: globals always are; a
+    /// module-scoped macro only from its home module or a direct importer.
+    fn sees(&self, define: &Define) -> bool {
+        match define.origin {
+            DefineOrigin::Builtin | DefineOrigin::Cli => true,
+            DefineOrigin::Directive(pos) => {
+                let home = module_of(self.file_modules, pos.file_id);
+                home == self.module || self.imports.iter().any(|m| m.as_str() == home)
+            }
+        }
+    }
+
+    /// True iff a *visible* define named `name` exists.
+    pub(crate) fn is_defined(&self, name: &str) -> bool {
+        self.get(name).is_some()
+    }
+
+    /// The visible define named `name`, if any. (A name is either a single
+    /// global or a set of module-scoped entries with distinct home modules,
+    /// so at most one entry is visible from any given file.)
+    pub(crate) fn get(&self, name: &str) -> Option<&'a Define> {
+        self.table.map.get(name)?.iter().find(|def| self.sees(def))
+    }
+
+    /// Append `token` to `out`, splicing in its define expansion (recursively)
+    /// when it is an identifier bound to a *visible* define. Spliced tokens
+    /// are re-stamped with the use-site position. Flag defines expand to
+    /// nothing.
+    pub(crate) fn expand_into(&self, out: &mut Vec<Token>, token: &Token) {
+        let mut active = Vec::new();
+        self.expand_token(out, token, &mut active);
+    }
+
+    /// Recursive step for [`ScopedDefines::expand_into`]. `active` is the
+    /// expansion chain: a name already on it does not expand again
+    /// (self-reference guard), so mutually-recursive defines terminate with
+    /// the inner name left verbatim.
+    fn expand_token(&self, out: &mut Vec<Token>, token: &Token, active: &mut Vec<String>) {
+        if let TokenKind::Identifier(name) = &token.kind
+            && !active.iter().any(|n| n == name)
+            && let Some(define) = self.get(name)
+        {
+            active.push(name.clone());
+            for replacement in &define.tokens {
+                let mut stamped = replacement.clone();
+                stamped.pos = token.pos;
+                self.expand_token(out, &stamped, active);
+            }
+            active.pop();
+            return;
+        }
+        out.push(token.clone());
+    }
+}
+
+/// The module a file belongs to — `""` for the anonymous root, a file that
+/// declared no `$module`, or an unknown file id.
+fn module_of(file_modules: &[Option<String>], file_id: u32) -> &str {
+    file_modules
+        .get(file_id as usize)
+        .and_then(Option::as_deref)
+        .unwrap_or("")
+}
+
+/// A define's home module: `None` for globals (compiler/CLI), otherwise the
+/// module of the file that declared it (resolved from its origin's file id).
+fn home_module(origin: DefineOrigin, file_modules: &[Option<String>]) -> Option<&str> {
+    match origin {
+        DefineOrigin::Builtin | DefineOrigin::Cli => None,
+        DefineOrigin::Directive(pos) => Some(module_of(file_modules, pos.file_id)),
+    }
 }
 
 /// Parse one Cargo version component (`env!` hands them over as strings).

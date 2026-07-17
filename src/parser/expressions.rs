@@ -1,11 +1,9 @@
 use indexmap::IndexSet;
 
 use crate::lexer::{Keyword, LangType, Position, Token, TokenKind, TypeBase};
-use crate::parser::{
-    BinaryOp, ComparisonOp, ExprKind, Expression, LiteralValue, ParserError, Statement,
-    StatementKind,
-};
-use crate::symbol::module::{ModuleSymbols, Visibility};
+use crate::parser::program::PendingBody;
+use crate::parser::{BinaryOp, ComparisonOp, ExprKind, Expression, LiteralValue, ParserError};
+use crate::symbol::module::ModuleSymbols;
 use crate::symbol::table::SymbolTable;
 use aspect_macros::parse_rule;
 
@@ -67,41 +65,28 @@ const INFIX_OPS: &[InfixEntry] = &[
     bin(TokenKind::Percent, BinaryOp::Mod, 20),
 ];
 
-/// A function body whose parsing is deferred to pass 2 of `do_parse_program`:
-/// enough context to jump back and parse it once every prototype is known.
-struct PendingBody {
-    /// Proto name (mangled for methods) — the unique key used to fill the
-    /// parsed body back into `Program::functions`.
-    name: String,
-    /// Full parameter list, including any implicit `this` receiver.
-    params: Vec<(LangType, String)>,
-    pos: Position,
-    /// Token index of the body's `{`.
-    body_start: usize,
-}
-
 pub struct Parser {
-    tokens: Vec<Token>,
+    pub(crate) tokens: Vec<Token>,
     pub(crate) current: usize,
     /// Transient per-function variable scopes (discarded after parsing).
-    symbol_table: SymbolTable,
+    pub(crate) symbol_table: SymbolTable,
     /// Cross-phase global symbols (functions, type-structs, aliases); moved into
     /// the `Program` at the end of `parse_program`.
-    module: ModuleSymbols,
+    pub(crate) module: ModuleSymbols,
     pub(crate) string_literals: IndexSet<String>,
     pub(crate) context_stack: Vec<&'static str>,
     pub(crate) errors: Vec<ParserError>,
     /// Function bodies skipped during pass 1 of `do_parse_program`, parsed in
     /// pass 2 once every prototype is registered (forward references).
-    pending_bodies: Vec<PendingBody>,
+    pub(crate) pending_bodies: Vec<PendingBody>,
     /// Token indices of `alias` keywords whose definition `prescan_aliases`
     /// successfully installed. Pass 1 only consumes tokens at these sites;
     /// sites not in here are re-parsed to produce their error.
-    alias_prescan_sites: std::collections::HashSet<usize>,
+    pub(crate) alias_prescan_sites: std::collections::HashSet<usize>,
     /// File registry indexed by `Position::file_id`. Set by the preprocessor;
     /// moved into `Program` at the end of `parse_program` so the type checker
     /// inherits it for its own error formatting.
-    source_files: Vec<std::path::PathBuf>,
+    pub(crate) source_files: Vec<std::path::PathBuf>,
     /// Module of each file, indexed by `Position::file_id` (parallel to
     /// `source_files`). Set via [`Parser::with_module_info`]; files without
     /// an entry — including everything when no module info was threaded —
@@ -1102,19 +1087,38 @@ impl Parser {
         match self.peek().kind {
             TokenKind::LangType(alloc_type) => {
                 self.advance();
-                self.expect(&TokenKind::OpenBracket, "[")?;
-                let count_expr = self.parse_expression()?;
-                self.expect(&TokenKind::CloseBracket, "]")?;
+                // The scanner greedily folds `type[<digits>]` (e.g. `u8[256]`)
+                // into a single `LangType` token carrying `array_size = Some(n)`,
+                // so no separate `[` survives for the explicit path below. Accept
+                // that folded spelling by synthesising the count from the folded
+                // size. `u8[n]` and `u8[(256)]` never fold (the fold only fires on
+                // bare digits), so they still take the explicit-bracket path.
+                // Note this is stack (inside a function) or BSS (module scope)
+                // allocation, not heap — see `generate_alloc`.
+                let (elem_type, count_expr) = if let Some(n) = alloc_type.array_size {
+                    (
+                        LangType {
+                            array_size: None,
+                            ..alloc_type
+                        },
+                        Self::integer_literal(i64::from(n), pos),
+                    )
+                } else {
+                    self.expect(&TokenKind::OpenBracket, "[")?;
+                    let count_expr = self.parse_expression()?;
+                    self.expect(&TokenKind::CloseBracket, "]")?;
+                    (alloc_type, count_expr)
+                };
                 Ok(Expression::new(
                     ExprKind::Alloc {
-                        alloc_type,
+                        alloc_type: elem_type,
                         count: Box::new(count_expr),
                     },
                     LangType {
-                        base: alloc_type.base,
-                        size_bits: alloc_type.size_bits,
-                        pointer_depth: alloc_type.pointer_depth + 1,
-                        is_const: alloc_type.is_const,
+                        base: elem_type.base,
+                        size_bits: elem_type.size_bits,
+                        pointer_depth: elem_type.pointer_depth + 1,
+                        is_const: elem_type.is_const,
                         array_size: None,
                     },
                     pos,
@@ -1126,610 +1130,6 @@ impl Parser {
                 self.peek().pos,
             )),
         }
-    }
-
-    /// Parse a complete program.
-    /// Returns all accumulated errors if any were encountered during parsing.
-    /// # Errors
-    /// Returns `Err(Vec<ParserError>)` if one or more parse errors occurred.
-    pub fn parse_program(&mut self) -> Result<crate::parser::Program, Vec<ParserError>> {
-        let result = self.do_parse_program();
-        let mut errs = std::mem::take(&mut self.errors);
-        match result {
-            Ok(prog) if errs.is_empty() => return Ok(prog),
-            Ok(_) => {}
-            Err(e) => errs.push(e),
-        }
-        errs.sort_by_key(|e| {
-            e.position()
-                .map_or((usize::MAX, usize::MAX), |p| (p.line, p.column))
-        });
-        Err(errs)
-    }
-
-    /// Two-pass program parse. Pass 1 walks the top level: signatures,
-    /// globals and struct layouts are parsed and registered (struct names and
-    /// aliases were pre-installed by the prescans), but function bodies are
-    /// only skipped (brace-matched) and recorded. Pass 2 revisits each
-    /// recorded body with the full symbol table. Declaration order is thus
-    /// non-semantic, with one exception: global-variable *initializers* are
-    /// parsed in pass 1 and only see earlier definitions.
-    #[parse_rule]
-    fn do_parse_program(&mut self) -> Result<crate::parser::Program, ParserError> {
-        use crate::parser::Program;
-
-        let mut functions = Vec::new();
-        let mut global_vars = Vec::new();
-
-        // Pre-register all type-struct names and pre-install all aliases so
-        // named types resolve regardless of declaration order (self/mutual
-        // reference, alias chains in any order).
-        self.prescan_type_names();
-        self.prescan_aliases();
-
-        skip_nl!();
-
-        while !self.is_at_end() {
-            let vis_pos = pos!();
-            let vis = if kw_if!(Public) {
-                Visibility::Public
-            } else {
-                Visibility::Private
-            };
-            let kind = self.parse_kind_modifier()?;
-            let is_extern = matches!(&kind, Some((Keyword::Extern, _)));
-
-            // `extern` already names a symbol defined elsewhere; marking it
-            // `public` would claim to export something this module never
-            // defines.
-            if is_extern && vis == Visibility::Public {
-                return Err(ParserError::UnexpectedToken(
-                    "extern functions cannot be public — they are defined elsewhere".to_string(),
-                    vis_pos,
-                ));
-            }
-
-            // `public` answers "does this symbol leave the object file", which
-            // only a function this module defines can.
-            let defines_a_fn = matches!(&kind, Some((Keyword::Asm, _)))
-                || (self.check_keyword(&Keyword::Fn) && !self.starts_fnptr_var_decl());
-            let defines_a_global = matches!(
-                self.peek().kind,
-                TokenKind::LangType(_) | TokenKind::Identifier(_)
-            ) || self.starts_fnptr_var_decl() || self.starts_grouped_var_decl();
-
-            if vis == Visibility::Public && !defines_a_fn && !defines_a_global {
-                return Err(ParserError::UnexpectedToken(
-                    "public can only be used with functions or global variables".to_string(),
-                    vis_pos,
-                ));
-            }
-
-            if let Some((Keyword::Asm, asm_pos)) = &kind {
-                let func = self.parse_asm_function(*asm_pos, vis)?;
-                functions.push(func);
-            }
-            // `fn ident(...)` is a function definition; `fn(...)` (no name
-            // between `fn` and `(`) is a function-pointer-typed global. The
-            // statement-table dispatch handles the local-decl variant.
-            else if self.check_keyword(&Keyword::Fn) && !self.starts_fnptr_var_decl() {
-                let func = self.parse_function(is_extern, vis)?;
-                functions.push(func);
-            } else if self.check_keyword(&Keyword::Alias) {
-                if is_extern {
-                    return Err(ParserError::UnexpectedToken(
-                        "extern can only be used with functions".to_string(),
-                        self.peek().pos,
-                    ));
-                }
-                self.parse_type_alias()?;
-            } else if self.check_keyword(&Keyword::Type) {
-                if is_extern {
-                    return Err(ParserError::UnexpectedToken(
-                        "extern can only be used with functions".to_string(),
-                        self.peek().pos,
-                    ));
-                }
-                let methods = self.parse_struct_def()?;
-                functions.extend(methods);
-            } else if matches!(
-                self.peek().kind,
-                TokenKind::LangType(_) | TokenKind::Identifier(_)
-            ) || self.starts_fnptr_var_decl()
-                || self.starts_grouped_var_decl()
-            {
-                // A leading built-in type, named type (alias / type-struct),
-                // function-pointer type, or parenthesised group begins a
-                // global variable declaration.
-                if is_extern {
-                    return Err(ParserError::UnexpectedToken(
-                        "extern can only be used with functions".to_string(),
-                        self.peek().pos,
-                    ));
-                }
-                let global = self.parse_global_var(vis)?;
-                global_vars.push(global);
-            } else {
-                return Err(ParserError::UnexpectedToken(
-                    format!("{}", self.peek().kind),
-                    self.peek().pos,
-                ));
-            }
-
-            skip_nl!();
-        }
-
-        // Pass 2: every prototype (free function and method) is registered by
-        // now — parse the deferred bodies and fill them into their functions.
-        let mut bodies = self.parse_pending_bodies();
-        for func in &mut functions {
-            if let Some(body) = bodies.remove(&func.proto.name) {
-                func.body = crate::parser::FunctionBody::Aspect(body);
-            }
-        }
-
-        Ok(Program {
-            functions,
-            global_vars,
-            string_literals: self.string_literals.iter().cloned().collect(),
-            symbols: std::mem::take(&mut self.module),
-            source_files: self.source_files.clone(),
-        })
-    }
-
-    /// Consume the leading kind-modifiers of a top-level declaration, yielding
-    /// the one named (with its position) or `None`.
-    ///
-    /// `extern` and `asm` both answer "which kind of function is this", and a
-    /// function is exactly one kind, so naming two is one error whichever
-    /// order they appear in. Scanning them together rather than testing pairs
-    /// is what keeps that true as kinds are added.
-    fn parse_kind_modifier(&mut self) -> Result<Option<(Keyword, Position)>, ParserError> {
-        let mut kind: Option<(Keyword, Position)> = None;
-        loop {
-            let next = if self.check_keyword(&Keyword::Extern) {
-                Keyword::Extern
-            } else if self.check_keyword(&Keyword::Asm) {
-                Keyword::Asm
-            } else {
-                return Ok(kind);
-            };
-            let next_pos = self.peek().pos;
-            if let Some((prev, _)) = &kind {
-                let msg = if *prev == next {
-                    format!("duplicate `{next}`")
-                } else {
-                    "extern and asm cannot be combined on one function".to_string()
-                };
-                return Err(ParserError::UnexpectedToken(msg, next_pos));
-            }
-            kind = Some((next, next_pos));
-            self.advance();
-        }
-    }
-
-    /// Pre-register every `type <Name>` struct name with a reserved id before
-    /// the main parse, so named types resolve regardless of declaration order
-    /// (and self/mutually-referential structs work). Records each name's
-    /// declaring file (the `type` keyword's `pos.file_id`) for the
-    /// import-visibility check. Does not consume tokens.
-    fn prescan_type_names(&mut self) {
-        let names: Vec<(String, u32)> = self
-            .tokens
-            .windows(2)
-            .filter_map(|w| match (&w[0].kind, &w[1].kind) {
-                (TokenKind::Keyword(Keyword::Type), TokenKind::Identifier(name)) => {
-                    Some((name.clone(), w[0].pos.file_id))
-                }
-                _ => None,
-            })
-            .collect();
-        for (name, file_id) in names {
-            self.module.intern_struct(&name, file_id);
-        }
-    }
-
-    /// Pre-install every `alias` definition before pass 1, so aliases resolve
-    /// regardless of declaration order. Fixpoint-iterates so chains may appear
-    /// in any order (`alias A B` before `alias B i32`). Nothing is reported
-    /// here: a site that never resolves (undefined target, cycle, duplicate)
-    /// is left out of `alias_prescan_sites`, and pass 1's `parse_type_alias`
-    /// re-parses it to produce the error at its natural position.
-    fn prescan_aliases(&mut self) {
-        let saved = self.current;
-        let mut sites: Vec<usize> = self
-            .tokens
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| matches!(t.kind, TokenKind::Keyword(Keyword::Alias)))
-            .map(|(i, _)| i)
-            .collect();
-        loop {
-            let before = sites.len();
-            sites.retain(|&site| {
-                self.current = site;
-                self.try_prescan_alias().is_err()
-            });
-            if sites.is_empty() || sites.len() == before {
-                break;
-            }
-        }
-        self.current = saved;
-    }
-
-    /// Attempt to parse and install one `alias Name Target` definition with
-    /// the cursor on the `alias` keyword. Fails when the target doesn't
-    /// resolve yet — `prescan_aliases` retries it next round.
-    #[parse_rule]
-    fn try_prescan_alias(&mut self) -> Result<(), ParserError> {
-        let site = self.current;
-        let pos = pos!();
-        kw!(Alias);
-        let name = ident!();
-        if self.module.resolve_alias(&name).is_some() || self.module.struct_id(&name).is_some() {
-            return Err(ParserError::DuplicateType(name, pos));
-        }
-        let target = self.parse_type()?;
-        self.module.define_alias(name, target, pos.file_id);
-        self.alias_prescan_sites.insert(site);
-        Ok(())
-    }
-
-    /// Pass 1 body handling: record where a function body starts, then skip
-    /// over it (balanced braces). The body is parsed in pass 2 by
-    /// `parse_pending_bodies` once every prototype is registered, so calls
-    /// resolve regardless of definition order.
-    fn defer_function_body(
-        &mut self,
-        name: String,
-        params: Vec<(LangType, String)>,
-        pos: Position,
-    ) -> Result<(), ParserError> {
-        if !self.check(&TokenKind::OpenBrace) {
-            return Err(ParserError::ExpectedToken(
-                "{".to_string(),
-                format!("{}", self.peek().kind),
-                self.peek().pos,
-            ));
-        }
-        self.pending_bodies.push(PendingBody {
-            name,
-            params,
-            pos,
-            body_start: self.current,
-        });
-        let mut depth = 0usize;
-        while !self.is_at_end() {
-            match self.peek().kind {
-                TokenKind::OpenBrace => depth += 1,
-                TokenKind::CloseBrace => {
-                    depth -= 1;
-                    if depth == 0 {
-                        self.advance();
-                        return Ok(());
-                    }
-                }
-                _ => {}
-            }
-            self.advance();
-        }
-        Err(ParserError::UnexpectedEof)
-    }
-
-    /// Pass 2: parse every body deferred during pass 1. Errors are collected
-    /// per body so one broken function doesn't hide errors in the others.
-    /// Returns the parsed bodies keyed by proto name.
-    fn parse_pending_bodies(&mut self) -> std::collections::HashMap<String, Vec<Statement>> {
-        let mut bodies = std::collections::HashMap::new();
-        for pending in std::mem::take(&mut self.pending_bodies) {
-            self.current = pending.body_start;
-            match self.parse_deferred_body(&pending) {
-                Ok(stmts) => {
-                    bodies.insert(pending.name, stmts);
-                }
-                Err(e) => self.errors.push(e),
-            }
-        }
-        bodies
-    }
-
-    #[parse_rule]
-    fn parse_deferred_body(&mut self, pending: &PendingBody) -> Result<Vec<Statement>, ParserError> {
-        let body = scoped!({
-            for (param_type, param_name) in &pending.params {
-                self.symbol_table_mut()
-                    .add_variable(param_name.clone(), *param_type, pending.pos)
-                    .map_err(|e| ParserError::from_symbol(e, pending.pos))?;
-            }
-            match self.parse_block_statement()? {
-                Statement {
-                    kind: StatementKind::Block(stmts),
-                    ..
-                } => stmts,
-                _ => unreachable!(),
-            }
-        });
-        Ok(body)
-    }
-
-    /// Parse a top-level type alias: `alias NewName TargetType`.
-    ///
-    /// Aliases are pure compile-time name bindings — they produce no AST node,
-    /// only an entry in the module symbol table consulted by `parse_type`.
-    /// Definition normally happened in `prescan_aliases` (so aliases can be
-    /// referenced before their definition); here we only consume the tokens
-    /// and report the errors the prescan stayed silent about (duplicates,
-    /// unresolvable targets, cycles).
-    #[parse_rule]
-    fn parse_type_alias(&mut self) -> Result<(), ParserError> {
-        let site = self.current;
-        let pos = pos!();
-        kw!(Alias);
-        let name = ident!();
-        if self.alias_prescan_sites.contains(&site) {
-            self.parse_type()?;
-        } else {
-            if self.module.resolve_alias(&name).is_some() || self.module.struct_id(&name).is_some()
-            {
-                return Err(ParserError::DuplicateType(name, pos));
-            }
-            let target = self.parse_type()?;
-            self.module.define_alias(name, target, pos.file_id);
-        }
-        term!();
-        Ok(())
-    }
-
-    /// Parse a top-level type-struct definition:
-    /// `type Name { [public] Type field <term> ...  [const?] fn method(...) {...} ... }`.
-    ///
-    /// Fields must come before methods. Methods are desugared into mangled
-    /// free functions (`Type$method`) and returned to `do_parse_program` for
-    /// inclusion in `Program::functions`.
-    #[parse_rule]
-    fn parse_struct_def(&mut self) -> Result<Vec<crate::parser::Function>, ParserError> {
-        use crate::symbol::module::FieldInfo;
-
-        let pos = pos!();
-        kw!(Type);
-        let name = ident!();
-        let id = self
-            .module
-            .struct_id(&name)
-            .expect("type-struct name reserved during prescan");
-
-        // A non-empty field set means this name was already defined.
-        if !self.module.struct_info(id).fields.is_empty() {
-            return Err(ParserError::DuplicateType(name, pos));
-        }
-
-        token!(OpenBrace);
-
-        let mut fields: Vec<FieldInfo> = Vec::new();
-        let mut methods: Vec<crate::parser::Function> = Vec::new();
-        // Fields are finalised the moment we transition to method parsing so
-        // method bodies (including `return Self { ... }`) see the layout.
-        let mut fields_set = false;
-
-        loop {
-            skip_nl!();
-            if self.check(&TokenKind::CloseBrace) || self.is_at_end() {
-                break;
-            }
-
-            // Optional `public` prefix — shared by fields and methods. Absence
-            // means private for both (encapsulation by default).
-            let vis = if kw_if!(Public) {
-                Visibility::Public
-            } else {
-                Visibility::Private
-            };
-
-            // Method vs field. A method is `[const] fn IDENT (...)`; a
-            // function-pointer *field* type is `fn (...)`. They are told apart
-            // by lookahead (`fn` followed by a name vs `(`), so a `public
-            // fn(i32) -> i32 cb` field is not mistaken for a method.
-            if self.upcoming_is_method() {
-                if !fields_set {
-                    self.module.set_fields(id, std::mem::take(&mut fields));
-                    fields_set = true;
-                }
-                let is_const_fn = self.check_keyword(&Keyword::Const);
-                if is_const_fn {
-                    self.advance(); // consume `const`
-                    skip_nl!();
-                }
-                let method = self.parse_method(id, &name, is_const_fn, vis)?;
-                methods.push(method);
-                continue;
-            }
-
-            // Field. Fields must come before any method.
-            if fields_set {
-                return Err(ParserError::UnexpectedToken(
-                    "fields must be declared before methods".to_string(),
-                    self.peek().pos,
-                ));
-            }
-            let field_type = lang_type!();
-            let field_name = ident!();
-            fields.push(FieldInfo {
-                name: field_name,
-                ty: field_type,
-                vis,
-            });
-            self.match_token(&[TokenKind::Semicolon, TokenKind::Newline]);
-        }
-        token!(CloseBrace);
-
-        // A method-less struct never triggered the transition above.
-        if !fields_set {
-            self.module.set_fields(id, fields);
-        }
-
-        Ok(methods)
-    }
-
-    /// Lookahead from the current position: does a method declaration start
-    /// here? A method is `[const] fn IDENT (`; a function-pointer field type is
-    /// `fn (`, so the token after `fn` — an identifier vs `(` — discriminates.
-    /// Any `public` prefix has already been consumed by the caller.
-    fn upcoming_is_method(&self) -> bool {
-        let mut i = self.current;
-        let kind_at = |idx: usize| self.tokens.get(idx).map(|t| &t.kind);
-        // Optional leading `const`.
-        if matches!(kind_at(i), Some(TokenKind::Keyword(Keyword::Const))) {
-            i += 1;
-        }
-        // Must be `fn` followed by the method name (not `(`, which begins a
-        // function-pointer type used as a field).
-        if !matches!(kind_at(i), Some(TokenKind::Keyword(Keyword::Fn))) {
-            return false;
-        }
-        matches!(kind_at(i + 1), Some(TokenKind::Identifier(_)))
-    }
-
-    /// Parse a method inside a `type` body. Methods are desugared to free
-    /// functions named `Type$method`. An instance method takes a leading bare
-    /// `this` receiver (no type annotation); the parser supplies it as an
-    /// implicit `*Struct` (or `*const Struct` for `const fn`) first parameter.
-    /// A static method omits `this`.
-    #[parse_rule]
-    fn parse_method(
-        &mut self,
-        struct_id: u32,
-        struct_name: &str,
-        is_const_fn: bool,
-        vis: crate::symbol::module::Visibility,
-    ) -> Result<crate::parser::Function, ParserError> {
-        use crate::parser::{Function, FunctionProto};
-        use crate::symbol::module::{mangle_method, MethodSig};
-        use crate::symbol::table::FunctionSymbol;
-
-        let pos = pos!();
-        kw!(Fn);
-        let method_name = ident!();
-        token!(OpenParen);
-
-        // Optional implicit `this` receiver, then any user parameters.
-        let mut params: Vec<(LangType, String)> = Vec::new();
-        let has_this = if let TokenKind::Identifier(n) = &self.peek().kind
-            && n == "this"
-        {
-            self.advance();
-            let receiver_ty = LangType {
-                base: TypeBase::Struct(struct_id),
-                size_bits: 0,
-                pointer_depth: 1,
-                is_const: is_const_fn,
-                array_size: None,
-            };
-            params.push((receiver_ty, "this".to_string()));
-            // Optional comma before the next param.
-            self.match_token(&[TokenKind::Comma]);
-            true
-        } else {
-            false
-        };
-
-        params.extend(self.parse_comma_separated(&TokenKind::CloseParen, |p| {
-            let param_type = p.parse_type()?;
-            let param_name = p.parse_ident("parameter name")?;
-            Ok((param_type, param_name))
-        })?);
-
-        if is_const_fn && !has_this {
-            return Err(ParserError::UnexpectedToken(
-                "`const fn` requires a `this` receiver".to_string(),
-                pos,
-            ));
-        }
-
-        let return_type = if self.match_token(&[TokenKind::Arrow]) {
-            lang_type!()
-        } else {
-            LangType::VOID
-        };
-
-        let mangled = mangle_method(struct_name, &method_name);
-
-        let proto = FunctionProto {
-            name: mangled.clone(),
-            params: params.clone(),
-            return_type,
-            // A method's `public` governs access through its type, not object
-            // -file export; nothing outside Aspect calls a mangled method.
-            vis: Visibility::Private,
-            pos,
-        };
-
-        // Register so plain `FunctionCall { name: mangled, ... }` resolves.
-        self.module
-            .add_function(FunctionSymbol {
-                name: mangled.clone(),
-                params: params.clone(),
-                return_type,
-                is_extern: false,
-                has_body: true,
-                pos,
-            })
-            .map_err(|e| ParserError::from_symbol(e, pos))?;
-
-        // Register in the struct's method registry (params exclude `this`).
-        let visible_params: Vec<(LangType, String)> = if has_this {
-            params[1..].to_vec()
-        } else {
-            params.clone()
-        };
-        self.module.add_method(
-            struct_id,
-            method_name,
-            MethodSig {
-                mangled_name: mangled,
-                params: visible_params,
-                return_type,
-                is_static: !has_this,
-                is_const: is_const_fn,
-                vis,
-            },
-        );
-
-        skip_nl!();
-
-        // Same deferral as free functions: methods can call anything declared
-        // anywhere in the file, including later methods of the same type.
-        self.defer_function_body(proto.name.clone(), params, pos)?;
-
-        Ok(Function {
-            proto,
-            body: crate::parser::FunctionBody::Aspect(Vec::new()),
-        })
-    }
-
-    /// `true` when `name` is a method of `base`'s type (instance form) or of
-    /// the type whose name `base` resolves to (static form). Used to decide
-    /// between method-call dispatch and field-access in `parse_dot_postfix`.
-    fn identifier_is_method_of_base(&self, base: &Expression, name: &str) -> bool {
-        // Instance: base's type is a type-struct (value or pointer).
-        if let TypeBase::Struct(id) = base.expr_type.base
-            && self
-                .module
-                .struct_info(id)
-                .methods
-                .contains_key(name)
-        {
-            return true;
-        }
-        // Static: base is a bare identifier naming a known type-struct, with
-        // no local variable shadowing it.
-        if let ExprKind::Variable(var_name) = &base.kind
-            && let Some(id) = self.module.struct_id(var_name)
-            && self.symbol_table.lookup_variable(var_name).is_none()
-            && self.module.struct_info(id).methods.contains_key(name)
-        {
-            return true;
-        }
-        false
     }
 
     /// Parse a `.ident` postfix — the `.` was already consumed. The followup
@@ -1750,6 +1150,38 @@ impl Parser {
             self.advance();
             let args = self.parse_comma_separated(&TokenKind::CloseParen, Self::parse_expression)?;
             return self.build_method_call(base, &name, args, pos);
+        }
+
+        // Static reference to a method as a function-pointer *value*:
+        // `Type.method` with no following call (`base` names a known
+        // type-struct, not shadowed by a local, and `name` is one of its
+        // methods). Resolves to the method's mangled free function, typed
+        // from that function's *actual* signature — whose first parameter is
+        // already the receiver `Type*` — so the value is `fn(Type*, ...) -> R`
+        // and drops straight into a fn-ptr variable or dispatch table, called
+        // through the pointer with the receiver passed first. The bound form
+        // (`instance.method` as a value, carrying a receiver) stays out of
+        // scope and falls through to field access below.
+        if let ExprKind::Variable(var_name) = &base.kind
+            && let Some(id) = self.module.struct_id(var_name)
+            && self.symbol_table.lookup_variable(var_name).is_none()
+            && self.module.struct_info(id).methods.contains_key(&name)
+        {
+            let type_name = self.module.struct_info(id).name.clone();
+            let mangled = crate::symbol::module::mangle_method(&type_name, &name);
+            self.check_method_visibility(&type_name, &name, &mangled, pos)?;
+            let (params, return_type) = self.module.lookup_function(&mangled).map_or_else(
+                || (Vec::new(), LangType::VOID),
+                |f| {
+                    (
+                        f.params.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
+                        f.return_type,
+                    )
+                },
+            );
+            let fnptr_id = self.module.intern_fnptr(params, return_type);
+            let ty = LangType::fnptr_type(fnptr_id);
+            return Ok(Expression::new(ExprKind::FunctionRef(mangled), ty, pos));
         }
 
         // Field access.
@@ -1921,369 +1353,6 @@ impl Parser {
         Ok(Expression::new(
             ExprKind::StructLiteral { struct_id, fields },
             expr_type,
-            pos,
-        ))
-    }
-
-    /// Parse an `asm fn` declaration: a sibling of `extern fn`. Where an
-    /// extern fn's body lives in another object file, an asm fn's body *is*
-    /// the given instructions.
-    ///
-    /// Unlike an ordinary fn the body is parsed inline rather than deferred
-    /// to pass 2 — an asm body is string literals, so nothing in it can
-    /// forward-reference anything.
-    ///
-    /// Registering an ordinary `FunctionSymbol` at the end is what makes call
-    /// sites ordinary: `lookup_function`, the type checker and call codegen
-    /// all treat this exactly like any other function with a body.
-    /// `pos` is the `asm` keyword, already consumed by the caller's
-    /// kind-modifier scan.
-    #[parse_rule]
-    fn parse_asm_function(
-        &mut self,
-        pos: Position,
-        vis: Visibility,
-    ) -> Result<crate::parser::Function, ParserError> {
-        use crate::parser::{AsmReg, AsmSpec, Function, FunctionProto};
-        use crate::symbol::table::FunctionSymbol;
-
-        kw!(Fn);
-        let name = ident!();
-        token!(OpenParen);
-
-        // Every parameter must be pinned (no compiler-allocated operands), so
-        // `param_regs` stays exactly parallel to `params`.
-        let mut param_regs: Vec<AsmReg> = Vec::new();
-        let params = self.parse_comma_separated(&TokenKind::CloseParen, |p| {
-            let param_type = p.parse_type()?;
-            let param_name = p.parse_ident("parameter name")?;
-            if !p.check(&TokenKind::Colon) {
-                return Err(ParserError::AsmMissingParamRegister(
-                    param_name,
-                    p.peek().pos,
-                ));
-            }
-            p.advance(); // ':'
-            param_regs.push(p.parse_asm_reg()?);
-            Ok((param_type, param_name))
-        })?;
-        Self::check_duplicate_params(&params, pos)?;
-
-        let (return_type, return_reg) = if self.match_token(&[TokenKind::Arrow]) {
-            let ty = self.parse_type()?;
-            let reg = if self.check(&TokenKind::Colon) {
-                self.advance();
-                Some(self.parse_asm_reg()?)
-            } else {
-                None
-            };
-            (ty, reg)
-        } else {
-            (LangType::VOID, None)
-        };
-
-        // A void asm fn has no output register; a value-returning one must
-        // say where its value comes out.
-        if return_type.is_void_value() {
-            if let Some(reg) = &return_reg {
-                return Err(ParserError::AsmVoidReturnRegister(name.clone(), reg.pos));
-            }
-        } else if return_reg.is_none() {
-            return Err(ParserError::AsmMissingReturnRegister(name.clone(), pos));
-        }
-
-        // `clobbers` is contextual — a plain identifier, never a keyword — so
-        // it stays usable as an ordinary name elsewhere. The clause is
-        // optional and may sit on its own line.
-        skip_nl!();
-        let clobbers = if matches!(&self.peek().kind, TokenKind::Identifier(n) if n == "clobbers") {
-            self.advance();
-            token!(OpenParen);
-            self.parse_comma_separated(&TokenKind::CloseParen, Self::parse_asm_reg)?
-        } else {
-            Vec::new()
-        };
-        skip_nl!();
-
-        // Body: adjacent string literals, one line of assembly each. Consumed
-        // as raw tokens, NOT through expression parsing — asm lines must not
-        // land in the program's string-literal table.
-        let body_pos = pos!();
-        token!(OpenBrace);
-        let mut lines: Vec<String> = Vec::new();
-        loop {
-            skip_nl!();
-            if self.check(&TokenKind::CloseBrace) || self.is_at_end() {
-                break;
-            }
-            match &self.peek().kind {
-                TokenKind::StringLiteral(s) => {
-                    lines.push(s.clone());
-                    self.advance();
-                }
-                other => {
-                    return Err(ParserError::ExpectedToken(
-                        "assembly string literal".to_string(),
-                        format!("{other}"),
-                        self.peek().pos,
-                    ));
-                }
-            }
-        }
-        token!(CloseBrace);
-        if lines.is_empty() {
-            return Err(ParserError::AsmEmptyBody(name.clone(), body_pos));
-        }
-
-        self.module
-            .add_function(FunctionSymbol {
-                name: name.clone(),
-                params: params.clone(),
-                return_type,
-                is_extern: false,
-                has_body: true,
-                pos,
-            })
-            .map_err(|e| ParserError::from_symbol(e, pos))?;
-
-        Ok(Function {
-            proto: FunctionProto {
-                name,
-                params,
-                return_type,
-                vis,
-                pos,
-            },
-            body: crate::parser::FunctionBody::Asm(AsmSpec {
-                param_regs,
-                return_reg,
-                clobbers,
-                lines,
-                pos,
-            }),
-        })
-    }
-
-    /// Consume one contextual register name. Register names are ordinary
-    /// identifiers — meaningful only after a `:` in an `asm fn` signature or
-    /// inside `clobbers(...)` — so `rax` stays usable as a variable name
-    /// everywhere else in the language. Validating the name against the
-    /// target's register table is the type checker's job, not the parser's.
-    fn parse_asm_reg(&mut self) -> Result<crate::parser::AsmReg, ParserError> {
-        let pos = self.peek().pos;
-        match &self.peek().kind {
-            TokenKind::Identifier(name) => {
-                let name = name.clone();
-                self.advance();
-                Ok(crate::parser::AsmReg { name, pos })
-            }
-            other => Err(ParserError::ExpectedToken(
-                "register name".to_string(),
-                format!("{other}"),
-                pos,
-            )),
-        }
-    }
-
-    /// Reject a parameter list that names the same parameter twice.
-    ///
-    /// A fn *with* a body catches this in pass 2, when the body's scope
-    /// declares each parameter and the second declaration collides. The
-    /// bodyless forms — `extern fn` and `asm fn` — never open that scope, so
-    /// without this check they silently accept `f(i64 a, i64 a)`. Checking the
-    /// proto directly covers all three forms at their declaration site; the
-    /// error matches pass 2's spelling and position so a duplicate reports
-    /// identically no matter which form it appears in.
-    fn check_duplicate_params(
-        params: &[(LangType, String)],
-        pos: crate::lexer::Position,
-    ) -> Result<(), ParserError> {
-        let mut seen: Vec<&str> = Vec::with_capacity(params.len());
-        for (_, name) in params {
-            if seen.contains(&name.as_str()) {
-                return Err(ParserError::DuplicateDeclaration(name.clone(), pos));
-            }
-            seen.push(name);
-        }
-        Ok(())
-    }
-
-    #[parse_rule]
-    fn parse_function(
-        &mut self,
-        is_extern: bool,
-        vis: Visibility,
-    ) -> Result<crate::parser::Function, ParserError> {
-        use crate::parser::{Function, FunctionProto};
-        use crate::symbol::table::FunctionSymbol;
-
-        let pos = pos!();
-        kw!(Fn);
-        let name = ident!();
-        token!(OpenParen);
-
-        let params = self.parse_comma_separated(&TokenKind::CloseParen, |p| {
-            let param_type = p.parse_type()?;
-            let param_name = p.parse_ident("parameter name")?;
-            Ok((param_type, param_name))
-        })?;
-        Self::check_duplicate_params(&params, pos)?;
-
-        let return_type = if self.match_token(&[TokenKind::Arrow]) {
-            lang_type!()
-        } else {
-            LangType::VOID
-        };
-
-        let proto = FunctionProto {
-            name: name.clone(),
-            params: params.clone(),
-            return_type,
-            vis,
-            pos,
-        };
-
-        self.module
-            .add_function(FunctionSymbol {
-                name: name.clone(),
-                params: params.clone(),
-                return_type,
-                is_extern,
-                has_body: !is_extern,
-                pos,
-            })
-            .map_err(|e| ParserError::from_symbol(e, pos))?;
-
-        skip_nl!();
-
-        let body = if is_extern {
-            term!();
-            crate::parser::FunctionBody::Extern
-        } else {
-            // Body parsing is deferred to pass 2 (see `do_parse_program`) so
-            // functions can call others defined later in the file.
-            self.defer_function_body(name, params, pos)?;
-            crate::parser::FunctionBody::Aspect(Vec::new())
-        };
-
-        Ok(Function { proto, body })
-    }
-
-    #[parse_rule]
-    fn parse_global_var(&mut self, vis: Visibility) -> Result<crate::parser::GlobalVar, ParserError> {
-        use crate::parser::GlobalVar;
-
-        let pos = pos!();
-        let var_type = lang_type!();
-        let name = ident!();
-
-        let initializer = if self.match_token(&[TokenKind::Assign]) {
-            Some(self.parse_expression()?)
-        } else {
-            None
-        };
-
-        self.symbol_table_mut()
-            .add_variable(name.clone(), var_type, pos)
-            .map_err(|e| ParserError::from_symbol(e, pos))?;
-
-        term!();
-
-        Ok(GlobalVar {
-            var_type,
-            name,
-            initializer,
-            pos,
-            vis
-        })
-    }
-
-    fn parse_init_list(&mut self) -> Result<Expression, ParserError> {
-        let pos = self.peek().pos;
-        self.expect(&TokenKind::OpenBrace, "{")?;
-
-        let mut elements = Vec::new();
-        self.skip_newlines();
-        if !self.check(&TokenKind::CloseBrace) {
-            loop {
-                self.skip_newlines();
-                elements.push(self.parse_expression()?);
-                self.skip_newlines();
-                if !self.match_token(&[TokenKind::Comma]) {
-                    break;
-                }
-            }
-        }
-        self.skip_newlines();
-        self.expect(&TokenKind::CloseBrace, "}")?;
-
-        Ok(Expression::new(
-            ExprKind::ListInitializer(elements),
-            LangType::VOID,
-            pos,
-        ))
-    }
-
-    /// Disambiguate a bare `{` in expression position.
-    ///
-    /// A brace expression that parses as a comma-separated expression list
-    /// *is* a list initializer (`{1, 2, 3}`, `{x}`, `{}`). Anything else —
-    /// statement terminators, declarations, `return` — fails the list parse
-    /// and is re-parsed as a **value-block** (`{ ...; return v }`). The two
-    /// grammars cannot both accept one input: a valid value-block must
-    /// contain a `return`, which can never appear in a valid list.
-    ///
-    /// Speculation is safe here for the same reason as `parse_cast_or_alloc`:
-    /// expression parsing has no side effects beyond interned string
-    /// literals, which are rolled back by truncation.
-    fn parse_brace_expression(&mut self) -> Result<Expression, ParserError> {
-        let saved = self.current;
-        let saved_strlits = self.string_literals.len();
-        match self.parse_init_list() {
-            Ok(list) => Ok(list),
-            Err(list_err) => {
-                let list_at = self.current;
-                self.current = saved;
-                self.string_literals.truncate(saved_strlits);
-                self.parse_value_block().map_err(|block_err| {
-                    // Two failed readings: report the one that got further —
-                    // it is almost always the one the user meant.
-                    if list_at > self.current {
-                        self.current = list_at;
-                        list_err
-                    } else {
-                        block_err
-                    }
-                })
-            }
-        }
-    }
-
-    /// Parse a value-block: `{ stmt* }` as an expression. The opening brace
-    /// has not yet been consumed. Statements are parsed with the regular
-    /// statement grammar in a fresh variable scope; errors propagate (no
-    /// `sync!` recovery — inside an expression there is no safe resync
-    /// point). The expression type is a `void` placeholder; the type
-    /// checker resolves it from the block's `return` statements.
-    #[parse_rule]
-    fn parse_value_block(&mut self) -> Result<Expression, ParserError> {
-        let pos = pos!();
-        token!(OpenBrace);
-        let statements = scoped!({
-            let mut stmts = Vec::new();
-            loop {
-                skip_nl!();
-                if self.check(&TokenKind::CloseBrace) || self.is_at_end() {
-                    break;
-                }
-                stmts.push(self.parse_statement()?);
-            }
-            stmts
-        });
-        token!(CloseBrace);
-        Ok(Expression::new(
-            ExprKind::ValueBlock(statements),
-            LangType::VOID,
             pos,
         ))
     }

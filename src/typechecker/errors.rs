@@ -1,9 +1,10 @@
 use crate::lexer::Position;
 use crate::parser::LangType;
+use aspect_macros::ErrorPosition;
 use thiserror::Error;
 
 /// Type checker error types
-#[derive(Error, Debug, Clone)]
+#[derive(Error, Debug, Clone, ErrorPosition)]
 pub enum TypeCheckError {
     #[error("Type mismatch: expected '{expected}' but found '{found}' at {position}")]
     TypeMismatch {
@@ -223,47 +224,4 @@ pub enum TypeCheckError {
         reg_bits: u32,
         position: Position,
     },
-}
-
-impl TypeCheckError {
-    /// Return the source position associated with this error, if any.
-    #[must_use]
-    pub fn position(&self) -> Option<Position> {
-        match self {
-            Self::TypeMismatch { position, .. }
-            | Self::InvalidBinaryOperation { position, .. }
-            | Self::InvalidUnaryOperation { position, .. }
-            | Self::ArgumentCountMismatch { position, .. }
-            | Self::ArgumentTypeMismatch { position, .. }
-            | Self::ReturnTypeMismatch { position, .. }
-            | Self::AssignmentTypeMismatch { position, .. }
-            | Self::InvalidCast { position, .. }
-            | Self::AssignmentToConst { position, .. }
-            | Self::ListInitLengthMismatch { position, .. }
-            | Self::NotAStruct { position, .. }
-            | Self::UnknownField { position, .. }
-            | Self::MissingStructFields { position, .. }
-            | Self::InaccessibleField { position, .. }
-            | Self::InaccessibleMethod { position, .. }
-            | Self::AsmUnsupportedTarget { position, .. }
-            | Self::AsmUnknownRegister { position, .. }
-            | Self::AsmDuplicateRegister { position, .. }
-            | Self::AsmClobberIsOperand { position, .. }
-            | Self::AsmDuplicateClobber { position, .. }
-            | Self::AsmReservedRegister { position, .. }
-            | Self::AsmUnpinnableType { position, .. }
-            | Self::AsmRegisterClassMismatch { position, .. }
-            | Self::AsmRegisterTooNarrow { position, .. } => Some(*position),
-            Self::UndefinedVariable(_, pos)
-            | Self::UndefinedFunction(_, pos)
-            | Self::InvalidDereference(_, pos)
-            | Self::InvalidReference(pos)
-            | Self::InvalidConditionType(_, pos)
-            | Self::InvalidVoidValue(pos)
-            | Self::ValueBlockMissingReturn(pos)
-            | Self::ValueBlockVoidReturn(pos)
-            | Self::OpaqueDereference(pos) => Some(*pos),
-            Self::MissingReturn(_) => None,
-        }
-    }
 }

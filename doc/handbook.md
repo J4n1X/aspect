@@ -675,6 +675,53 @@ Things worth knowing:
 - Only pinned operands are supported — the compiler won't pick a register
   for you — and `extern` and `asm` can't be combined.
 
+### `naked fn` — a function that is *only* assembly
+
+An `asm fn` has a prologue: the compiler moves your pinned operands into place
+around the instructions. A `naked fn` has **none** — LLVM's `naked` attribute
+emits your assembly and nothing else, no prologue or epilogue:
+
+```aspect
+naked fn add_abi(i32 a, i32 b) -> i32 {
+    "mov eax, edi"      # SysV puts the args in edi, esi
+    "add eax, esi"
+    "ret"               # you issue the return yourself
+}
+```
+
+Because there is no prologue, there are no register pins to write: arguments
+simply arrive where the platform ABI leaves them (SysV x86-64: `rdi`, `rsi`,
+`rdx`, `rcx`, `r8`, `r9`) and the result goes back in `rax`/`eax`. Your assembly
+reads them directly and must issue its own `ret`. Call sites are ordinary calls,
+same as `asm fn`.
+
+The reason `naked fn` exists is the freestanding entry point. At process start
+`argc` and `argv` are on the *stack* (`argc` at `[rsp]`, `argv` at `[rsp+8]`),
+not in registers — so an ordinary `fn _start(u32 argc, u8** argv)` reads garbage,
+because its prologue has already moved `rsp` before your first statement. A naked
+`_start` sees the stack untouched:
+
+```aspect
+$ifdef ARCH_X86_64
+naked fn _start() {
+    "mov rdi, [rsp]"        # argc
+    "lea rsi, [rsp + 8]"    # argv
+    "call main"
+    "mov rdi, rax"          # main's return -> exit status
+    "mov rax, 60"           # SYS_exit
+    "syscall"
+}
+$endif
+```
+
+Worth knowing:
+
+- **`naked` is a keyword** and can't be combined with `asm` or `extern`.
+- **The assembly is target-specific.** Gate it behind `$ifdef ARCH_X86_64`
+  ([§11](#11-the-preprocessor)) and offer a portable path in the `$else`.
+- **You own the calling convention.** Nothing is generated around your
+  instructions — load parameters and return entirely by hand.
+
 ### `public` — exporting a symbol
 
 By default a function's symbol does not leave the object file. That costs you

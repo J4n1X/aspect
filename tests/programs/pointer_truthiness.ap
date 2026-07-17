@@ -1,0 +1,35 @@
+# expected: 7
+#-
+  Regression: a pointer used directly as a condition. `if p` / `while p`
+  tests non-null (the inverse of `!p`, which tests null). This previously
+  failed in codegen with "Cannot convert value to boolean" for every
+  pointer type — value_to_bool handled ints and floats but not pointers.
+  See TODO "if p { } on a pointer".
+-#
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    i32 x = 99
+    i32 *p = &x
+    i32 count = 0
+
+    if p {
+        count = count + 5      # p is non-null -> taken
+    }
+
+    u8 *nothing = null
+    if nothing {
+        count = count + 100    # null -> not taken
+    }
+    if !nothing {
+        count = count + 2      # !null -> taken
+    }
+
+    # `while p` also exercises the pointer->bool path; guard it so it runs once.
+    i32 *q = &x
+    while q {
+        count = count + 0
+        q = null
+    }
+
+    return count
+}

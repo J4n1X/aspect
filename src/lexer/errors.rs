@@ -1,3 +1,4 @@
+use aspect_macros::ErrorPosition;
 use thiserror::Error;
 
 /// Position in a source file.
@@ -48,7 +49,7 @@ impl std::fmt::Display for Position {
 }
 
 /// Lexer error types
-#[derive(Error, Debug)]
+#[derive(Error, Debug, ErrorPosition)]
 pub enum LexerError {
     #[error("Unexpected character '{0}' at {1}")]
     UnexpectedChar(char, Position),

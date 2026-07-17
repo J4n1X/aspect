@@ -1,0 +1,87 @@
+#-
+  std/mem/bytes — pure-Aspect byte primitives, no libc.
+
+  Drop-in replacements for the `strlen`/`strcmp`/`memcpy`/`memset`/`memcmp`
+  that `std/c/string` binds to libc, matching those signatures byte for
+  byte. Nothing here touches the OS or the C runtime, so a freestanding
+  build (`-nostdlib`) can do string/collection/sort work with no libc on
+  this path — only the allocator (`std/c/stdlib`) still pulls it in.
+
+  SELECTION. This module is *opt-in*, never the default. `std/sort`,
+  `std/collections` and `std/string` pick their byte primitives with
+
+      $ifdef STD_NO_LIBC
+      $import std/mem/bytes        # this module
+      $else
+      $import std/c/string         # libc — the default
+      $endif
+
+  so a normal build keeps libc and only `-D STD_NO_LIBC` swaps in the pure
+  path. The default matters: libc's `memcpy`/`memset` are hand-written SIMD,
+  and the naive byte loops below lose to them on any sizeable buffer. Making
+  the pure path a blanket replacement would regress every non-freestanding
+  user, so it stays behind the gate.
+
+  These are the *correct* baseline, not the fast one. A SIMD-optimised pure
+  path (word-at-a-time, or an `$ifdef ARCH_X86_64` sibling here) is a future
+  refinement — added alongside `generic.ap`, selected the same way io.ap and
+  math.ap select their per-arch bodies — not built yet.
+
+  The mem* family is type-erased (`u0*`) like C's void*; it casts to `u8*`
+  internally for byte arithmetic. The str* family stays `u8*`.
+-#
+$module std/mem/bytes
+
+# Length of a null-terminated byte string, excluding the terminator.
+fn strlen(u8* s) -> u64 {
+    u64 n = 0
+    while s[n] != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+# Lexicographic compare of two C strings: <0 / 0 / >0. Bytes are unsigned;
+# the classic "advance while equal and not terminated, then subtract" — when
+# the loop stops, the first differing (or terminating) pair decides the sign.
+fn strcmp(u8* a, u8* b) -> i32 {
+    u64 i = 0
+    while a[i] != 0 && a[i] == b[i] {
+        i = i + 1
+    }
+    return (a[i] as i32) - (b[i] as i32)
+}
+
+# Copy `n` bytes src -> dst (must not overlap, per the libc contract) and
+# return dst. Forward byte loop.
+fn memcpy(u0* dst, u0* src, u64 n) -> u0* {
+    u8* d = dst as u8*
+    u8* s = src as u8*
+    for (u64 i = 0; i < n; i += 1) {
+        d[i] = s[i]
+    }
+    return dst
+}
+
+# Fill `n` bytes of dst with the low 8 bits of `byte`; return dst.
+fn memset(u0* dst, i32 byte, u64 n) -> u0* {
+    u8* d = dst as u8*
+    u8 b = byte as u8
+    for (u64 i = 0; i < n; i += 1) {
+        d[i] = b
+    }
+    return dst
+}
+
+# Compare `n` bytes: <0 / 0 / >0 at the first differing (unsigned) byte, 0 if
+# all `n` match.
+fn memcmp(u0* a, u0* b, u64 n) -> i32 {
+    u8* pa = a as u8*
+    u8* pb = b as u8*
+    for (u64 i = 0; i < n; i += 1) {
+        if pa[i] != pb[i] {
+            return (pa[i] as i32) - (pb[i] as i32)
+        }
+    }
+    return 0
+}

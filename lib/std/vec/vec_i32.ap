@@ -17,7 +17,26 @@
 -#
 $module std/vec
 
+# Allocator + fatal-exit: libc's malloc/realloc/free/abort by default, or pure
+# Aspect under `-D STD_NO_LIBC` (`std/mem`'s page-backed allocator, plus an
+# `abort` that exits straight through the kernel) for a freestanding build
+# with no libc on this path. The call sites below are identical either way.
+# See std/mem.
+$ifdef STD_NO_LIBC
+$import std/mem
+$import std/linux/syscall
+
+# Freestanding stand-in for libc's abort(): exit(134) via the raw exit_group
+# syscall — 128 + SIGABRT, the status libc's abort() yields. No signal is
+# raised (there is no signal plumbing here), but the process dies non-zero,
+# which is exactly what the bounds checks need. Linux/x86-64 only, like the
+# rest of the STD_NO_LIBC path.
+fn abort() -> u0 {
+    sys_exit_group(134)
+}
+$else
 $import std/c/stdlib
+$endif
 
 type VecI32 {
     i32* data         # private - heap buffer (NULL when capacity == 0)

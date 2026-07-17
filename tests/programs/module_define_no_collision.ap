@@ -1,0 +1,14 @@
+# expected: 45
+# compile_args: "-I", "tests/modules"
+# `macdefiner` and `othermod` both `$define MD_MACRO` with different values.
+# Because defines are module-scoped this is NOT a redefinition error, and
+# each module's functions see only their own macro: md_add(0) uses
+# macdefiner's 40, om_val() uses othermod's 5 → 45. MD_MACRO is never
+# referenced directly here (it would be visible from both imports at once).
+
+$import macdefiner
+$import othermod
+
+fn main(u32 argc, u8** argv) -> i32 {
+    return md_add(0) + om_val()
+}

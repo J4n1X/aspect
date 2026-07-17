@@ -1,4 +1,5 @@
 use crate::lexer::{LexerError, Position};
+use aspect_macros::ErrorPosition;
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -10,10 +11,12 @@ use thiserror::Error;
 /// `file:line:column` exactly like the parser and type checker do.
 /// Registry-less variants (CLI `-D` problems, IO failures where no token
 /// exists yet) format without the prefix.
-#[derive(Error, Debug)]
+#[derive(Error, Debug, ErrorPosition)]
 pub enum PreprocessError {
+    // `#[position]` delegates to `LexerError::position()`, preserving the
+    // hand-written arm that reached into the wrapped lexer error's location.
     #[error("{0}")]
-    Lexer(#[from] LexerError),
+    Lexer(#[position] #[from] LexerError),
 
     #[error("cannot resolve path '{path}': {reason}")]
     UnresolvedPath { path: PathBuf, reason: String },
@@ -150,45 +153,5 @@ fn format_declaration(declared: &Option<String>) -> String {
     match declared {
         Some(module) => format!("declares module `{module}`"),
         None => "declares no `$module`".to_string(),
-    }
-}
-
-impl PreprocessError {
-    /// Extract the source position from this error, if any.
-    #[must_use]
-    pub fn position(&self) -> Option<Position> {
-        match self {
-            PreprocessError::Lexer(err) => match err {
-                LexerError::UnexpectedChar(_, pos)
-                | LexerError::UnterminatedString(pos)
-                | LexerError::UnterminatedBlockComment(pos)
-                | LexerError::InvalidNumber(_, pos)
-                | LexerError::InvalidEscape(_, pos) => Some(*pos),
-                LexerError::UnexpectedEof => None,
-            },
-            PreprocessError::MidLineDirective(pos)
-            | PreprocessError::MissingDirectiveName(pos)
-            | PreprocessError::UnknownDirective { pos, .. }
-            | PreprocessError::ExpectedName { pos, .. }
-            | PreprocessError::TrailingTokens { pos, .. }
-            | PreprocessError::Redefinition { pos, .. }
-            | PreprocessError::StrayConditional { pos, .. }
-            | PreprocessError::ConditionalAfterElse { pos, .. }
-            | PreprocessError::UnterminatedConditional { pos, .. }
-            | PreprocessError::DirectiveInsideBlock(pos)
-            | PreprocessError::UndefinedInIfExpr { pos, .. }
-            | PreprocessError::IfDivisionByZero { pos }
-            | PreprocessError::MalformedIfExpr { pos, .. }
-            | PreprocessError::MalformedModulePath { pos, .. }
-            | PreprocessError::DuplicateModuleDirective { pos, .. }
-            | PreprocessError::ModuleAfterContent(pos)
-            | PreprocessError::AmbiguousModuleForms { pos, .. }
-            | PreprocessError::ModuleNotFound { pos, .. }
-            | PreprocessError::ModuleDeclarationMismatch { pos, .. } => Some(*pos),
-            PreprocessError::UnresolvedPath { .. }
-            | PreprocessError::Unreadable { .. }
-            | PreprocessError::CliRedefinition { .. }
-            | PreprocessError::InvalidCliDefine { .. } => None,
-        }
     }
 }

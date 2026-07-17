@@ -21,7 +21,14 @@
 -#
 $module std/sort
 
+# Byte primitives (here just `strcmp`, for `cmp_cstr_asc`): libc by default —
+# its SIMD versions beat a naive loop — or pure Aspect under `-D STD_NO_LIBC`
+# for a freestanding build with no libc on this path. See std/mem/bytes.
+$ifdef STD_NO_LIBC
+$import std/mem/bytes
+$else
 $import std/c/string
+$endif
 
 alias Comparator fn(u0*, u0*) -> i32
 

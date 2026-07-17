@@ -1,0 +1,89 @@
+# expected: 0
+# compile_args: "-D", "STD_NO_LIBC", "-I", "lib"
+# requires_arch: ARCH_X86_64
+#-
+  alloc_realloc.ap — realloc in the freestanding allocator: growing and
+  shrinking must both preserve the surviving bytes. Covers grow-in-place (into
+  a free neighbour), grow-by-move (when no neighbour is free), shrink (which
+  splits a tail back to the free list), promotion of a small block to the
+  large mapping path, and the libc-shaped null / zero edges. Every case writes
+  a checkable pattern before the realloc and re-reads it after. Exit code is
+  the failed-check count (`# expected: 0`).
+-#
+$import std/mem
+
+fn fail_if(bool bad) -> i32 {
+    if bad { return 1 }
+    return 0
+}
+
+# Fill p[0..n) with a size-dependent pattern.
+fn fill(u8* p, u64 n) {
+    for (u64 i = 0; i < n; i += 1) {
+        p[i] = ((i * 31 + n) % 251) as u8
+    }
+}
+
+# 1 if p[0..n) matches fill(_, orig)'s pattern (checking the first `n` bytes
+# that survived a resize from `orig`), else 0.
+fn check(u8* p, u64 n, u64 orig) -> i32 {
+    for (u64 i = 0; i < n; i += 1) {
+        if p[i] != ((i * 31 + orig) % 251) as u8 { return 1 }
+    }
+    return 0
+}
+
+fn main(u32 argc, u8** argv) -> i32 {
+    i32 fails = 0
+
+    # realloc(null, n) == malloc(n)
+    u8* a = realloc(null, 32)
+    fails += fail_if(a == null)
+    fill(a, 32)
+
+    # Grow: contents 0..32 preserved regardless of in-place vs move.
+    a = realloc(a, 96)
+    fails += fail_if(a == null)
+    fails += fail_if(check(a, 32, 32) != 0)
+
+    # Shrink: the first 40 bytes survive; the tail is returned to the heap.
+    fill(a, 96)
+    a = realloc(a, 40)
+    fails += fail_if(a == null)
+    fails += fail_if(check(a, 40, 96) != 0)
+    free(a)
+
+    # Grow-by-move: wall the block in with a live neighbour so in-place growth
+    # is impossible, forcing malloc+copy+free. Contents must still survive.
+    u8* b = malloc(64)
+    u8* wall = malloc(64)          # blocks b's forward growth
+    fill(b, 64)
+    u64 old_b = b as u64
+    b = realloc(b, 4096)           # cannot grow in place -> moves
+    fails += fail_if(b == null)
+    fails += fail_if((b as u64) == old_b)     # it really moved
+    fails += fail_if(check(b, 64, 64) != 0)
+    free(b)
+    free(wall)
+
+    # Promote a small (region) block to the large (mapping) path and back.
+    u8* g = malloc(100)
+    fill(g, 100)
+    g = realloc(g, 300000)         # > 128 KiB -> dedicated mapping
+    fails += fail_if(g == null)
+    fails += fail_if(((g as u64) & 15) != 0)
+    fails += fail_if(check(g, 100, 100) != 0)
+    g[299999] = 42
+    fails += fail_if(g[299999] != 42)
+    g = realloc(g, 80)             # large -> small, first 80 bytes survive
+    fails += fail_if(g == null)
+    fails += fail_if(check(g, 80, 100) != 0)
+    free(g)
+
+    # realloc(p, 0) frees and returns null.
+    u8* c = malloc(16)
+    u0* r = realloc(c, 0)
+    fails += fail_if(r != null)
+
+    return fails
+}

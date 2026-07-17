@@ -21,7 +21,7 @@ use inkwell::values::BasicMetadataValueEnum;
 use inkwell::InlineAsmDialect;
 
 use crate::codegen::{CodeGenerator, CodegenError};
-use crate::parser::{AsmSpec, Function};
+use crate::parser::{AsmSpec, Function, NakedSpec};
 
 /// Build the LLVM constraint string for `spec`. LangRef requires exactly this
 /// order — output, inputs, clobbers — and forbids intermingling.
@@ -103,6 +103,56 @@ impl<'ctx> CodeGenerator<'ctx> {
             Some(value) => self.builder.build_return(Some(&value))?,
             None => self.builder.build_return(None)?, // `-> u0` asm fn
         };
+        Ok(())
+    }
+
+    /// Lower a `naked fn` to a real LLVM function carrying the `naked`
+    /// attribute (no prologue/epilogue), whose body is a single side-effecting
+    /// inline-asm block followed by `unreachable`.
+    ///
+    /// Unlike `asm fn`, there is no register contract and no operands: with no
+    /// prologue, arguments stay in their ABI-incoming registers and any result
+    /// leaves through the ABI return register, so the asm body owns the whole
+    /// calling convention. `noinline` because a naked body cannot be spliced
+    /// into a caller. The `unreachable` terminator is correct because control
+    /// leaves only through the asm's own `ret`/`jmp`/`syscall`, never by
+    /// falling through.
+    pub(crate) fn generate_naked_function(
+        &mut self,
+        func: &Function,
+        spec: &NakedSpec,
+    ) -> Result<(), CodegenError> {
+        let function = *self.functions.get(&func.proto.name).ok_or_else(|| {
+            CodegenError::UndefinedFunction(func.proto.name.clone(), func.proto.pos)
+        })?;
+
+        // Linkage was decided at declaration; forcing it here would silently
+        // demote a `public naked fn`.
+        for attr in ["naked", "noinline"] {
+            let kind_id = Attribute::get_named_enum_kind_id(attr);
+            function.add_attribute(
+                AttributeLoc::Function,
+                self.context.create_enum_attribute(kind_id, 0),
+            );
+        }
+
+        let entry = self.context.append_basic_block(function, "entry");
+        self.builder.position_at_end(entry);
+
+        // A void, no-operand inline-asm block — the asm references ABI
+        // registers directly, so there is nothing to pin or clobber.
+        let asm_ty = self.context.void_type().fn_type(&[], false);
+        let asm_ptr = self.context.create_inline_asm(
+            asm_ty,
+            spec.lines.join("\n"),
+            String::new(),                 // no operands, no clobbers
+            true,                          // sideeffect: always
+            false,                         // alignstack
+            Some(InlineAsmDialect::Intel), // `None` would silently mean AT&T
+            false,                         // can_throw
+        );
+        self.builder.build_indirect_call(asm_ty, asm_ptr, &[], "")?;
+        self.builder.build_unreachable()?;
         Ok(())
     }
 }

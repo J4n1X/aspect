@@ -5,7 +5,9 @@
   `$module std/io`, so `$import std/io` pulls in the whole set and the
   `$ifdef`s pick the platform:
 
-      generic.ap   this file — all formatting, no platform in sight
+      generic.ap   this file — the public printers and the write-retry loop
+      internal/    the number/string formatters (fmt_*, cstring_len), a
+                   private submodule this file imports but does not re-export
       linux.ap     io_write_bytes via the raw write(2) syscall, no libc
       windows.ap   io_write_bytes via kernel32 WriteFile, no C runtime
       posix.ap     io_write_bytes via libc write(2) — macOS, and Linux on
@@ -35,6 +37,11 @@
 -#
 $module std/io
 
+# The formatters live in a private submodule so `$import std/io` does not
+# see them; imports are non-transitive, so importing it here keeps them in
+# reach for the printers below without re-exporting them.
+$import std/io/internal
+
 $define IO_STDOUT 1
 $define IO_STDERR 2
 
@@ -52,84 +59,11 @@ fn io_write_all(i32 fd, u8 *buf, u64 n) -> i64 {
     return n as i64
 }
 
-# ── Rendering ───────────────────────────────────────────────────────────
-#
-# Each `fmt_*` writes at `buf[at]` and returns the offset one past what it
-# wrote, so calls chain. Buffers are the caller's; the sizes below are the
-# worst case for each type (u64 is 20 digits, i64 is 19 plus a sign).
-
-fn fmt_u64(u8 *buf, u64 at, u64 n) -> u64 {
-    if n >= 10 { at = fmt_u64(buf, at, n / 10) }
-    buf[at] = (n % 10 + 48) as u8                  # ASCII '0' = 48
-    return at + 1
-}
-
-# Exactly six digits, zero-padded (C's `%06d`). Digits above the sixth are
-# dropped, as they always have been.
-fn fmt_u64_pad6(u8 *buf, u64 at, u64 n) -> u64 {
-    u64 div = 100000
-    while div > 0 {
-        buf[at] = ((n / div) % 10 + 48) as u8
-        at = at + 1
-        div = div / 10
-    }
-    return at
-}
-
-fn fmt_i64(u8 *buf, u64 at, i64 n) -> u64 {
-    if n >= 0 { return fmt_u64(buf, at, n as u64) }
-    buf[at] = 45                                   # '-'
-    # `n` could be I64_MIN; flip the bits then bump by one to land at the
-    # correct unsigned magnitude without overflowing on the negation.
-    return fmt_u64(buf, at + 1, ((~n) as u64) + 1)
-}
-
-# A finite f64 to six decimal places (matches C's `%f` default).
-#
-# Limitations:
-#   * `|x|` must be representable as `i64` (so roughly < 2^63 ~ 9.2e18).
-#     Beyond that, `x as i64` is UB at the LLVM level.
-#   * NaN and infinities render as `nan` / `inf` / `-inf`. No scientific
-#     notation; very small numbers round to `0.000000`.
-fn fmt_f64(u8 *buf, u64 at, f64 x) -> u64 {
-    # NaN: a value not equal to itself.
-    if x != x {
-        buf[at] = 110 buf[at + 1] = 97 buf[at + 2] = 110      # "nan"
-        return at + 3
-    }
-    # `x < 0.0` is false for -0.0, so the sign bit is read off 1/x: -inf for
-    # -0.0, +inf for +0.0. C's %f prints -0.000000 and so does this.
-    if x < 0.0 || (x == 0.0 && 1.0 / x < 0.0) {
-        buf[at] = 45
-        at = at + 1
-        x = 0.0 - x
-    }
-    # Crude infinity check: anything that overflows i64 is treated as inf.
-    f64 i64_max = 9223372036854775000.0            # ~i64::MAX, generous margin
-    if x > i64_max {
-        buf[at] = 105 buf[at + 1] = 110 buf[at + 2] = 102     # "inf"
-        return at + 3
-    }
-    i64 int_part = x as i64
-    f64 frac = x - (int_part as f64)
-    # Round to six decimals; carry into int_part on 0.9999995-style edges.
-    i64 cents = (frac * 1000000.0 + 0.5) as i64
-    if cents >= 1000000 {
-        int_part = int_part + 1
-        cents = 0
-    }
-    at = fmt_u64(buf, at, int_part as u64)
-    buf[at] = 46                                   # '.'
-    return fmt_u64_pad6(buf, at + 1, cents as u64)
-}
-
 # ── Printing ────────────────────────────────────────────────────────────
-
-fn cstring_len(u8 *s) -> u64 {
-    u64 n = 0
-    while s[n] != 0 { n = n + 1 }
-    return n
-}
+#
+# The `fmt_*` renderers and `cstring_len` come from `std/io/internal`; each
+# writes into a caller-supplied stack buffer sized to the type's worst case
+# (u64 is 20 digits, i64 is 19 plus a sign) and returns the new offset.
 
 # Write `s` with no terminator — useful for building up a line.
 fn print(u8 *s) -> u0 {

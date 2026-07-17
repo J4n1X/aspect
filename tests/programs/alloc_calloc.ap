@@ -1,0 +1,65 @@
+# expected: 0
+# compile_args: "-D", "STD_NO_LIBC", "-I", "lib"
+# requires_arch: ARCH_X86_64
+#-
+  alloc_calloc.ap — calloc in the freestanding allocator: every byte of the
+  result must read back zero, on both the region path (small) and the
+  dedicated-mapping path (large), and the block must then be writable. A
+  freshly page-committed mapping is already zero, but a *reused* region block
+  is not — so the small case first dirties a block, frees it, then calloc's
+  the same size to prove calloc zeroes reused memory rather than trusting it.
+  Exit code is the failed-check count (`# expected: 0`).
+-#
+$import std/mem
+
+fn fail_if(bool bad) -> i32 {
+    if bad { return 1 }
+    return 0
+}
+
+fn main(u32 argc, u8** argv) -> i32 {
+    i32 fails = 0
+
+    # Dirty a block, free it, then calloc the same footprint: the bytes the
+    # earlier write left behind must come back zeroed.
+    u8* dirty = malloc(128)
+    for (u64 i = 0; i < 128; i += 1) {
+        dirty[i] = 0xAB as u8
+    }
+    free(dirty)
+
+    u8* c = calloc(16, 8)          # 128 bytes
+    fails += fail_if(c == null)
+    if c != null {
+        bool allzero = true
+        for (u64 i = 0; i < 128; i += 1) {
+            if c[i] != 0 { allzero = false }
+        }
+        fails += fail_if(!allzero)
+        c[0] = 9  c[127] = 7           # still writable
+        fails += fail_if(c[0] != 9 || c[127] != 7)
+        free(c)
+    }
+
+    # Large calloc goes through the dedicated-mapping path; still all zero.
+    u64 n = 200000                  # > 128 KiB threshold
+    u8* big = calloc(n, 1)
+    fails += fail_if(big == null)
+    if big != null {
+        bool allzero = true
+        for (u64 i = 0; i < n; i += 1) {
+            if big[i] != 0 { allzero = false break }
+        }
+        fails += fail_if(!allzero)
+        big[0] = 1  big[n - 1] = 2
+        fails += fail_if(big[0] != 1 || big[n - 1] != 2)
+        free(big)
+    }
+
+    # calloc(0, x) yields a unique, freeable, non-null pointer (libc-shaped).
+    u8* z = calloc(0, 8)
+    fails += fail_if(z == null)
+    free(z)
+
+    return fails
+}

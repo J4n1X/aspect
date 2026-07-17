@@ -1,0 +1,10 @@
+# Unrelated module that `$define`s the SAME name as `macdefiner.ap`
+# (MD_MACRO) with a different value. Under module-scoped defines this is not
+# a redefinition — each module's own functions see only their own macro.
+$module othermod
+
+$define MD_MACRO 5
+
+fn om_val() -> i32 {
+    return MD_MACRO
+}

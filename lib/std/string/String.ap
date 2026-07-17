@@ -22,8 +22,19 @@
 -#
 $module std/string
 
+# Allocator + byte primitives: libc by default (`std/c/stdlib` +
+# `std/c/string` — its SIMD memcpy/strlen beat a naive loop), or pure Aspect
+# under `-D STD_NO_LIBC` (`std/mem`'s page-backed allocator + `std/mem/bytes`)
+# for a freestanding build with no libc on this path. The call sites below are
+# identical either way — only the source of malloc/realloc/free/memcpy/strlen
+# changes. See std/mem and std/mem/bytes.
+$ifdef STD_NO_LIBC
+$import std/mem
+$import std/mem/bytes
+$else
 $import std/c/stdlib
 $import std/c/string
+$endif
 
 type String {
     u8* data        # private - null-terminated heap buffer

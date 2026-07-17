@@ -5,9 +5,11 @@
 //! - `RuntimeEmitter` emits LLVM IR instructions via the builder.
 //! - `ConstantEmitter` folds values in Rust and reconstructs LLVM constants.
 //!
-//! Steps 10–12 of the refactoring plan route `generate_expression` and
-//! `generate_constant_expression` through this trait so the duplicated logic
-//! can be deleted.
+//! The runtime walker (`walk_expression`, in `super::expressions`) drives
+//! `RuntimeEmitter`; the constant evaluator (`const_eval`, in
+//! `super::const_eval`) drives `ConstantEmitter`. Both share this trait's
+//! operand-classification and widening helpers so the two paths stay
+//! bug-for-bug consistent.
 
 use inkwell::{
     builder::Builder,
@@ -21,6 +23,7 @@ use crate::{
         const_widen_ints_to_match, widen_floats_to_match, widen_ints_to_match, LangTypeExt,
     },
     codegen::CodegenError,
+    codegen::TypeLoweringError,
     lexer::{LangType, Position, TypeBase},
     parser::BinaryOp,
 };
@@ -67,18 +70,18 @@ pub trait ValueEmitter<'ctx> {
     /// Emit an integer literal at the given language type.
     ///
     /// Literals are LLVM constants in both modes, so this shared default
-    /// (which only needs `context()`) serves both emitters.
+    /// (which only needs `context()`) serves both emitters. Returns a
+    /// position-less [`TypeLoweringError`]; the caller attaches the position
+    /// via [`TypeLoweringError::with_pos`].
     fn emit_int_literal(
         &self,
         val: i64,
         ty: &LangType,
-        pos: Position,
-    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-        match ty.to_llvm(self.context(), pos)? {
+    ) -> Result<BasicValueEnum<'ctx>, TypeLoweringError> {
+        match ty.to_llvm(self.context())? {
             BasicTypeEnum::IntType(int_ty) => Ok(int_ty.const_int(val as u64, true).into()),
-            _ => Err(CodegenError::TypeError(
+            _ => Err(TypeLoweringError(
                 "integer literal must have integer type".to_string(),
-                pos,
             )),
         }
     }
@@ -89,13 +92,11 @@ pub trait ValueEmitter<'ctx> {
         &self,
         val: f64,
         ty: &LangType,
-        pos: Position,
-    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-        match ty.to_llvm(self.context(), pos)? {
+    ) -> Result<BasicValueEnum<'ctx>, TypeLoweringError> {
+        match ty.to_llvm(self.context())? {
             BasicTypeEnum::FloatType(float_ty) => Ok(float_ty.const_float(val).into()),
-            _ => Err(CodegenError::TypeError(
+            _ => Err(TypeLoweringError(
                 "float literal must have float type".to_string(),
-                pos,
             )),
         }
     }

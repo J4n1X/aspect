@@ -1,5 +1,5 @@
 #-
-  std/mem - thin wrappers around libc malloc/free.
+  std/mem — byte allocation.
 
   Allocation is by *byte count*, not by typed-array count, because
   `sizeof(T)` is a built-in compile-time constant — `malloc(n *
@@ -9,19 +9,431 @@
       Point* p = malloc(sizeof(Point))
 
   Everything traffics in `u0*`: same-depth pointers coerce implicitly,
-  so any `T*` passes into `free_ptr` directly and an allocation result
-  lands in any pointer variable. The opacity bites exactly where it
-  should — a `u0*` cannot be dereferenced without a cast.
+  so any `T*` passes into `free`/`free_ptr` directly and an allocation
+  result lands in any pointer variable. The opacity bites exactly where
+  it should — a `u0*` cannot be dereferenced without a cast.
 
-  These are libc's allocator, so importing this module links the C
-  runtime. `std/mem/page` sits below it — raw address space, no libc and no
-  CRT — and is a separate module precisely so that a caller who wants only
-  pages does not pay for an allocator it never calls.
+  ── Two allocators, one API ─────────────────────────────────────────────
+  DEFAULT: libc's `malloc`/`free`/`calloc`/`realloc` (`std/c/stdlib`).
+  Importing this module links the C runtime. libc's allocator is fast and
+  battle-tested, so it stays the default.
+
+  `-D STD_NO_LIBC`: a self-contained allocator built on the `std/mem/page`
+  seam (mmap/VirtualAlloc, no libc). This is what makes a freestanding
+  build possible — with io on syscalls and str/mem on `std/mem/bytes`, the
+  whole Linux path is then libc-free. Same four entry points, same
+  signatures, so every caller (`std/string`, `std/vec`, `std/collections`,
+  …) is unchanged; they only pick this module over `std/c/stdlib` behind
+  the same `$ifdef STD_NO_LIBC` gate they already use for byte primitives.
+
+  `std/mem/page` sits below both — raw address space, no allocator — and is
+  a separate module precisely so a caller who wants only pages does not pay
+  for an allocator it never calls.
+
+  ── The freestanding allocator (design) ─────────────────────────────────
+  An explicit free list with boundary-tag coalescing, the CSAPP baseline —
+  chosen over segregated size-classes because it is far simpler to get
+  provably right, and correctness is the bar here (libc remains the fast
+  path).
+
+  A single large region is reserved once (PROT_NONE) and committed as it
+  grows, so every block shares one contiguous address range and neighbours
+  can always be merged. Each block carries an 8-byte header and an 8-byte
+  footer, both holding `size | flags` (bit0 = allocated, bit1 = mmapped);
+  sizes are multiples of 16 so the low bits are free for flags. Payloads
+  begin 8 bytes past the header, which a one-word start pad keeps 16-byte
+  aligned — malloc's guarantee. Free blocks store prev/next links in their
+  payload, threading a doubly-linked free list; `malloc` first-fits it and
+  splits the remainder, `free` marks the block free and coalesces with the
+  physically adjacent free neighbours (found via the boundary tags),
+  growing the region through `page_commit` when nothing fits. Allocations
+  at or above 128 KiB skip the region entirely for a dedicated `page_map`
+  mapping, tagged so `free` releases it with `page_release`.
 -#
 $module std/mem
 
+$ifdef STD_NO_LIBC
+
+# The freestanding path: page seam for address space, byte primitives for
+# calloc's zeroing and realloc's copy. No libc on this path.
+$import std/mem/page
+$import std/mem/bytes
+
+# ── Region state ────────────────────────────────────────────────────────
+# Addresses are carried as u64 (0 == null) and cast to a typed pointer only
+# at the point of access. `g_heap_free` heads the doubly-linked free list.
+u64  g_heap_base    = 0      # region base, or 0 when uninitialised / OOM
+u64  g_heap_commit  = 0      # first byte past the committed+laid-out region
+u64  g_heap_reserve = 0      # first byte past the reservation
+u64  g_heap_free    = 0      # free-list head (0 = empty)
+bool g_heap_ready   = false
+
+# ── Word access (a header/footer/link is one u64 at a byte address) ──────
+fn heap_word_get(u64 addr) -> u64 {
+    u64* w = addr as u64*
+    return w[0]
+}
+
+fn heap_word_set(u64 addr, u64 v) {
+    u64* w = addr as u64*
+    w[0] = v
+}
+
+# ── Block header/footer helpers ─────────────────────────────────────────
+# Block size (multiple of 16) with the low flag bits masked off.
+fn heap_bsize(u64 addr) -> u64 {
+    u64 m = 15
+    return heap_word_get(addr) & ~m
+}
+
+# Allocated flag (bit0) of the word at `addr`.
+fn heap_alloc_bit(u64 addr) -> u64 {
+    return heap_word_get(addr) & 1
+}
+
+# Mmapped flag (bit1) — set only on the dedicated large-allocation tag.
+fn heap_mmap_bit(u64 addr) -> u64 {
+    return heap_word_get(addr) & 2
+}
+
+# Stamp both boundary tags of the block at `h`.
+fn heap_set_block(u64 h, u64 size, u64 alloc) {
+    heap_word_set(h, size | alloc)
+    heap_word_set(h + size - 8, size | alloc)
+}
+
+# ── Alignment ───────────────────────────────────────────────────────────
+fn heap_round16(u64 x) -> u64 {
+    u64 m = 15
+    return (x + m) & ~m
+}
+
+fn heap_roundpage(u64 x, u64 psz) -> u64 {
+    u64 m = psz - 1
+    return (x + m) & ~m
+}
+
+# ── Free list (doubly linked; next at h+8, prev at h+16) ─────────────────
+fn heap_fl_insert(u64 h) {
+    u64 old = g_heap_free
+    heap_word_set(h + 8, old)
+    heap_word_set(h + 16, 0)
+    if old != 0 {
+        heap_word_set(old + 16, h)
+    }
+    g_heap_free = h
+}
+
+fn heap_fl_remove(u64 h) {
+    u64 nx = heap_word_get(h + 8)
+    u64 pv = heap_word_get(h + 16)
+    if pv != 0 {
+        heap_word_set(pv + 8, nx)
+    } else {
+        g_heap_free = nx
+    }
+    if nx != 0 {
+        heap_word_set(nx + 16, pv)
+    }
+}
+
+# First-fit search for a free block of at least `need` bytes (0 = none).
+fn heap_fl_find(u64 need) -> u64 {
+    u64 h = g_heap_free
+    while h != 0 {
+        if heap_bsize(h) >= need {
+            return h
+        }
+        h = heap_word_get(h + 8)
+    }
+    return 0
+}
+
+# ── Coalescing (boundary tags) ──────────────────────────────────────────
+# `h` is a free block; merge it with any free neighbour on either side,
+# removing those from the free list, and return the merged block's header.
+# The prologue/epilogue sentinels are allocated, so the scans stop cleanly
+# at the region ends without a bounds test.
+fn heap_coalesce(u64 h) -> u64 {
+    u64 size = heap_bsize(h)
+
+    # forward: the next block sits at h + size
+    if heap_alloc_bit(h + size) == 0 {
+        u64 nxt = h + size
+        heap_fl_remove(nxt)
+        size = size + heap_bsize(nxt)
+        heap_set_block(h, size, 0)
+    }
+
+    # backward: the previous block's footer sits at h - 8
+    if heap_alloc_bit(h - 8) == 0 {
+        u64 psize = heap_bsize(h - 8)
+        u64 ph = h - psize
+        heap_fl_remove(ph)
+        size = size + psize
+        heap_set_block(ph, size, 0)
+        h = ph
+    }
+
+    return h
+}
+
+# ── Region setup and growth ─────────────────────────────────────────────
+# Lazy one-time init: reserve a large range, commit a first chunk, and lay
+# out [pad][prologue][one big free block][epilogue].
+fn heap_init() {
+    if g_heap_ready {
+        return
+    }
+    g_heap_ready = true
+
+    u64 reserve = (1 as u64) << 30           # 1 GiB of address space
+    u8* base = page_reserve(reserve)
+    if base == null {
+        g_heap_base = 0
+        return
+    }
+
+    u64 psz = page_size()
+    u64 chunk = heap_roundpage((1 as u64) << 16, psz)   # commit 64 KiB up front
+    if !page_commit(base, chunk) {
+        g_heap_base = 0
+        return
+    }
+
+    u64 b = base as u64
+    g_heap_base = b
+    g_heap_reserve = b + reserve
+    g_heap_commit = b + chunk
+
+    heap_set_block(b + 8, 16, 1)             # prologue: allocated, floors backward merges
+    u64 fb = b + 24                          # first real block header (payload 16-aligned)
+    u64 fsize = (g_heap_commit - 8) - fb     # everything up to the epilogue
+    heap_set_block(fb, fsize, 0)
+    heap_word_set(g_heap_commit - 8, 1)      # epilogue: size 0, allocated, caps forward merges
+
+    g_heap_free = 0
+    heap_fl_insert(fb)
+}
+
+# Commit more pages onto the region, turning the freshly committed span into
+# one free block (coalesced with the old tail if it was free) and returning
+# its header. 0 on failure / reservation exhausted.
+fn heap_extend(u64 need) -> u64 {
+    if g_heap_base == 0 {
+        return 0
+    }
+
+    u64 psz = page_size()
+    u64 want = need
+    u64 mingrow = (1 as u64) << 16           # grow at least 64 KiB at a time
+    if want < mingrow {
+        want = mingrow
+    }
+    want = heap_roundpage(want, psz)
+
+    u64 new_commit = g_heap_commit + want
+    if new_commit > g_heap_reserve {
+        if g_heap_commit + need > g_heap_reserve {
+            return 0                          # cannot fit even the bare request
+        }
+        want = g_heap_reserve - g_heap_commit # commit the rest of the reservation
+        new_commit = g_heap_reserve
+    }
+
+    if !page_commit(g_heap_commit as u8*, want) {
+        return 0
+    }
+
+    u64 newblk = g_heap_commit - 8            # reclaim the old epilogue's slot
+    g_heap_commit = new_commit
+    heap_set_block(newblk, want, 0)
+    heap_word_set(g_heap_commit - 8, 1)       # fresh epilogue at the new end
+
+    u64 m = heap_coalesce(newblk)
+    heap_fl_insert(m)
+    return m
+}
+
+# ── Placement / splitting ───────────────────────────────────────────────
+# Mark the free block `h` allocated for `need` bytes, splitting a tail
+# remainder back onto the free list when it is worth a whole minimum block.
+# Neighbours of a free `h` are allocated (coalescing invariant), so the
+# remainder needs no further merge here.
+fn heap_place(u64 h, u64 need) {
+    u64 bsize = heap_bsize(h)
+    if bsize - need >= 32 {
+        heap_set_block(h, need, 1)
+        u64 rem = h + need
+        heap_set_block(rem, bsize - need, 0)
+        heap_fl_insert(rem)
+    } else {
+        heap_set_block(h, bsize, 1)
+    }
+}
+
+# ── Large allocations: a dedicated mapping, outside the region ───────────
+fn heap_large_alloc(u64 req) -> u0* {
+    u64 psz = page_size()
+    u64 total = heap_roundpage(req + 16, psz)
+    u8* base = page_map(total)
+    if base == null {
+        return null
+    }
+    u64 b = base as u64
+    heap_word_set(b, total)                   # mapping length, at payload-16
+    heap_word_set(b + 8, 3)                    # tag at payload-8: mmapped | allocated
+    return (b + 16) as u0*
+}
+
+fn heap_large_free(u64 tag) {
+    u64 base = tag - 8                         # payload-16
+    u64 total = heap_word_get(base)
+    page_release(base as u8*, total)
+}
+
+# ── Public API (matches libc malloc/free/calloc/realloc) ─────────────────
+fn malloc(u64 n) -> u0* {
+    heap_init()
+
+    u64 req = n
+    if req == 0 {
+        req = 1                                # malloc(0): a unique freeable pointer
+    }
+
+    u64 large = (1 as u64) << 17               # >= 128 KiB -> dedicated mapping
+    if req >= large {
+        return heap_large_alloc(req)
+    }
+
+    u64 need = heap_round16(req) + 16
+    if need < 32 {
+        need = 32
+    }
+
+    u64 h = heap_fl_find(need)
+    if h == 0 {
+        h = heap_extend(need)
+        if h == 0 {
+            return null
+        }
+    }
+    heap_fl_remove(h)
+    heap_place(h, need)
+    return (h + 8) as u0*
+}
+
+fn free(u0* p) -> u0 {
+    if p == null {
+        return
+    }
+    u64 pv = p as u64
+
+    if heap_mmap_bit(pv - 8) != 0 {
+        heap_large_free(pv - 8)
+        return
+    }
+
+    u64 h = pv - 8
+    heap_set_block(h, heap_bsize(h), 0)
+    u64 m = heap_coalesce(h)
+    heap_fl_insert(m)
+}
+
+fn calloc(u64 nmemb, u64 size) -> u0* {
+    u64 total = nmemb * size
+    u0* p = malloc(total)
+    if p == null {
+        return null
+    }
+    memset(p, 0, total)
+    return p
+}
+
+fn realloc(u0* p, u64 n) -> u0* {
+    if p == null {
+        return malloc(n)
+    }
+    if n == 0 {
+        free(p)
+        return null
+    }
+
+    u64 pv = p as u64
+
+    # Large (mmapped) source: no in-place path; move to a fresh allocation.
+    if heap_mmap_bit(pv - 8) != 0 {
+        u64 old_total = heap_word_get(pv - 16)
+        return heap_realloc_move(p, old_total - 16, n)
+    }
+
+    u64 h = pv - 8
+    u64 size = heap_bsize(h)
+    u64 old_payload = size - 16
+
+    u64 large = (1 as u64) << 17
+    if n >= large {
+        return heap_realloc_move(p, old_payload, n)   # promote to a dedicated mapping
+    }
+
+    u64 need = heap_round16(n) + 16
+    if need < 32 {
+        need = 32
+    }
+
+    # Shrink / same: split off a tail if it earns a block, coalescing it
+    # forward in case the following block is already free.
+    if size >= need {
+        if size - need >= 32 {
+            heap_set_block(h, need, 1)
+            u64 rem = h + need
+            heap_set_block(rem, size - need, 0)
+            u64 m = heap_coalesce(rem)
+            heap_fl_insert(m)
+        }
+        return p
+    }
+
+    # Grow in place by absorbing the next block when it is free and big enough.
+    u64 nxt = h + size
+    if heap_alloc_bit(nxt) == 0 {
+        u64 combined = size + heap_bsize(nxt)
+        if combined >= need {
+            heap_fl_remove(nxt)
+            heap_set_block(h, combined, 0)
+            heap_place(h, need)
+            return p
+        }
+    }
+
+    # Otherwise: fresh allocation, copy, free.
+    return heap_realloc_move(p, old_payload, n)
+}
+
+# malloc a new `n`-byte block, copy min(old_payload, n) bytes from `p`, free
+# `p`. The shared fallback for every realloc case that cannot grow in place.
+fn heap_realloc_move(u0* p, u64 old_payload, u64 n) -> u0* {
+    u0* np = malloc(n)
+    if np == null {
+        return null
+    }
+    u64 cpy = old_payload
+    if n < cpy {
+        cpy = n
+    }
+    memcpy(np, p, cpy)
+    free(p)
+    return np
+}
+
+$else
+
+# Default path: libc's allocator, unchanged.
 $import std/c/stdlib
 
+$endif
+
+# ── Byte-count façade (both paths) ──────────────────────────────────────
 # Raw byte allocation — `n` uninitialised bytes.
 fn alloc_bytes(u64 n) -> u0* {
     return malloc(n)

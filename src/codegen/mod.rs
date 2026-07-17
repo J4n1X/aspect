@@ -1,4 +1,5 @@
 pub mod asm;
+pub mod const_eval;
 pub mod errors;
 pub mod expressions;
 pub mod functions;

@@ -1,0 +1,12 @@
+# expected: "Undefined variable 'MD_MACRO'"
+# compile_args: "-I", "tests/modules"
+# Defines are non-transitive: `mdbridge` directly imports `macdefiner` and so
+# sees MD_MACRO, but this entry imports only `mdbridge` — not `macdefiner` —
+# so MD_MACRO is NOT visible here. The identifier is left unsubstituted and
+# fails to resolve, exactly like a symbol that was defined but not imported.
+
+$import mdbridge
+
+fn main(u32 argc, u8** argv) -> i32 {
+    return MD_MACRO
+}

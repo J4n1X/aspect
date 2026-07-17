@@ -1,0 +1,10 @@
+# Bridge module: directly `$import`s `macdefiner`, so MD_MACRO is visible
+# here (a direct importer sees the define). Used by the non-transitivity
+# failure test: a file that imports only `mdbridge` must NOT see MD_MACRO,
+# even though `mdbridge` does.
+$module mdbridge
+$import macdefiner
+
+fn mb_val() -> i32 {
+    return MD_MACRO
+}

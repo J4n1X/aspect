@@ -1,0 +1,12 @@
+# Module fixture for define scoping: declares a `$define` (MD_MACRO) and a
+# function that uses its own macro — proving a module sees the defines of the
+# module it belongs to. The same macro NAME is re-defined by `othermod.ap`
+# with a different value; the two must not collide, since defines are
+# module-scoped.
+$module macdefiner
+
+$define MD_MACRO 40
+
+fn md_add(i32 a) -> i32 {
+    return a + MD_MACRO
+}

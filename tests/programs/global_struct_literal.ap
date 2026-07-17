@@ -1,0 +1,29 @@
+# expected: 42
+#-
+  A global initialised with a struct literal. Every field is constant, so this
+  lowers to an LLVM ConstantStruct (`@g = global %T { ... }`) with no runtime
+  cost — the const-evaluator (src/codegen/const_eval.rs) folds the whole
+  StructLiteral. Half (a) of the "Richer global initializers" TODO.
+-#
+
+type Point {
+    public i32 x
+    public i32 y
+}
+
+Point origin = Point { x = 40, y = 2 }
+
+# Nested constant expressions in fields fold too (sizeof, arithmetic).
+type Sized {
+    public u64 bytes
+    public i32 doubled
+}
+Sized meta = Sized { bytes = sizeof(Point), doubled = 3 * 7 }
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    i32 base = origin.x + origin.y          # 42
+    if meta.bytes == 8 {
+        base = base + meta.doubled - 21     # + 21 - 21 = +0
+    }
+    return base
+}

@@ -1,13 +1,13 @@
 use inkwell::module::Linkage;
 use inkwell::types::BasicTypeEnum;
-use inkwell::values::{BasicValueEnum, FloatValue, IntValue, PointerValue};
+use inkwell::values::{BasicValueEnum, FloatValue, IntValue, PointerValue, StructValue};
 use inkwell::AddressSpace;
 
 use crate::lexer::Position;
-use crate::codegen::expressions::{walk_expression, EmitMode};
+use crate::codegen::const_eval::const_eval;
 use crate::codegen::generator::CodeGenerator;
 use crate::codegen::scope::GlobalVarInfo;
-use crate::codegen::{CodegenError, LangTypeExt};
+use crate::codegen::CodegenError;
 use crate::parser::{ExprKind, Expression, GlobalVar, LangType};
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -18,9 +18,18 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<(), CodegenError> {
         let (global_type, _is_array) = if global.var_type.is_array() {
             // Cache-aware: resolves type-struct elements too.
-            (self.lang_type_to_llvm_array(&global.var_type, global.pos)?.into(), true)
+            (
+                self.lang_type_to_llvm_array(&global.var_type)
+                    .map_err(|e| e.with_pos(global.pos))?
+                    .into(),
+                true,
+            )
         } else {
-            (self.lang_type_to_llvm(&global.var_type, global.pos)?, false)
+            (
+                self.lang_type_to_llvm(&global.var_type)
+                    .map_err(|e| e.with_pos(global.pos))?,
+                false,
+            )
         };
 
         let global_var =
@@ -34,17 +43,24 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         if let Some(init_expr) = &global.initializer {
-            if let ExprKind::ListInitializer(elements) = &init_expr.kind {
+            // Static init: a global initializer that references another global
+            // legitimately reads that global's start value (its initializer),
+            // which is what makes global-declaration order significant. Flag the
+            // context so `const_eval` folds those references instead of refusing
+            // them the way it does for a runtime (local) initializer.
+            let prev_in_global_init = self.in_global_init;
+            self.in_global_init = true;
+            let folded = if let ExprKind::ListInitializer(elements) = &init_expr.kind {
                 // Array literal initializer -> ConstantArray
-                let const_array = self.generate_constant_array_value(&global.var_type, elements, global.pos)?;
-                global_var.set_initializer(&const_array);
+                self.generate_constant_array_value(&global.var_type, elements, global.pos)
             } else {
-                let init_value = walk_expression(init_expr, self, EmitMode::Constant)?;
                 // Cast the constant to the declared global type if widths differ
                 // (e.g. integer literal emitted as i32 into a u8/i16/i64 global).
-                let coerced = coerce_constant_to_type(init_value, global_type, self.context);
-                global_var.set_initializer(&coerced);
-            }
+                const_eval(init_expr, self)
+                    .map(|v| coerce_constant_to_type(v, global_type, self.context))
+            };
+            self.in_global_init = prev_in_global_init;
+            global_var.set_initializer(&folded?);
         } else {
             global_var.set_initializer(&global_type.const_zero());
         }
@@ -101,28 +117,22 @@ impl<'ctx> CodeGenerator<'ctx> {
         pos: Position,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         let elem_lang_type = var_type.element_type();
-        let elem_llvm_type = elem_lang_type.to_llvm(self.context, pos)?;
+        // Cache-aware: resolves type-struct elements against the named-struct
+        // cache (the context-only `to_llvm` cannot). Scalars/pointers lower
+        // identically, so int/float/ptr arrays keep byte-identical element types.
+        let elem_llvm_type = self
+            .lang_type_to_llvm(&elem_lang_type)
+            .map_err(|e| e.with_pos(pos))?;
         let array_size = var_type.array_size.unwrap_or(0) as usize;
 
-        // Generate constant values for provided elements. Permitted forms:
-        // - literals,
-        // - function references (`&func` or bare `func`) — function addresses
-        //   are LLVM-level constants, fine for a global initializer.
+        // Fold every element to an LLVM constant via the const-evaluator, which
+        // handles literals, function references (function addresses are
+        // link-time constants), struct literals (folded to a `ConstantStruct`),
+        // and nested constant expressions. A genuinely non-constant element
+        // surfaces its own error.
         let mut const_vals: Vec<BasicValueEnum<'ctx>> = Vec::with_capacity(array_size);
         for elem in elements {
-            match &elem.kind {
-                ExprKind::Literal(_) | ExprKind::FunctionRef(_) => {
-                    const_vals.push(walk_expression(elem, self, EmitMode::Constant)?);
-                }
-                _ => {
-                    return Err(CodegenError::InvalidOperation(
-                        "constant array initializer elements must be literals \
-                         or function references"
-                            .to_string(),
-                        elem.pos,
-                    ))
-                }
-            }
+            const_vals.push(const_eval(elem, self)?);
         }
 
         // Zero-pad to array_size
@@ -152,6 +162,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let vals: Vec<PointerValue> =
                     const_vals.iter().map(|v| v.into_pointer_value()).collect();
                 Ok(ptr_ty.const_array(&vals).into())
+            }
+            // Struct-literal elements fold (via `const_eval`) to
+            // `const_named_struct` values of this same cached struct type;
+            // assemble them into a `[N x %T]` ConstantArray.
+            BasicTypeEnum::StructType(struct_ty) => {
+                let vals: Vec<StructValue> =
+                    const_vals.iter().map(|v| v.into_struct_value()).collect();
+                Ok(struct_ty.const_array(&vals).into())
             }
             _ => Err(CodegenError::InvalidOperation(
                 format!("unsupported element type for constant array: {elem_llvm_type}"),

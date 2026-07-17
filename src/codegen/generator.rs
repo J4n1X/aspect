@@ -73,6 +73,24 @@ pub struct CodeGenerator<'ctx> {
         BasicBlock<'ctx>,
         LangType,
     )>,
+
+    /// True only while folding a *global* variable's initializer. Global
+    /// initializers are order-sensitive static init: reading another global
+    /// there yields its start value, so folding a global reference to its
+    /// initializer is correct. Everywhere else (a local var initializer, an
+    /// array-expression element) a mutable global's value is a runtime load,
+    /// not its initializer, so `const_eval` must refuse to fold it. See the
+    /// `Variable` arm of `const_eval`.
+    pub(crate) in_global_init: bool,
+
+    /// True when the program provides its own definition (body, not `extern`)
+    /// of a libc allocation function — the STD_NO_LIBC allocator. Such a
+    /// `malloc`/`calloc`/`realloc`/`free` does not honour libc's contracts, so
+    /// every function we emit is tagged `"no-builtins"` to keep the optimizer's
+    /// name-based allocation reasoning (object-size, alloc/free-pair folding,
+    /// the `noalias`/zeroed-`calloc` assumptions) away from it. Off by default,
+    /// so the ordinary libc-linked build keeps every one of those wins.
+    pub(crate) disable_builtins: bool,
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -151,6 +169,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             current_function_return_type: None,
             loop_stack: Vec::new(),
             value_block_stack: Vec::new(),
+            in_global_init: false,
+            disable_builtins: false,
         })
     }
 
@@ -176,6 +196,14 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Seed the codegen-local FnPtr signature cache from the shared registry.
         self.fnptr_sigs = program.symbols.all_fnptr_sigs().to_vec();
+
+        // Does this program define its own allocator (STD_NO_LIBC)? A defined
+        // `malloc`/`calloc`/`realloc`/`free` means every function must opt out
+        // of the optimizer's libc-allocation reasoning — see `disable_builtins`.
+        self.disable_builtins = program.functions.iter().any(|f| {
+            !matches!(f.body, FunctionBody::Extern)
+                && matches!(f.proto.name.as_str(), "malloc" | "calloc" | "realloc" | "free")
+        });
 
         // First pass: Declare all functions (for forward references)
         for func in &program.functions {
@@ -207,6 +235,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         for func in &program.functions {
             let result = match &func.body {
                 FunctionBody::Asm(spec) => self.generate_asm_function(func, spec),
+                FunctionBody::Naked(spec) => self.generate_naked_function(func, spec),
                 FunctionBody::Aspect(stmts) => self.generate_function(func, stmts),
                 FunctionBody::Extern => Ok(()),
             };
@@ -218,7 +247,35 @@ impl<'ctx> CodeGenerator<'ctx> {
                 );
             }
         }
+
+        self.emit_fltused_if_windows();
         Ok(())
+    }
+
+    /// Emit the `_fltused` marker that MSVC's C runtime expects from any object
+    /// using floating point (the CRT references it to pull in FP support).
+    ///
+    /// LLVM/clang emit it lazily — only when the module actually uses FP — but
+    /// detecting that here would need a full AST walk; a spurious 4-byte
+    /// external symbol in a float-free Windows program is harmless, so we emit
+    /// it for every Windows target. External linkage keeps it through
+    /// `globaldce`. A no-op on non-Windows targets (detected from the module
+    /// triple, the same substring test `TargetSpec::os_define` uses).
+    fn emit_fltused_if_windows(&mut self) {
+        let is_windows = self
+            .module
+            .get_triple()
+            .as_str()
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .contains("windows");
+        if !is_windows || self.module.get_global("_fltused").is_some() {
+            return;
+        }
+        let i32_ty = self.context.i32_type();
+        let fltused = self.module.add_global(i32_ty, None, "_fltused");
+        fltused.set_initializer(&i32_ty.const_zero());
+        fltused.set_linkage(inkwell::module::Linkage::External);
     }
 
     /// Format a codegen error with the originating source file prepended,
@@ -300,10 +357,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.module
             .run_passes(passes, target_machine, pass_options)
             .map_err(|e| {
-                CodegenError::InvalidOperation(
-                    format!("Failed to run optimization passes: {e}"),
-                    crate::lexer::Position::new(0, 0),
-                )
+                CodegenError::Internal(format!("Failed to run optimization passes: {e}"))
             })
     }
 
@@ -314,10 +368,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.module
             .run_passes(passes, self.get_target_machine(), pass_options)
             .map_err(|e| {
-                CodegenError::InvalidOperation(
-                    format!("Failed to run pass pipeline '{passes}': {e}"),
-                    crate::lexer::Position::new(0, 0),
-                )
+                CodegenError::Internal(format!("Failed to run pass pipeline '{passes}': {e}"))
             })
     }
 
@@ -347,13 +398,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         target_machine
             .write_to_file(&self.module, FileType::Object, path)
             .map_err(|e| {
-                CodegenError::InvalidOperation(
-                    format!(
-                        "Failed to write object file to '{}': {e}",
-                        path.display()
-                    ),
-                    crate::lexer::Position::new(0, 0),
-                )
+                CodegenError::Internal(format!(
+                    "Failed to write object file to '{}': {e}",
+                    path.display()
+                ))
             })
     }
 

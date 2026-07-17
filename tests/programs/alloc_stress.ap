@@ -1,0 +1,105 @@
+# expected: 0
+# compile_args: "-D", "STD_NO_LIBC", "-I", "lib"
+# requires_arch: ARCH_X86_64
+#-
+  alloc_stress.ap — a long, deterministic alloc/free/realloc churn that keeps
+  the freestanding allocator's invariants honest under fragmentation. 4000
+  iterations drive 64 slots: each step either allocates a random-sized block
+  (writing a slot-specific signature over it), verifies-then-frees a live one,
+  or reallocs it (verifying the surviving prefix, then re-signing the new
+  size). Any header/coalescing/free-list corruption shows up as a signature
+  mismatch. A deterministic LCG makes the sequence identical at -O0 and -O2,
+  which the harness requires to agree. Exit code is the failed-check count.
+-#
+$import std/mem
+
+# Position-based signature so a resized block's surviving prefix still matches:
+# the byte at index i depends only on i and the slot's tag, never on length.
+fn fill_tag(u8* p, u64 n, u64 tag) {
+    for (u64 i = 0; i < n; i += 1) {
+        p[i] = ((i * 131 + tag * 2711) % 251) as u8
+    }
+}
+
+fn check_tag(u8* p, u64 n, u64 tag) -> i32 {
+    for (u64 i = 0; i < n; i += 1) {
+        if p[i] != ((i * 131 + tag * 2711) % 251) as u8 { return 1 }
+    }
+    return 0
+}
+
+fn main(u32 argc, u8** argv) -> i32 {
+    i32 fails = 0
+
+    u64[64] addrs                   # 0 = empty slot (pointer as u64)
+    u64[64] sizes
+    u64[64] tags
+    for (u64 s = 0; s < 64; s += 1) {
+        addrs[s] = 0
+        sizes[s] = 0
+        tags[s] = 0
+    }
+
+    u64 rng = 88172645463325252      # xorshift64 seed (nonzero, fits i64)
+
+    for (u64 it = 0; it < 4000; it += 1) {
+        # xorshift64: deterministic, decent spread, no libc.
+        rng = rng ^ (rng << 13)
+        rng = rng ^ (rng >> 7)
+        rng = rng ^ (rng << 17)
+
+        u64 slot = rng % 64
+
+        if addrs[slot] == 0 {
+            # empty -> allocate and sign
+            u64 n = (rng >> 8) % 600 + 1
+            u8* p = malloc(n)
+            if p == null {
+                fails += 1
+            } else {
+                u64 tag = (rng >> 20) % 250 + 1
+                fill_tag(p, n, tag)
+                addrs[slot] = p as u64
+                sizes[slot] = n
+                tags[slot] = tag
+            }
+        } else {
+            # live -> verify, then either free or realloc
+            u8* p = addrs[slot] as u8*
+            u64 n = sizes[slot]
+            u64 tag = tags[slot]
+            fails += check_tag(p, n, tag)
+
+            if (rng >> 5) % 3 == 0 {
+                # realloc to a new size; surviving prefix must persist
+                u64 m = (rng >> 12) % 800 + 1
+                u8* q = realloc(p, m)
+                if q == null {
+                    fails += 1
+                } else {
+                    u64 keep = n
+                    if m < keep { keep = m }
+                    fails += check_tag(q, keep, tag)
+                    fill_tag(q, m, tag)        # re-sign the whole new footprint
+                    addrs[slot] = q as u64
+                    sizes[slot] = m
+                }
+            } else {
+                free(p)
+                addrs[slot] = 0
+                sizes[slot] = 0
+            }
+        }
+    }
+
+    # Drain: every survivor must still hold its signature, then free cleanly.
+    for (u64 s = 0; s < 64; s += 1) {
+        if addrs[s] != 0 {
+            u8* p = addrs[s] as u8*
+            fails += check_tag(p, sizes[s], tags[s])
+            free(p)
+        }
+    }
+
+    return fails
+}

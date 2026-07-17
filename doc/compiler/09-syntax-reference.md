@@ -28,6 +28,7 @@ Formal grammar and lexical specification for the Aspect language.
 7. [Notable constraints](#notable-constraints)
    - [Visibility](#visibility)
    - [`asm fn`](#asm-fn)
+   - [`naked fn`](#naked-fn)
 
 ---
 
@@ -807,6 +808,47 @@ fn sys_write(i32 fd, u8* buf, u64 len) -> i64 {
 
 The compiler always sets `sideeffect` and always appends
 `~{dirflag},~{fpsr},~{flags}`; neither is opt-out. See
+[06-codegen](06-codegen.md).
+
+### `naked fn`
+
+A `naked fn` is a function lowered with LLVM's `naked` attribute: **no prologue
+or epilogue**. Its body, like an `asm fn`, is a sequence of assembly string
+literals — but there is no register contract. With no prologue, arguments arrive
+in their platform-ABI registers (SysV x86-64: `rdi`, `rsi`, `rdx`, `rcx`, `r8`,
+`r9`) and a result leaves through the ABI return register (`rax`/`eax`); the
+assembly addresses them directly and is responsible for the return itself. Call
+sites are ordinary calls.
+
+```
+# No parameters: put a value in the ABI return register and return.
+naked fn ret_const() -> i32 {
+    "mov eax, 20"
+    "ret"
+}
+
+# Params arrive in edi/esi (SysV); sum into eax and return.
+naked fn add_abi(i32 a, i32 b) -> i32 {
+    "mov eax, edi"
+    "add eax, esi"
+    "ret"
+}
+```
+
+- **No register pins, no `clobbers`.** Parameters are written like an ordinary
+  function (`i32 a`, not `i32 a: rdi`); the ABI already fixes where they are.
+- **The body owns the calling convention.** Because there is no prologue, the
+  assembly must load parameters from their ABI registers (or the stack) itself
+  and must issue its own `ret`/`jmp`/`syscall` — nothing is generated around it.
+- **`naked` is a keyword** and cannot be combined with `asm` or `extern`.
+- **Arch-specific.** The assembly is target-specific; gate a naked fn with
+  `$ifdef ARCH_X86_64` (and provide a portable `$else` path) exactly as the
+  syscall layer does.
+
+The motivating use is a freestanding entry point: a `naked fn _start()` reads
+`argc` from `[rsp]` and `argv` from `[rsp+8]`, sets up the C ABI, and jumps to
+`main` — which an ordinary `fn _start(u32 argc, u8** argv)` cannot do, because
+its prologue has already moved `rsp` before any statement runs. See
 [06-codegen](06-codegen.md).
 
 ### Newlines as terminators

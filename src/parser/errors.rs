@@ -1,9 +1,10 @@
 use crate::lexer::Position;
 use crate::symbol::table::SymbolError;
+use aspect_macros::ErrorPosition;
 use thiserror::Error;
 
 /// Parser error types
-#[derive(Error, Debug)]
+#[derive(Error, Debug, ErrorPosition)]
 pub enum ParserError {
     #[error("Unexpected token '{0}' at {1}")]
     UnexpectedToken(String, Position),
@@ -125,34 +126,6 @@ impl ParserError {
             defining: describe(defining_module),
             referring: describe(referring_module),
             pos,
-        }
-    }
-
-    /// Extract the source position from this error, if any.
-    #[must_use]
-    pub fn position(&self) -> Option<Position> {
-        match self {
-            ParserError::UnexpectedToken(_, pos) => Some(*pos),
-            ParserError::DuplicateDeclaration(_, pos) => Some(*pos),
-            ParserError::UndefinedType(_, pos) => Some(*pos),
-            ParserError::DuplicateType(_, pos) => Some(*pos),
-            ParserError::MethodCallForm(_, pos) => Some(*pos),
-            ParserError::ExpectedToken(_, _, pos) => Some(*pos),
-            ParserError::TypeMismatch(_, _, pos) => Some(*pos),
-            ParserError::UndefinedVariable(_, pos) => Some(*pos),
-            ParserError::UndefinedFunction(_, pos) => Some(*pos),
-            ParserError::NotImported { pos, .. } => Some(*pos),
-            ParserError::ArgumentCountMismatch(_, _, _, pos) => Some(*pos),
-            ParserError::InvalidDereference(pos) => Some(*pos),
-            ParserError::FunctionRedefinition(_, pos) => Some(*pos),
-            ParserError::InvalidBinaryOperation(pos) => Some(*pos),
-            ParserError::ExpectedExpression(pos) => Some(*pos),
-            ParserError::ExpectedStatement(pos) => Some(*pos),
-            ParserError::AsmMissingParamRegister(_, pos) => Some(*pos),
-            ParserError::AsmMissingReturnRegister(_, pos) => Some(*pos),
-            ParserError::AsmVoidReturnRegister(_, pos) => Some(*pos),
-            ParserError::AsmEmptyBody(_, pos) => Some(*pos),
-            ParserError::UnexpectedEof | ParserError::LexerError(_) => None,
         }
     }
 }

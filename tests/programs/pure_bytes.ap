@@ -1,0 +1,71 @@
+# expected: 0
+# compile_args: "-I", "lib", "-D", "STD_NO_LIBC"
+#-
+  pure_bytes.ap — the pure-Aspect byte primitives selected by the
+  `STD_NO_LIBC` gate. `-D STD_NO_LIBC` swaps std/sort, std/collections and
+  std/string off libc's strlen/strcmp/memcpy/... and onto std/mem/bytes; this
+  program pins that path down: no libc on the string side of the build (only
+  the allocator, std/c/stdlib, remains). Direct calls verify each primitive,
+  then a map and a sort prove the gate rewired the consumers correctly.
+
+  Exit code is the failed-check count, so `# expected: 0` = every check
+  passed. Runs at -O0 and -O2 (the harness requires agreement).
+-#
+$import std/mem/bytes
+$import std/collections
+$import std/sort
+
+# 1 when the condition is bad (a failed check), 0 when fine — summed into the
+# exit code.
+fn fail_if(bool bad) -> i32 {
+    if bad { return 1 }
+    return 0
+}
+
+fn main(u32 argc, u8** argv) -> i32 {
+    i32 fails = 0
+
+    # ── strlen ──────────────────────────────────────────────────────────
+    fails += fail_if(strlen("hello") != 5)
+    fails += fail_if(strlen("") != 0)
+
+    # ── strcmp: <0 / 0 / >0 ─────────────────────────────────────────────
+    fails += fail_if(strcmp("apple", "apple") != 0)
+    fails += fail_if(!(strcmp("apple", "banana") < 0))
+    fails += fail_if(!(strcmp("banana", "apple") > 0))
+    fails += fail_if(!(strcmp("ab", "abc") < 0))          # prefix is smaller
+
+    # ── memcpy (copies the terminator too) and its dst return ───────────
+    u8[8] dst
+    fails += fail_if(memcpy(dst, "abcdef", 7) == null)
+    fails += fail_if(strcmp(dst, "abcdef") != 0)
+
+    # ── memset ──────────────────────────────────────────────────────────
+    u8[8] buf
+    memset(buf, 65, 4)                                    # 'A' × 4
+    buf[4] = 0
+    fails += fail_if(strcmp(buf, "AAAA") != 0)
+
+    # ── memcmp: <0 / 0 / >0 ─────────────────────────────────────────────
+    fails += fail_if(memcmp("abcd", "abcd", 4) != 0)
+    fails += fail_if(!(memcmp("abcd", "abce", 4) < 0))
+    fails += fail_if(!(memcmp("abce", "abcd", 4) > 0))
+
+    # ── std/collections wired to the pure path (strlen/strcmp/memcpy) ────
+    MapStrI64 m = MapStrI64.new()
+    m.put("apple", 3)
+    m.put("apple", 4)                                     # overwrite
+    m.put("banana", 5)
+    fails += fail_if(m.get_or("apple", 0) != 4)
+    fails += fail_if(m.get_or("banana", 0) != 5)
+    fails += fail_if(m.get_or("pear", 0 - 1) != 0 - 1)
+    m.destroy()
+
+    # ── std/sort wired to the pure path (strcmp via cmp_cstr_asc) ────────
+    (u8*)[4] names = {"cherry", "apple", "durian", "banana"}
+    sort_cstr(names, 4)
+    fails += fail_if(strcmp(names[0], "apple") != 0)
+    fails += fail_if(strcmp(names[3], "durian") != 0)
+
+    return fails
+}

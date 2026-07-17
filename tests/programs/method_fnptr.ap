@@ -1,0 +1,36 @@
+# expected: 42
+# A static reference to an instance method as a function-pointer *value*:
+# `Counter.method` (no call) names the method's underlying free function,
+# typed with the receiver as its explicit first parameter —
+# `fn(Counter*, ...) -> R` — so it drops into a fn-ptr variable or a dispatch
+# table and is invoked through the pointer with the receiver passed first.
+# The mutation done via one method is observable through another, proving the
+# receiver really is threaded through the indirect call.
+type Counter {
+    public i32 value
+
+    public fn bump(this, i32 by) -> i32 {      # instance method (mutating)
+        this.value = this.value + by
+        return this.value
+    }
+    public fn scaled(this, i32 factor) -> i32 {  # instance method
+        return this.value * factor
+    }
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Counter c = Counter { value = 0 }
+
+    # single method-as-value, bound to a fn-ptr variable and called through it
+    fn(Counter*, i32) -> i32 f = Counter.bump
+    i32 a = f(&c, 20)                          # value 0 -> 20, returns 20
+
+    # a dispatch table of methods (with the address-of spelling)
+    (fn(Counter*, i32) -> i32)[2] ops = { &Counter.bump, &Counter.scaled }
+    i32 b = ops[0](&c, 1)                      # bump: value 20 -> 21, returns 21
+    i32 d = ops[1](&c, 2)                      # scaled: 21 * 2 = 42
+
+    if a != 20 { return 1 }
+    if b != 21 { return 2 }
+    return d                                    # 42
+}
