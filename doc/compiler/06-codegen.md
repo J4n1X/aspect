@@ -53,6 +53,8 @@ pub struct CodeGenerator<'ctx> {
 
 The target machine is created once in `CodeGenerator::new` and reused for optimization and object emission.
 
+`CodeGenerator::new` uses LLVM's default relocation model for the triple; `CodeGenerator::new_with_reloc` takes an explicit `RelocMode` instead — this is how the `compile --relocation-model` CLI flag produces position-independent code. Because the reloc model is baked into the single cached `TargetMachine`, it governs *both* the optimization passes and the emitted object. When `RelocMode::PIC` is selected the module is also stamped with a `PIC Level` (value 2) flag so the emitted IR/object is self-describing, as clang does for `-fPIC` (using `FlagBehavior::Override`, since inkwell 0.9 does not expose clang's `Max` behavior — the recorded value is identical and the merge semantics only differ when linking two flagged IR modules, which never happens here).
+
 Variable storage has been extracted into `ScopeStack` (see `scope.rs`).
 
 ### Helper Structs

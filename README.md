@@ -77,6 +77,12 @@ Options:
 - `-o, --output <OUTPUT>` - Output file path (default depends on emit target)
 - `-p, --print` - Print IR to stdout even when writing to a file
 - `-O, --optimize <LEVEL>` - Optimization level (0-3, default: 0)
+- `-r, --relocation-model <MODEL>` - Relocation model (default: `default`). `pic`
+  emits position-independent code (PC-relative / GOT-relative symbol access) for
+  shared libraries and PIE executables; `static` forces absolute addressing (e.g.
+  for a freestanding kernel image); `dynamic-no-pic` is the macOS-style hybrid;
+  `default` lets LLVM choose per the target triple. Mirrors `llc`'s
+  `-relocation-model`.
 - `--verify-each` - Verify IR after each optimization pass (slower, useful for debugging)
 - `-I, --include-dir` - Include a directory for module search
 - `-D, --define` - Define a preprocessor value
@@ -97,6 +103,9 @@ aspc compile program.ap --emit obj
 
 # Compile with optimization level 2
 aspc compile program.ap -O 2
+
+# Emit a position-independent object (for a shared library or PIE)
+aspc compile program.ap --emit obj --relocation-model pic
 
 # Compile with O3 and verify after each pass
 aspc compile program.ap -O 3 --verify-each

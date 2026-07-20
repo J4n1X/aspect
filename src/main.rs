@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Args, CommandFactory, Parser as ClapParser, Subcommand, ValueEnum};
 use inkwell::context::Context as LLVMContext;
+use inkwell::targets::RelocMode;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use aspect::codegen::CodeGenerator;
@@ -22,6 +23,40 @@ enum EmitTarget {
     Ir,
     Obj,
     Exe,
+}
+
+/// LLVM relocation model for the compiled artifact, mirroring `llc`'s
+/// `-relocation-model`. `pic` is the one that produces position-independent
+/// code (GOT/PLT-relative symbol access) suitable for shared libraries and
+/// PIE executables; `static` forces absolute addressing (e.g. for a
+/// freestanding kernel image); `default` lets LLVM pick per the target triple.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum RelocModel {
+    Default,
+    Static,
+    Pic,
+    DynamicNoPic,
+}
+
+impl RelocModel {
+    fn to_llvm(self) -> RelocMode {
+        match self {
+            RelocModel::Default => RelocMode::Default,
+            RelocModel::Static => RelocMode::Static,
+            RelocModel::Pic => RelocMode::PIC,
+            RelocModel::DynamicNoPic => RelocMode::DynamicNoPic,
+        }
+    }
+}
+
+/// Back-end knobs that `build_codegen` consumes, bundled so the driver
+/// functions that thread them stay under a sane argument count. `interpret`
+/// leaves `reloc` at the target default and `verify_each` off; only `compile`
+/// exposes them on the CLI.
+struct BackendOpts {
+    opt_level: u8,
+    reloc: RelocMode,
+    verify_each: bool,
 }
 
 /// Preprocessor flags shared by every subcommand that lexes source.
@@ -101,6 +136,17 @@ enum Commands {
             default_value = "0"
         )]
         opt_level: u8,
+
+        /// Relocation model: `pic` emits position-independent code for shared
+        /// libraries / PIE; `static` forces absolute addressing; `default`
+        /// lets LLVM choose for the target triple
+        #[arg(
+            short = 'r',
+            long = "relocation-model",
+            value_enum,
+            default_value_t = RelocModel::Default
+        )]
+        relocation_model: RelocModel,
 
         /// Verify LLVM IR after each optimization pass (slower, useful for debugging)
         #[arg(long)]
@@ -210,6 +256,7 @@ fn main() -> Result<()> {
             output,
             print,
             opt_level,
+            relocation_model,
             verify_each,
         } => compile_file(
             &file,
@@ -217,8 +264,11 @@ fn main() -> Result<()> {
             emit,
             output.as_deref(),
             print,
-            opt_level,
-            verify_each,
+            &BackendOpts {
+                opt_level,
+                reloc: relocation_model.to_llvm(),
+                verify_each,
+            },
         )?,
         Commands::Interpret {
             file,
@@ -299,21 +349,21 @@ fn build_codegen<'ctx>(
     path: &Path,
     preproc: &PreprocArgs,
     program: &Program,
-    opt_level: u8,
-    verify_each: bool,
+    opts: &BackendOpts,
 ) -> Result<CodeGenerator<'ctx>> {
     let module_name = path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("module");
 
-    let mut codegen = CodeGenerator::new(context, module_name, &preproc.target_spec())
-        .with_context(|| format!("failed to set up code generation for '{}'", path.display()))?;
+    let mut codegen =
+        CodeGenerator::new_with_reloc(context, module_name, &preproc.target_spec(), opts.reloc)
+            .with_context(|| format!("failed to set up code generation for '{}'", path.display()))?;
     codegen
         .generate(program)
         .with_context(|| format!("failed to generate code for '{}'", path.display()))?;
     codegen
-        .optimize(opt_level, verify_each)
+        .optimize(opts.opt_level, opts.verify_each)
         .with_context(|| format!("failed to optimize code for '{}'", path.display()))?;
 
     Ok(codegen)
@@ -416,12 +466,11 @@ fn compile_file(
     emit: EmitTarget,
     output: Option<&std::path::Path>,
     print: bool,
-    opt_level: u8,
-    verify_each: bool,
+    opts: &BackendOpts,
 ) -> Result<()> {
     let program = build_program(path, preproc)?;
     let context = LLVMContext::create();
-    let codegen = build_codegen(&context, path, preproc, &program, opt_level, verify_each)?;
+    let codegen = build_codegen(&context, path, preproc, &program, opts)?;
 
     match emit {
         EmitTarget::Ir => {
@@ -476,7 +525,14 @@ fn interpret_file(
 ) -> Result<()> {
     let program = build_program(path, preproc)?;
     let context = LLVMContext::create();
-    let codegen = build_codegen(&context, path, preproc, &program, opt_level, false)?;
+    // The JIT resolves symbols in-process, so the relocation model is moot;
+    // keep LLVM's default.
+    let opts = BackendOpts {
+        opt_level,
+        reloc: RelocMode::Default,
+        verify_each: false,
+    };
+    let codegen = build_codegen(&context, path, preproc, &program, &opts)?;
 
     // argv[0] is the source path by C convention; user args follow.
     let path_str = path.display().to_string();

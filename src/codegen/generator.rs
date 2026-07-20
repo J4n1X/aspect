@@ -2,7 +2,7 @@ use anyhow::{Context as AnyhowContext, Result as AnyhowResult};
 use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
-use inkwell::module::Module;
+use inkwell::module::{FlagBehavior, Module};
 use inkwell::passes::PassBuilderOptions;
 use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine};
 use inkwell::values::{FunctionValue, GenericValue};
@@ -111,6 +111,30 @@ impl<'ctx> CodeGenerator<'ctx> {
         module_name: &str,
         target: &TargetSpec,
     ) -> Result<Self, CodegenError> {
+        Self::new_with_reloc(context, module_name, target, RelocMode::Default)
+    }
+
+    /// Like [`Self::new`], but selects the LLVM **relocation model** `reloc`
+    /// for the target machine that drives both optimization passes and object
+    /// emission — this is how `aspc` emits position-independent code.
+    ///
+    /// [`RelocMode::PIC`] additionally stamps the module with a `PIC Level`
+    /// flag (value 2) so the emitted IR/object is self-describing as
+    /// position-independent, matching what clang records for `-fPIC`; every
+    /// other model leaves the module unflagged, exactly as before. All the
+    /// target/data-layout setup and [`CodegenError::UnsupportedTarget`] error
+    /// conditions documented on [`Self::new`] apply unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::new`]: [`CodegenError::UnsupportedTarget`] when LLVM
+    /// can't resolve `target`'s triple to a usable target machine.
+    pub fn new_with_reloc(
+        context: &'ctx Context,
+        module_name: &str,
+        target: &TargetSpec,
+        reloc: RelocMode,
+    ) -> Result<Self, CodegenError> {
         let module = context.create_module(module_name);
         let builder = context.create_builder();
 
@@ -141,7 +165,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "generic",
                 "",
                 OptimizationLevel::None,
-                RelocMode::Default,
+                reloc,
                 CodeModel::Default,
             )
             .ok_or_else(|| CodegenError::UnsupportedTarget {
@@ -150,6 +174,20 @@ impl<'ctx> CodeGenerator<'ctx> {
             })?;
         module.set_triple(&triple);
         module.set_data_layout(&target_machine.get_target_data().get_data_layout());
+
+        // Record the PIC level the way clang does for `-fPIC`, so the emitted
+        // IR/object is self-describing as position-independent. inkwell 0.9's
+        // `FlagBehavior` exposes no `Max` (clang's choice for this flag);
+        // `Override` records the identical value and behaves the same for the
+        // single-module compilation `aspc` performs — the merge semantics only
+        // differ when two flagged modules are linked as IR, which never happens.
+        if reloc == RelocMode::PIC {
+            module.add_basic_value_flag(
+                "PIC Level",
+                FlagBehavior::Override,
+                context.i32_type().const_int(2, false),
+            );
+        }
 
         Ok(Self {
             context,
@@ -506,5 +544,86 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let raw = self.jit_execute("main", &[&argc_gv, &argv_gv], opt_level)?;
         Ok(raw as i32)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::Parser;
+    use crate::target::TargetSpec;
+    use crate::typechecker::TypeChecker;
+
+    /// A program that reads and writes a mutable global — the case whose
+    /// symbol access differs between relocation models (absolute address vs
+    /// PC-relative), so it exercises the position-independent path in a way a
+    /// leaf function with no global references would not.
+    const SRC: &str = r#"
+u32 counter = 0
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    counter = counter + 1
+    return counter as i32
+}
+"#;
+
+    fn codegen_for(context: &Context, reloc: RelocMode) -> CodeGenerator<'_> {
+        let tokens = crate::lexer::tokenize(SRC.to_string()).expect("lex");
+        let mut parser = Parser::new(tokens);
+        let mut program = parser.parse_program().expect("parse");
+        let mut tc = TypeChecker::new();
+        tc.check_program(&mut program).expect("typecheck");
+        let mut codegen =
+            CodeGenerator::new_with_reloc(context, "reloc_test", &TargetSpec::host(), reloc)
+                .expect("codegen setup");
+        codegen.generate(&program).expect("generate");
+        codegen
+    }
+
+    #[test]
+    fn pic_reloc_stamps_the_module_with_a_pic_level_flag() {
+        let context = Context::create();
+        let ir = codegen_for(&context, RelocMode::PIC).print_ir_to_string();
+        assert!(
+            ir.contains("PIC Level"),
+            "PIC build should record a `PIC Level` module flag:\n{ir}"
+        );
+    }
+
+    #[test]
+    fn the_default_reloc_leaves_the_module_unflagged() {
+        let context = Context::create();
+        let ir = codegen_for(&context, RelocMode::Default).print_ir_to_string();
+        assert!(
+            !ir.contains("PIC Level"),
+            "non-PIC build must not record a `PIC Level` module flag:\n{ir}"
+        );
+    }
+
+    #[test]
+    fn pic_and_static_emit_different_object_code() {
+        // The relocation model must reach the *target machine*, not merely the
+        // module flag: a mutable global's access lowers to an absolute
+        // relocation under `static` and a PC-relative one under `pic`, so the
+        // two builds produce different object bytes for the same source.
+        let ctx_static = Context::create();
+        let cg_static = codegen_for(&ctx_static, RelocMode::Static);
+        let static_obj = cg_static
+            .get_target_machine()
+            .write_to_memory_buffer(&cg_static.module, FileType::Object)
+            .expect("emit static object");
+
+        let ctx_pic = Context::create();
+        let cg_pic = codegen_for(&ctx_pic, RelocMode::PIC);
+        let pic_obj = cg_pic
+            .get_target_machine()
+            .write_to_memory_buffer(&cg_pic.module, FileType::Object)
+            .expect("emit pic object");
+
+        assert_ne!(
+            static_obj.as_slice(),
+            pic_obj.as_slice(),
+            "pic and static builds must produce different object code"
+        );
     }
 }
