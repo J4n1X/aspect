@@ -84,8 +84,21 @@ stmt\n
 Inside a `for` loop header `(init ; cond ; incr)` only `;` is accepted;
 newlines inside the parentheses would close the `for` clause early.
 
-Expressions **do not** span multiple lines. A newline mid-expression ends
-the statement at the last complete expression.
+#### Line continuation
+
+A backslash immediately followed by a newline (`\\\n`) continues the
+statement on the next line — the backslash-newline pair is removed, and
+lexing resumes on the next line:
+
+```
+stmt \
+  continued
+```
+
+This allows long expressions to be broken across lines. Leading whitespace
+on the continuation line is ignored. The backslash must be the last
+character on its line (no whitespace or other text between it and the
+newline).
 
 ### Identifiers and keywords
 

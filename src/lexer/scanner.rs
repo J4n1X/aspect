@@ -172,6 +172,18 @@ impl Scanner {
             // Newline (statement terminator)
             '\n' => TokenKind::Newline,
 
+            // Backslash (line continuation)
+            '\\' => {
+                // See if the next character is a newline. If so, consume it, and 
+                // go to the next token, respecting line info.
+                if self.match_char('\n') {
+                    self.skip_whitespace();
+                    return self.scan_token();
+                } else {
+                    return Err(LexerError::UnexpectedChar('\\', start_pos));
+                }
+            },
+
             // Multi-character operators
             '=' => {
                 if self.match_char('=') {

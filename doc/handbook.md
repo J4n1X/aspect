@@ -258,15 +258,31 @@ i32 x = 1
 i32 y = 2;   i32 z = 3   # semicolons let you fit several on one line
 ```
 
-The corollary: **expressions cannot span multiple lines**.
+By default, statements cannot span multiple lines. However, you can use a
+backslash (`\`) to continue a line — a backslash immediately followed by a
+newline will treat the next line as a continuation:
 
 ```aspect
-# ERROR — parsed as two separate (broken) statements
-i32 result = a
+# OK — backslash continues the statement
+i32 result = a \
            + b
 
-# OK — the whole expression is on one line
-i32 result = a + b
+# Also works in complex expressions
+i32 x = some_long_function_name(arg1, \
+                                arg2, \
+                                arg3)
+```
+
+The backslash must be the last character on the line (immediately before the
+newline). Any leading whitespace on the continuation line is skipped.
+
+```aspect
+# ERROR — no whitespace between backslash and newline
+i32 result = a \ 
+           + b
+
+# ERROR — extra text after the backslash
+i32 result = a \ ; + b
 ```
 
 ### Identifiers and keywords
