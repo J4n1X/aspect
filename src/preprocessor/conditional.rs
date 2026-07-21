@@ -2,50 +2,25 @@
 //! `$endif` — conditional compilation: chain tracking and the `$if`
 //! constant-expression evaluator.
 //!
-//! ## Chains
+//! A chain opens with `$ifdef`/`$ifndef`/`$if`, takes any mix of
+//! `$elseif`/`$elseifdef` and at most one `$else`, and closes with `$endif`;
+//! chains nest arbitrarily. Exactly one branch is active: the first whose
+//! condition is true, or the `$else`.
 //!
-//! A chain opens with `$ifdef NAME`, `$ifndef NAME`, or `$if EXPR`, is
-//! followed by any mix of `$elseif EXPR` / `$elseifdef NAME`, at most one
-//! `$else`, and closes with `$endif`. Chains nest arbitrarily. Exactly one
-//! branch of a chain is active: the first whose condition is true (or the
-//! `$else`, if no condition was). The open chains form a stack of
-//! [`Frame`]s owned by [`ConditionalStack`]; the driver consults
-//! [`ConditionalStack::active`] on every ordinary token and every
-//! non-conditional directive.
+//! Inside a false branch ordinary tokens are dropped and non-conditional
+//! directives are inert. Conditional directives are still processed so nesting
+//! stays matched — but a chain opened inside a skipped region is *inert*: its
+//! conditions are never evaluated (an undefined identifier in a skipped `$if`
+//! is not an error) and no branch can activate. Chain *shape* errors are
+//! enforced even in skipped regions: the directive line is always parsed, only
+//! its effect suppressed.
 //!
-//! ## Skipping
+//! A chain must open and close within one file: a closing directive whose
+//! innermost open chain belongs to a different file is stray, and a chain
+//! still open when its file ends is unterminated.
 //!
-//! Inside a false/inactive branch ordinary tokens are dropped and
-//! non-conditional directives are inert (`$define` does not define,
-//! `$import` does not resolve, unknown names do not error). Conditional
-//! directives ARE still processed so nesting stays matched — but a chain
-//! opened inside a skipped region is *inert*: its conditions are never
-//! evaluated (an undefined identifier in a skipped `$if` is not an error)
-//! and none of its branches can activate. Chain *shape* errors (stray
-//! directives, `$elseif`/`$else` after `$else`, trailing tokens on
-//! `$else`/`$endif`, missing `$ifdef` names) are enforced even in skipped
-//! regions: the directive line itself is always parsed, only its effect is
-//! suppressed.
-//!
-//! A chain must open and close within one file: a `$endif` (or `$elseif*`/
-//! `$else`) whose innermost open chain was opened by a different file is
-//! stray, and a chain still open when its file ends is unterminated (the
-//! error names the opening directive).
-//!
-//! ## The `$if` evaluator
-//!
-//! `$if EXPR` takes a constant integer expression over integer literals,
-//! `defined(NAME)` (1 or 0, the name deliberately *not* expanded), defined
-//! names (expanded through the define table first; they must reduce to a
-//! constant expression — an *undefined* identifier is an error, never
-//! silently 0), parentheses, unary `!` / `-`, and the binary operators
-//! `|| && == != < > <= >= | ^ & << >> + - * / %`. Precedence mirrors the
-//! parser's `INFIX_OPS` table so `$if` agrees with runtime expressions —
-//! note this means comparisons bind *looser* than bitwise operators
-//! (`1 & 3 == 1` is `(1 & 3) == 1`), unlike C. Nonzero is true. The whole
-//! expression must be evaluable: division/modulo by zero is an error even
-//! on the dead side of `&&`/`||` (no short-circuit), arithmetic wraps, and
-//! shift counts are masked to 0..=63. See [`super::expr_eval`].
+//! `$if EXPR` evaluates a constant integer expression; see [`super::expr_eval`]
+//! for its grammar, precedence, and error semantics.
 
 use crate::lexer::{Position, Token};
 
@@ -59,7 +34,6 @@ enum Branch {
     /// No branch has been true yet — a later `$elseif*`/`$else` may still
     /// activate one. The current branch is being skipped.
     Pending,
-    /// The current branch is the chain's one active branch.
     Live,
     /// A branch was already taken — everything up to `$endif` is skipped.
     Done,
@@ -84,10 +58,8 @@ struct Frame {
     else_pos: Option<Position>,
 }
 
-/// The stack of open conditional chains. Owned by the driver
-/// (`Preprocessor.conditionals`); every directive the driver routes here
-/// mutates the top frame, and [`ConditionalStack::active`] gates the rest
-/// of the driver's walk.
+/// The stack of open conditional chains, owned by the driver. Every routed
+/// directive mutates the top frame; `active` gates the rest of the walk.
 #[derive(Debug, Default)]
 pub struct ConditionalStack {
     frames: Vec<Frame>,
@@ -117,8 +89,7 @@ impl ConditionalStack {
             .map(|frame| (frame.directive, frame.opened))
     }
 
-    /// Process one conditional directive line. `rest` is everything after
-    /// the directive name, newline already stripped.
+    /// `rest` is everything after the directive name, newline already stripped.
     pub(crate) fn handle(
         &mut self,
         directive: &str,
@@ -258,7 +229,6 @@ impl ConditionalStack {
         Ok(())
     }
 
-    /// `$endif` — close the innermost chain.
     fn chain_endif(&mut self, rest: &[Token], pos: Position) -> Result<(), PreprocessError> {
         self.top("endif", pos)?;
         if let Some(extra) = rest.first() {

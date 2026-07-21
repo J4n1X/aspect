@@ -1,22 +1,17 @@
 //! Inline-asm register model: the per-target register table `asm fn`
 //! validates against.
 //!
-//! Pure data and string classification — like [`crate::target::TargetSpec`],
-//! it never touches LLVM's target registry, so it is usable from the type
-//! checker (which runs long before any `TargetMachine` exists, and must
-//! reject `rax` under `--target aarch64-*` even though this binary has no
-//! AArch64 backend at all).
+//! Pure data — like [`crate::target::TargetSpec`] it never touches LLVM's
+//! target registry, so the type checker can use it long before any
+//! `TargetMachine` exists (and reject `rax` under `--target aarch64-*`).
 //!
-//! The central concept here is the **register family**. `rax`, `eax`, `ax`
-//! and `al` are four spellings of one physical register; LLVM neither
-//! rejects nor tolerates two operands naming the same physical register —
-//! it silently drops one of them. Every collision check therefore compares
-//! [`RegInfo::family`], never the spelling the user wrote.
+//! The central concept is the **register family**: `rax`/`eax`/`ax`/`al` are
+//! four spellings of one physical register that LLVM silently drops one of if
+//! two operands name it. Every collision check compares [`RegInfo::family`],
+//! never the spelling.
 
-/// Which bank a register lives in. A value can only be pinned to its own
-/// bank's registers: LLVM has no way to put an `f64` in `rax` or an `i64` in
-/// `xmm0`, and asking it to is a frontend error rather than something it
-/// diagnoses.
+/// A value can only be pinned to its own bank's registers: LLVM can't put an
+/// `f64` in `rax` or an `i64` in `xmm0`, and won't diagnose the attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegClass {
     /// Integers and pointers.
@@ -48,12 +43,10 @@ pub struct RegInfo {
     pub class: RegClass,
 }
 
-/// x86-64 general-purpose registers as `(spelling, family, width_bits)`.
-///
-/// APX `r16`-`r31` are excluded (not baseline x86-64). The legacy high-byte
-/// registers `ah`/`bh`/`ch`/`dh` are deliberately absent: they cannot be
-/// encoded alongside any REX-prefixed register, so pinning one would fail
-/// inside the encoder with a far worse diagnostic than "unknown register".
+/// `(spelling, family, width_bits)`. APX `r16`-`r31` and the high-byte
+/// registers `ah`/`bh`/`ch`/`dh` are excluded — the latter can't be encoded
+/// alongside a REX-prefixed register, so pinning one would fail in the encoder
+/// with a far worse diagnostic than "unknown register".
 static X86_64_GPRS: &[(&str, &str, u32)] = &[
     ("rax", "rax", 64),
     ("eax", "rax", 32),
@@ -121,13 +114,9 @@ static X86_64_GPRS: &[(&str, &str, u32)] = &[
     ("r15b", "r15", 8),
 ];
 
-/// x86-64 SSE registers as `(spelling, family, width_bits)`.
-///
-/// `xmm0`-`xmm15` are baseline x86-64 (SSE2 is mandatory), which is what makes
-/// them safe to pin under the `generic` CPU the target machine is built with.
-/// `ymm`/`zmm` are deliberately absent: they need AVX, which `generic` does not
-/// enable. Each register is its own family — unlike the GPRs there are no
-/// narrower spellings to alias.
+/// `xmm0`-`xmm15` are baseline x86-64 (SSE2 mandatory), safe to pin under the
+/// `generic` CPU. `ymm`/`zmm` need AVX, which `generic` lacks, so they're
+/// absent. Each register is its own family — no narrower spellings to alias.
 static X86_64_SSE: &[(&str, &str, u32)] = &[
     ("xmm0", "xmm0", 128),
     ("xmm1", "xmm1", 128),
@@ -147,20 +136,11 @@ static X86_64_SSE: &[(&str, &str, u32)] = &[
     ("xmm15", "xmm15", 128),
 ];
 
-/// i386 (32-bit x86) general-purpose registers as `(spelling, family, width_bits)`.
-///
-/// The 32-bit spelling is the family — there is no 64-bit register above it —
-/// so `eax`/`ax`/`al` all alias family `eax`. Two banks of x86-64 spellings are
-/// deliberately absent because i386 cannot encode them: the `r8`-`r15` file
-/// (introduced with x86-64) and the low-byte spellings `sil`/`dil`/`spl`/`bpl`
-/// (they require a REX prefix, which does not exist in 32-bit mode). The legacy
-/// high-byte registers `ah`/`bh`/`ch`/`dh` are omitted for the same reason they
-/// are on x86-64 — kept out of the model to avoid encoder-level surprises.
-///
-/// No SSE table accompanies this one: SSE/SSE2 is baseline on x86-64 but *not*
-/// on i386, so under the `generic` 32-bit CPU no `xmm` register is guaranteed —
-/// pinning a float on i386 is therefore an unknown-register error, not a silent
-/// accept.
+/// The 32-bit spelling is the family (no 64-bit register above it), so
+/// `eax`/`ax`/`al` all alias `eax`. Absent because i386 can't encode them: the
+/// `r8`-`r15` file, the REX-only low bytes `sil`/`dil`/`spl`/`bpl`, and the
+/// high-byte registers. No SSE table either — SSE isn't baseline on i386, so
+/// pinning a float there is an unknown-register error, not a silent accept.
 static I386_GPRS: &[(&str, &str, u32)] = &[
     ("eax", "eax", 32),
     ("ax", "eax", 16),
@@ -185,18 +165,13 @@ static I386_GPRS: &[(&str, &str, u32)] = &[
 ];
 
 /// The pseudo-register naming "this asm touches memory". Legal only in
-/// `clobbers(...)`, never as an operand pin — as a pin it is not in the
-/// register table and so reports as an unknown register.
+/// `clobbers(...)`; as an operand pin it reports as an unknown register.
 pub const MEMORY_CLOBBER: &str = "memory";
 
-/// Resolve a register spelling for `arch_define` (a
-/// [`crate::target::TargetSpec::arch_define`] value, e.g. `"ARCH_X86_64"`).
-///
-/// Returns `None` for an unknown name, or for any architecture whose
-/// register table we do not model — which is what makes `rax` under
-/// `--target aarch64-*` a clean compile error rather than a silent accept.
-/// It is likewise what makes `rax` under `--target i686-*` an unknown-register
-/// error: i386 is modelled, but the 64-bit spelling does not exist on it.
+/// `arch_define` is a [`crate::target::TargetSpec::arch_define`] value.
+/// Returns `None` for an unknown name or an unmodelled architecture — which is
+/// what makes `rax` under `--target aarch64-*` (or the 64-bit spelling under
+/// i386) a clean error rather than a silent accept.
 #[must_use]
 pub fn lookup_register(arch_define: &str, name: &str) -> Option<RegInfo> {
     match arch_define {
@@ -222,10 +197,7 @@ fn find_in(
         })
 }
 
-/// The width in bits of a pointer on `arch_define`.
-///
-/// Not `LangType::size_bits`, which describes the *pointee* (`u8*` reports 8)
-/// and so cannot answer this.
+/// Not `LangType::size_bits`, which describes the *pointee* (`u8*` reports 8).
 #[must_use]
 pub fn pointer_width_bits(arch_define: &str) -> u32 {
     match arch_define {
@@ -238,16 +210,10 @@ pub fn pointer_width_bits(arch_define: &str) -> u32 {
     }
 }
 
-/// True for the stack- and frame-pointer families, which may never be pinned
-/// or clobbered.
-///
-/// `rsp` is the live hardware stack pointer the calling convention depends on
-/// continuously; `rbp` may address spill slots under the default frame
-/// lowering — which is exactly what an unoptimised `asm fn` uses before
-/// `alwaysinline` folds it away. The 32-bit families `esp`/`ebp` are their i386
-/// counterparts and reserved for the identical reason; on x86-64 `esp`/`ebp`
-/// already resolve to the `rsp`/`rbp` families, so listing them here only adds
-/// coverage for the i386 table, where the family *is* the 32-bit spelling.
+/// The stack/frame-pointer families may never be pinned or clobbered: `rsp` is
+/// the live stack pointer, `rbp` may address spill slots under the default
+/// frame lowering an unoptimised `asm fn` uses. `esp`/`ebp` are the i386
+/// counterparts (on x86-64 they already resolve to the `rsp`/`rbp` families).
 #[must_use]
 pub fn is_reserved_family(family: &str) -> bool {
     matches!(family, "rsp" | "rbp" | "esp" | "ebp")

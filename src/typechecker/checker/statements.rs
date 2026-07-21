@@ -4,8 +4,6 @@ use crate::parser::{ExprKind, Expression, Statement, StatementKind};
 use crate::typechecker::errors::TypeCheckError;
 
 impl TypeChecker {
-    // ── Statement checking ───────────────────────────────────────────────────
-
     pub(crate) fn check_statement(&mut self, stmt: &mut Statement) {
         let stmt_pos = stmt.pos;
         match &mut stmt.kind {
@@ -38,11 +36,9 @@ impl TypeChecker {
 
             StatementKind::DerefAssign { target, value } => {
                 let target_type = self.synth_expression(target);
-                // `*p = x` writes the pointee. Under "const is truly immutable",
-                // a const pointer's pointee cannot be written — and the
-                // `Dereference` synth arm propagates const downward, so
-                // `**pp = x` and `*this.next = n` (through a const chain) are
-                // caught here too.
+                // `*p = x` can't write through a const pointer's pointee. The
+                // `Dereference` synth arm propagates const downward, so writes
+                // through a const chain (`**pp = x`) are caught here too.
                 if target_type.is_const {
                     self.errors
                         .push(TypeCheckError::WriteThroughConst { position: target.pos });
@@ -67,10 +63,9 @@ impl TypeChecker {
             }
 
             StatementKind::Return(opt_expr) => {
-                // Inside a value-block, `return` yields the innermost block,
-                // not the function. In a checked position the block's type is
-                // known up front; in synthesis position the first `return`
-                // fixes it and later ones are checked against it.
+                // Inside a value-block, `return` yields the innermost block, not
+                // the function. In synthesis position the first `return` fixes
+                // the type and later ones are checked against it.
                 if let Some(slot) = self.value_block_types.last().copied() {
                     match opt_expr {
                         Some(expr) => match slot {
@@ -172,10 +167,8 @@ impl TypeChecker {
         }
     }
 
-    /// Synthesise a condition expression and verify it is usable as a truth value.
-    ///
-    /// Conditions impose no target type, so they run in synthesis mode; the
-    /// "must be numeric or pointer" rule then rejects `void`.
+    /// Conditions impose no target type, so they run in synthesis mode; `void`
+    /// is then rejected as not a truth value.
     fn check_condition(&mut self, cond: &mut Expression) {
         let cond_type = self.synth_expression(cond);
         if cond_type.is_void_value() {
@@ -184,14 +177,9 @@ impl TypeChecker {
         }
     }
 
-    // ── Value blocks ─────────────────────────────────────────────────────────
-
-    /// Check a value-block's statements and resolve the block's type.
-    ///
-    /// `target` is `Some` in checked positions (the block must yield that
-    /// type) and `None` in synthesis positions (the first `return` fixes the
-    /// type; see the `Return` arm of `check_statement`). Also enforces the
-    /// all-paths rule: every control path through the block must end in a
+    /// `target` is `Some` in checked positions (the block must yield that type)
+    /// and `None` in synthesis positions (the first `return` fixes the type).
+    /// Also enforces the all-paths rule: every control path must end in a
     /// `return`, conservatively (loops never count, even `while true`).
     pub(crate) fn check_value_block(
         &mut self,
@@ -217,13 +205,11 @@ impl TypeChecker {
         resolved.unwrap_or(LangType::VOID)
     }
 
-    /// Conservative "every path returns" analysis for value-blocks: a
-    /// statement list returns iff any statement in it definitely returns
-    /// (everything after that one is unreachable). Loops never count —
-    /// `break` could skip their returns — and neither do `break`/`continue`
-    /// themselves. Returns inside *nested* value-blocks live under an
-    /// expression, which this walk deliberately does not descend into, so
-    /// they never satisfy the outer block.
+    /// Conservative "every path returns": a list returns iff any statement in
+    /// it definitely returns. Loops never count (`break` could skip their
+    /// returns), and returns inside *nested* value-blocks live under an
+    /// expression this walk doesn't descend into, so they don't satisfy the
+    /// outer block.
     fn always_returns(stmts: &[Statement]) -> bool {
         stmts.iter().any(Self::stmt_always_returns)
     }

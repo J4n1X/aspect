@@ -1,15 +1,12 @@
 //! A generic lexical scope stack shared by every compiler phase.
 //!
-//! The lexer, parser, type checker, and code generator all need the same thing:
-//! a stack of name → value maps where lookups search from the innermost scope
-//! outward. They differ only in the *value* they store (a parser symbol, a
-//! resolved [`LangType`](crate::lexer::LangType), or an LLVM-backed local), so
-//! the mechanics live here once as [`ScopeStack<T>`] and each phase parameterises
-//! it with its own payload.
+//! Every phase needs a stack of name → value maps with innermost-outward
+//! lookup, differing only in the *value* stored, so the mechanics live here once
+//! as [`ScopeStack<T>`] and each phase parameterises it with its own payload.
 //!
-//! The outermost (global) scope is created on construction and is never popped,
-//! so [`ScopeStack::insert`] and [`ScopeStack::contains_in_current`] always have
-//! a scope to act on.
+//! The outermost (global) scope is created on construction and never popped, so
+//! [`ScopeStack::insert`] and [`ScopeStack::contains_in_current`] always have a
+//! scope to act on.
 
 use std::collections::HashMap;
 

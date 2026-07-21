@@ -24,7 +24,7 @@ impl VisitMut for DslRewriter {
 
     fn visit_stmt_mut(&mut self, stmt: &mut Stmt) {
         // syn 2.x parses `macro_call!(...);` at statement level as Stmt::Macro,
-        // which is NOT visited by visit_expr_mut. Handle it here.
+        // which visit_expr_mut never sees — handle it here.
         if let Stmt::Macro(mac_stmt) = stmt
             && let Some(expanded) = expand_macro(&mac_stmt.mac)
         {
@@ -168,8 +168,6 @@ fn expand_block_body(tokens: &TokenStream) -> TokenStream {
     }
 }
 
-// ── Backtracking combinators ────────────────────────────────────────────────
-
 fn expand_opt(tokens: &TokenStream) -> TokenStream {
     let func: syn::Ident = syn::parse2(tokens.clone())
         .unwrap_or_else(|_| panic!("opt! expects a method name, e.g. opt!(parse_type)"));
@@ -251,12 +249,9 @@ fn build_alt_chain(funcs: &[syn::Ident]) -> TokenStream {
     }
 }
 
-/// `sync!(parse_X)` — error-recovering combinator.
-///
-/// Calls `self.parse_X()`. On success yields `Some(value)`.
-/// On failure, records the error in `self.errors`, truncates any phantom
-/// string-literal entries, calls `self.synchronize()` to skip to the next
-/// safe token, and yields `None` so the caller can continue parsing.
+/// `sync!(parse_X)` — error-recovering combinator. On success yields
+/// `Some(value)`; on failure records the error, truncates phantom string
+/// literals, `synchronize()`s to the next safe token, and yields `None`.
 fn expand_sync(tokens: &TokenStream) -> TokenStream {
     let func: syn::Ident = syn::parse2(tokens.clone())
         .unwrap_or_else(|_| panic!("sync! expects a method name, e.g. sync!(parse_statement)"));
@@ -276,17 +271,11 @@ fn expand_sync(tokens: &TokenStream) -> TokenStream {
     }
 }
 
-/// `scoped!({ body })` — wraps `body` in an enter/exit_scope pair.
-///
-/// `body` is a block whose last expression is the value returned by `scoped!`.
-/// Any `?` operators inside `body` propagate errors through a closure so that
-/// `exit_scope` is always called even on failure.
-///
-/// The body must end with a plain `T`, not a `Result<T, E>` — use `?` inside
-/// to unwrap intermediate Results.
+/// `scoped!({ body })` — wraps `body` in an enter/exit_scope pair, with any `?`
+/// inside routed through a closure so `exit_scope` runs even on failure. The
+/// body must end with a plain `T`, not a `Result` — use `?` inside to unwrap.
 fn expand_scoped(tokens: &TokenStream) -> TokenStream {
-    // Parse the argument as a syn::Block so we can recursively rewrite DSL
-    // macros that appear inside the scoped body.
+    // Parse as a syn::Block so DSL macros inside the body get rewritten too.
     let mut block: syn::Block = syn::parse2(tokens.clone())
         .unwrap_or_else(|e| panic!("scoped! expects a block, e.g. scoped!({{ ... }}): {e}"));
     DslRewriter.visit_block_mut(&mut block);

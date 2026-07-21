@@ -28,9 +28,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.struct_fields.insert(info.id, fields);
         }
 
-        // The only fabricated position left in codegen: `FieldInfo` records no
-        // declaration site, so a bad field type here cannot name its own line.
-        // Fixable by putting a `pos` on `FieldInfo` at parse time.
+        // `FieldInfo` records no declaration site, so a bad field type here
+        // can't name its own line — the one fabricated position left in codegen.
         for info in program.symbols.structs() {
             let field_types: Result<Vec<BasicTypeEnum<'ctx>>, _> = info
                 .fields
@@ -91,10 +90,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map(|idx| (idx, fields[idx].1))
     }
 
-    /// Compute the compile-time byte size of a `LangType` against the
-    /// target data layout. Powers `sizeof(T)`. Recurses on array element
-    /// types and consults the cached LLVM struct type for type-structs so
-    /// padding is included.
+    /// Byte size of a `LangType` against the target data layout — powers
+    /// `sizeof(T)`. Consults the cached LLVM struct type so padding is included.
     pub(crate) fn sizeof_lang_type(
         &self,
         ty: &LangType,
@@ -137,9 +134,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// Compute the address (and type) of an lvalue expression: a variable, a
-    /// dereference, or a field access. This is the single address-producing
-    /// path used by field reads, field assignment, and `&expr`.
+    /// Address (and type) of an lvalue — the single address-producing path
+    /// used by field reads, field assignment, and `&expr`.
     pub(crate) fn emit_address(
         &mut self,
         expr: &Expression,

@@ -4,7 +4,6 @@ use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicValueEnum, PointerValue};
 use std::collections::HashMap;
 
-/// Info for a local variable in a scope.
 pub struct LocalVar<'ctx> {
     pub ptr: PointerValue<'ctx>,
     pub llvm_type: BasicTypeEnum<'ctx>,
@@ -15,7 +14,6 @@ pub struct LocalVar<'ctx> {
     pub const_value: Option<BasicValueEnum<'ctx>>,
 }
 
-/// Info for a global variable.
 pub struct GlobalVarInfo<'ctx> {
     pub ptr: PointerValue<'ctx>,
     pub llvm_type: BasicTypeEnum<'ctx>,

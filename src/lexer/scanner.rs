@@ -5,10 +5,8 @@ pub struct Scanner {
     current: usize,
     line: usize,
     column: usize,
-    /// File registry id stamped onto every emitted token's position. The
-    /// preprocessor uses this to thread per-file provenance through to the
-    /// parser/typechecker so multi-file error messages can name the right
-    /// file. Defaults to 0 — the entry file — for the bare `tokenize` API.
+    /// Stamped onto every emitted token's position so multi-file diagnostics
+    /// can name the right file. Defaults to 0 (the entry file).
     file_id: u32,
 }
 
@@ -31,7 +29,6 @@ impl Scanner {
         }
     }
 
-    /// Scan all tokens from the input
     /// # Errors
     /// Returns `LexerError` if an invalid token is encountered
     pub fn scan_all(&mut self) -> Result<Vec<Token>, LexerError> {
@@ -56,7 +53,6 @@ impl Scanner {
         Ok(tokens)
     }
 
-    /// Collect a slice of the char buffer into a `String`.
     fn slice_to_string(&self, start: usize, end: usize) -> String {
         self.input[start..end].iter().collect()
     }
@@ -153,7 +149,6 @@ impl Scanner {
         let ch = self.advance().ok_or(LexerError::UnexpectedEof)?;
 
         let kind = match ch {
-            // Single-character tokens
             '(' => TokenKind::OpenParen,
             ')' => TokenKind::CloseParen,
             '{' => TokenKind::OpenBrace,
@@ -168,14 +163,10 @@ impl Scanner {
             '$' => TokenKind::Dollar,
             '@' => TokenKind::At,
             '~' => TokenKind::Tilde,
-
-            // Newline (statement terminator)
             '\n' => TokenKind::Newline,
 
-            // Backslash (line continuation)
+            // `\` at line end is a continuation: splice the next line on.
             '\\' => {
-                // See if the next character is a newline. If so, consume it, and 
-                // go to the next token, respecting line info.
                 if self.match_char('\n') {
                     self.skip_whitespace();
                     return self.scan_token();
@@ -184,7 +175,6 @@ impl Scanner {
                 }
             },
 
-            // Multi-character operators
             '=' => {
                 if self.match_char('=') {
                     TokenKind::Equal
@@ -288,13 +278,8 @@ impl Scanner {
                 }
             }
 
-            // String literals
             '"' => return self.scan_string_literal(start_pos),
-
-            // Numbers
             '0'..='9' => return self.scan_number(ch, start_idx, start_pos),
-
-            // Identifiers, keywords, and types
             ch if Self::is_alpha(ch) || ch == '_' => {
                 return Ok(self.scan_identifier_or_keyword(start_pos, start_idx));
             }
@@ -315,7 +300,7 @@ impl Scanner {
             }
 
             if self.peek() == Some('\\') {
-                self.advance(); // consume backslash
+                self.advance();
                 let escaped = self
                     .advance()
                     .ok_or(LexerError::UnterminatedString(start_pos))?;
@@ -367,7 +352,7 @@ impl Scanner {
         let mut is_float = false;
         if self.peek() == Some('.') && Self::is_digit(self.peek_ahead(1).unwrap_or('\0')) {
             is_float = true;
-            self.advance(); // consume '.'
+            self.advance();
             while Self::is_digit(self.peek().unwrap_or('\0')) {
                 self.advance();
             }
@@ -454,9 +439,9 @@ impl Scanner {
     }
 
     fn scan_type_after_const(&mut self, start_pos: Position) -> Result<Token, LexerError> {
-        // Save the cursor so we can restore it if the trailing word is not a
-        // type — e.g. `const fn ...` must lex as `Keyword(Const) Keyword(Fn)`,
-        // not eat `fn` as part of a failed `const <type>`.
+        // Restore the cursor if the trailing word is not a type — `const fn ...`
+        // must lex as `Keyword(Const) Keyword(Fn)`, not eat `fn` into a failed
+        // `const <type>`.
         let saved_current = self.current;
         let saved_line = self.line;
         let saved_column = self.column;
@@ -494,14 +479,10 @@ impl Scanner {
         }
     }
 
-    /// Parse the optional `[size]` array suffix and `*` pointer-depth markers
-    /// that may follow a base type, writing them onto `lang_type`.
-    ///
     /// The `[...]` suffix is only consumed when it is a well-formed `[decimal]`;
     /// otherwise the scanner position is restored so a later `[` (e.g. an index
-    /// expression) is left untouched. Inline whitespace between parts is skipped.
+    /// expression) is left untouched.
     fn parse_type_modifiers(&mut self, lang_type: &mut LangType) {
-        // Array syntax: type[size]
         self.skip_inline_whitespace();
         let saved_cur = self.current;
         let saved_line = self.line;
@@ -528,7 +509,6 @@ impl Scanner {
             }
         }
 
-        // Pointer depth (after array syntax if present)
         self.skip_inline_whitespace();
         let mut depth = 0;
         while self.match_char('*') {
@@ -566,7 +546,6 @@ impl Scanner {
     }
 }
 
-/// Tokenize the input string into a vector of tokens.
 /// Token positions carry `file_id == 0` — the entry file / "unattributed".
 ///
 /// # Errors
@@ -576,7 +555,6 @@ pub fn tokenize(input: String) -> Result<Vec<Token>, LexerError> {
     scanner.scan_all()
 }
 
-/// Tokenize the input string, stamping every token's position with `file_id`.
 /// Used by the preprocessor when lexing an included file so the parser can
 /// attribute later errors to the *containing* file, not the entry file.
 ///

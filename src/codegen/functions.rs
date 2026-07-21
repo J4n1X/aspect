@@ -25,23 +25,14 @@ type PreparedCallArgs<'ctx> = (
 /// linker's default entry for a freestanding binary.
 const IMPLICITLY_PUBLIC: [&str; 2] = ["main", "_start"];
 
-/// The LLVM linkage a function is declared with. `None` means LLVM's default,
-/// external.
+/// `None` means LLVM's default (external).
 ///
-/// A program and everything it imports compile to a *single* LLVM module, so
-/// internal linkage costs nothing at the call site and buys everything at the
-/// link: `globaldce` may delete an unreachable internal function, and may never
-/// touch an external one — some other object file might call it. Defaulting to
-/// external is what leaves an entire unused stdlib in every binary.
-///
-/// `extern fn` is the exception that must stay external: it is a declaration of
-/// something defined elsewhere, and internal linkage on a body-less declaration
-/// is invalid IR.
-///
-/// Linkage is the `export` axis, *not* `public`: `public` controls Aspect
-/// module visibility (parse-time name resolution) and leaves a symbol
-/// internally linked so `globaldce` can still strip it. Only `export fn`
-/// requests external linkage for a foreign consumer.
+/// A whole program is a *single* LLVM module, so internal linkage is free at
+/// the call site and lets `globaldce` delete an unreachable function;
+/// defaulting to external leaves the whole unused stdlib in every binary.
+/// `extern fn` must stay external — internal linkage on a body-less
+/// declaration is invalid IR. Linkage tracks the `export` axis, not `public`:
+/// `public` is parse-time module visibility and stays internally linked.
 fn linkage_for(func: &Function) -> Option<Linkage> {
     match func.body {
         FunctionBody::Extern => None,
@@ -139,14 +130,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         )
     }
 
-    /// Declare a function (without body)
-    ///
     /// Linkage is decided here — see [`linkage_for`].
     pub(crate) fn declare_function(
         &mut self,
         func: &Function,
     ) -> Result<FunctionValue<'ctx>, CodegenError> {
-        // Collect parameter LangTypes for call-site coercion
         let param_lang_types: Vec<LangType> = func.proto.params.iter().map(|(ty, _)| *ty).collect();
 
         let ret_ty = func.proto.return_type;
@@ -186,17 +174,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             .module
             .add_function(&func.proto.name, fn_type, linkage_for(func));
 
-        // When the program defines its own allocator (STD_NO_LIBC), no function
-        // it emits may be optimized against libc's contracts: that `malloc`
-        // hands back pointers that alias its own arena metadata, and its inlined
-        // `calloc`, matched by name, would draw the optimizer's allocation-size
-        // and `noalias`/zeroed reasoning, silently miscompiling callers at -O2.
-        // `"no-builtins"` — the `-fno-builtin` function attribute — stops that
-        // name-based reasoning for calls made from within the function, and
-        // `nobuiltin` on the definition stops call-site simplification of it.
-        // Extern declarations are the libc entry points a *non*-freestanding
-        // build calls; `disable_builtins` is false there, so those keep every
-        // builtin optimization.
+        // With a program-defined allocator (STD_NO_LIBC), no emitted function
+        // may be optimized against libc's contracts — a name-matched `calloc`
+        // would draw the optimizer's allocation-size/`noalias`/zeroed reasoning
+        // and miscompile callers at -O2. `nobuiltin` on the definition plus the
+        // `"no-builtins"` (`-fno-builtin`) attribute stops that both ways.
         if self.disable_builtins && !matches!(func.body, FunctionBody::Extern) {
             let kind_id = Attribute::get_named_enum_kind_id("nobuiltin");
             function.add_attribute(
@@ -259,7 +241,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
         let offset = u32::from(ret_is_struct);
 
-        // Allocate space for parameters and store them (in the entry block)
         for (i, (param_type, param_name)) in func.proto.params.iter().enumerate() {
             let idx = u32::try_from(i).expect("Parameter index out of bounds") + offset;
             let param_value = function.get_nth_param(idx).unwrap();
@@ -293,12 +274,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
-        // Generate function body (variables are allocated at their declaration site)
         for stmt in stmts {
             cg.generate_statement(stmt)?;
         }
 
-        // If function doesn't have an explicit return, add one
+        // Synthesise a return when the body left the block open.
         if !cg.block_has_terminator() {
             if ret_is_struct {
                 // Store a zeroed struct through the sret pointer, return void.

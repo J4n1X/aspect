@@ -5,19 +5,11 @@ use crate::symbol::module::Visibility;
 use aspect_macros::parse_rule;
 
 impl Parser {
-    /// Parse an `asm fn` declaration: a sibling of `extern fn`. Where an
-    /// extern fn's body lives in another object file, an asm fn's body *is*
-    /// the given instructions.
-    ///
-    /// Unlike an ordinary fn the body is parsed inline rather than deferred
-    /// to pass 2 — an asm body is string literals, so nothing in it can
-    /// forward-reference anything.
-    ///
-    /// Registering an ordinary `FunctionSymbol` at the end is what makes call
-    /// sites ordinary: `lookup_function`, the type checker and call codegen
-    /// all treat this exactly like any other function with a body.
-    /// `pos` is the `asm` keyword, already consumed by the caller's
-    /// kind-modifier scan.
+    /// An asm fn's body *is* the given instructions. Parsed inline, not deferred
+    /// to pass 2 — an asm body is string literals with nothing to
+    /// forward-reference. Registering an ordinary `FunctionSymbol` at the end is
+    /// what makes call sites ordinary. `pos` is the already-consumed `asm`
+    /// keyword.
     #[parse_rule]
     pub(crate) fn parse_asm_function(
         &mut self,
@@ -45,7 +37,7 @@ impl Parser {
                     p.peek().pos,
                 ));
             }
-            p.advance(); // ':'
+            p.advance();
             param_regs.push(p.parse_asm_reg()?);
             Ok((param_type, param_name))
         })?;
@@ -74,9 +66,8 @@ impl Parser {
             return Err(ParserError::AsmMissingReturnRegister(name.clone(), pos));
         }
 
-        // `clobbers` is contextual — a plain identifier, never a keyword — so
-        // it stays usable as an ordinary name elsewhere. The clause is
-        // optional and may sit on its own line.
+        // `clobbers` is a contextual identifier (never a keyword), so it stays
+        // usable as an ordinary name elsewhere. Optional; may be on its own line.
         skip_nl!();
         let clobbers = if matches!(&self.peek().kind, TokenKind::Identifier(n) if n == "clobbers") {
             self.advance();
@@ -126,13 +117,11 @@ impl Parser {
         })
     }
 
-    /// Parse a `naked fn` declaration. Like `asm fn`, the body *is* its
-    /// instructions — but a naked function carries LLVM's `naked` attribute (no
-    /// prologue/epilogue), so it takes ordinary (un-pinned) parameters that
-    /// arrive in their platform-ABI registers and the asm body addresses
-    /// directly. Its motivating use is a freestanding `_start` that reads
-    /// `argc`/`argv` off the stack. `pos` is the `naked` keyword, already
-    /// consumed by the caller's kind-modifier scan.
+    /// Like `asm fn`, but with LLVM's `naked` attribute (no prologue/epilogue),
+    /// so it takes ordinary un-pinned parameters that arrive in their
+    /// platform-ABI registers for the body to address directly. Motivating use:
+    /// a freestanding `_start` reading `argc`/`argv` off the stack. `pos` is the
+    /// already-consumed `naked` keyword.
     #[parse_rule]
     pub(crate) fn parse_naked_function(
         &mut self,
@@ -148,9 +137,8 @@ impl Parser {
         let name = ident!();
         token!(OpenParen);
 
-        // Ordinary parameters — no register pins. A naked fn receives its
-        // arguments per the platform ABI (SysV: rdi, rsi, …); the asm body
-        // reads them where the ABI leaves them.
+        // No register pins: a naked fn receives its arguments per the platform
+        // ABI (SysV: rdi, rsi, …) for the asm body to read where they land.
         let params = self.parse_comma_separated(&TokenKind::CloseParen, |p| {
             let param_type = p.parse_type()?;
             let param_name = p.parse_ident("parameter name")?;
@@ -197,11 +185,9 @@ impl Parser {
         })
     }
 
-    /// Parse an inline-asm body block: `{ "line" "line" … }`, one string
-    /// literal per line. Consumed as raw tokens, NOT through expression
-    /// parsing — asm lines must never land in the program's string-literal
-    /// table. Shared by `asm fn` and `naked fn`; emptiness is the caller's
-    /// error to report (with the right declaration position).
+    /// `{ "line" "line" … }`, one string literal per line. Consumed as raw
+    /// tokens, NOT through expression parsing — asm lines must never land in the
+    /// program's string-literal table. Emptiness is the caller's error to report.
     fn parse_asm_body_lines(&mut self) -> Result<Vec<String>, ParserError> {
         self.expect(&TokenKind::OpenBrace, "{")?;
         let mut lines: Vec<String> = Vec::new();
@@ -228,11 +214,10 @@ impl Parser {
         Ok(lines)
     }
 
-    /// Consume one contextual register name. Register names are ordinary
-    /// identifiers — meaningful only after a `:` in an `asm fn` signature or
-    /// inside `clobbers(...)` — so `rax` stays usable as a variable name
-    /// everywhere else in the language. Validating the name against the
-    /// target's register table is the type checker's job, not the parser's.
+    /// Register names are ordinary identifiers, meaningful only after a `:` or
+    /// inside `clobbers(...)`, so `rax` stays usable as a variable name
+    /// elsewhere. Validating against the target's register table is the type
+    /// checker's job.
     fn parse_asm_reg(&mut self) -> Result<crate::parser::AsmReg, ParserError> {
         let pos = self.peek().pos;
         match &self.peek().kind {

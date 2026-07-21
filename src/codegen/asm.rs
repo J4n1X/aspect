@@ -50,11 +50,8 @@ pub(crate) fn constraint_string(spec: &AsmSpec) -> String {
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
-    /// Lower an `asm fn` to a real, internal, `alwaysinline` LLVM function
-    /// whose body is a single inline-asm call plus a return.
-    ///
-    /// The function itself was already declared from its `proto` in pass 1,
-    /// exactly like any other function — this only fills in the body.
+    /// The function was already declared from its `proto` in pass 1; this only
+    /// fills in the body (a single inline-asm call plus a return).
     pub(crate) fn generate_asm_function(
         &mut self,
         func: &Function,
@@ -75,10 +72,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
 
-        // Reuse the declared type rather than rebuilding it: `create_inline_asm`
-        // and `build_indirect_call` must be handed the *identical* FunctionType,
-        // and inkwell does not check — a mismatch only surfaces at
-        // `module.verify()`, far from its cause.
+        // `create_inline_asm` and `build_indirect_call` must get the *identical*
+        // FunctionType, and inkwell doesn't check — a mismatch only surfaces at
+        // `module.verify()`, far from its cause. So reuse the declared type.
         let fn_type = function.get_type();
 
         let asm_ptr = self.context.create_inline_asm(
@@ -106,17 +102,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
-    /// Lower a `naked fn` to a real LLVM function carrying the `naked`
-    /// attribute (no prologue/epilogue), whose body is a single side-effecting
-    /// inline-asm block followed by `unreachable`.
-    ///
-    /// Unlike `asm fn`, there is no register contract and no operands: with no
-    /// prologue, arguments stay in their ABI-incoming registers and any result
-    /// leaves through the ABI return register, so the asm body owns the whole
-    /// calling convention. `noinline` because a naked body cannot be spliced
-    /// into a caller. The `unreachable` terminator is correct because control
-    /// leaves only through the asm's own `ret`/`jmp`/`syscall`, never by
-    /// falling through.
+    /// A `naked` (no prologue/epilogue) function whose body is one side-effecting
+    /// inline-asm block plus `unreachable`. No register contract or operands:
+    /// arguments stay in their ABI-incoming registers and the asm body owns the
+    /// calling convention. `noinline` because a naked body can't be spliced into
+    /// a caller; `unreachable` because control leaves only through the asm's own
+    /// `ret`/`jmp`/`syscall`.
     pub(crate) fn generate_naked_function(
         &mut self,
         func: &Function,

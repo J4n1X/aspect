@@ -8,11 +8,8 @@ use aspect::parser::{Parser, Program};
 use aspect::target::TargetSpec;
 use aspect::typechecker::TypeChecker;
 
-/// Preprocess a source file with extra compiler flags from a
-/// `# compile_args:` annotation. Supported flags: `-D NAME[=VALUE]` (seeds
-/// the define table before the entry file) and `-I DIR` (module search
-/// root). Flags and their values are separate annotation strings, mirroring
-/// the CLI: `# compile_args: "-D", "DEBUG=1"`.
+/// Applies `# compile_args:` flags (`-D NAME[=VALUE]`, `-I DIR`). Flag and
+/// value are separate annotation strings, mirroring the CLI.
 fn preprocess_with_args(
     source_path: &str,
     compile_args: &[String],
@@ -142,7 +139,7 @@ fn run_at_opt(
         .generate(&program)
         .map_err(|e| format!("Code generation failed at -O{opt_level}: {e}"))?;
 
-    // Run the optimizer over it to catch any codegen issues that would cause optimization to fail
+    // Run the optimizer to catch codegen issues that only surface there.
     if opt_level > 0 {
         codegen
             .optimize(opt_level, true)
@@ -158,18 +155,11 @@ fn run_at_opt(
         .map_err(|e| format!("JIT execution failed at -O{opt_level}: {e}"))
 }
 
-/// Compile and JIT-execute a Aspect program in-process, returning `main`'s
-/// `i32` return value. `compile_args` holds `# compile_args:` flags for the
-/// preprocessor (`-D`/`-I`).
-///
-/// Every program runs at **both** `-O0` and `-O2`, and the two must agree.
-/// Optimization level is not a detail the corpus can be indifferent to: `-O0`
-/// and `-O1+` take materially different paths — an `asm fn`, for one, stays a
-/// real call at `-O0` and is folded into its caller by `alwaysinline` at
-/// `-O1+`. Running only `-O2` (as this harness used to) left every unoptimised
-/// lowering untested; running only `-O0` would never exercise the optimizer.
-/// A disagreement between the two is itself the finding, so it is reported as
-/// such rather than being resolved in favour of either.
+/// Runs every program at **both** `-O0` and `-O2`, which must agree. The two
+/// take materially different paths — an `asm fn` stays a real call at `-O0` but
+/// is folded by `alwaysinline` at `-O1+` — so running only one level leaves
+/// either the unoptimised lowering or the optimizer untested. A disagreement is
+/// itself the finding, reported rather than resolved.
 fn compile_and_run_with_args(
     source_path: &str,
     args: &[String],

@@ -1,47 +1,22 @@
 //! `$module <path>` / `$import <path>` — module identity and loading.
 //!
 //! v1 modules are **load units, not namespaces**: an import splices the
-//! module's files into the token stream, and
-//! all symbols land in the flat global table. What this stage adds is
-//! *identity*: which module each file belongs to, and which modules each
-//! module directly imports. The later visibility phase enforces
-//! non-transitive imports on top of that data (see
-//! `doc/plans/Preprocessor-Infrastructure.md` § Modules).
+//! module's files into the token stream and all symbols land in the flat
+//! global table. What this stage adds is *identity* — which module each file
+//! belongs to and which modules it directly imports — for the later
+//! visibility phase to enforce non-transitive imports on top of.
 //!
-//! ## Path grammar
+//! Module paths are `segment('/'segment)*` of bare identifier tokens (no
+//! quotes). `$import <path>` searches each `-I` root **in flag order** for a
+//! `<root>/<path>.ap` single-file module or a `<root>/<path>/` directory of
+//! `.ap` files (non-recursive, sorted). The first root offering either form
+//! wins; a root offering *both* is an error. There is deliberately **no tree
+//! scanning** — the import path is the location contract. Each loaded file's
+//! `$module` must declare exactly the imported path, or the import errors.
 //!
-//! `segment('/'segment)*` — segments are bare identifier tokens, no quotes,
-//! nothing after the path. `$module std/math` and `$import std/math` share
-//! the grammar ([`parse_module_path`]).
-//!
-//! ## Resolution: convention + verification
-//!
-//! `$import <path>` searches each `-I` root **in flag order** for exactly
-//! two shapes ([`resolve_module_files`]):
-//!
-//! - **file form** — `<root>/<path>.ap`, a single-file module;
-//! - **directory form** — every `.ap` file *directly* inside
-//!   `<root>/<path>/` (non-recursive; subdirectories are submodules and are
-//!   imported explicitly), loaded in sorted filename order.
-//!
-//! The first root offering either form wins; a root offering *both* is an
-//! error; nothing in any root is an error listing every candidate tried.
-//! There is deliberately **no tree scanning** — the import path is the
-//! location contract.
-//!
-//! `$module` is then the *verified identity*: every file loaded for an
-//! import must declare exactly the imported path, or the import is a hard
-//! error naming the file, its declaration (or the lack of one), and the
-//! import that pulled it in.
-//!
-//! ## Import-once
-//!
-//! Importing the same module twice — directly or diamond-shaped — loads it
-//! once; the module registry is marked *before* the module's files are
-//! processed, so import cycles (A imports B imports A) terminate. Later
-//! imports of an already-loaded module still record the dependency edge for
-//! the visibility phase. Canonical-path file dedup
-//! ([`Preprocessor::process_file`]) remains as a second guard underneath.
+//! Import-once is by module identity, marked *before* the module's files are
+//! processed so cycles (A imports B imports A) terminate; later imports of an
+//! already-loaded module still record the dependency edge.
 
 use std::fs;
 use std::path::PathBuf;
@@ -50,11 +25,8 @@ use crate::lexer::{Position, Token, TokenKind};
 
 use super::{PreprocessError, Preprocessor};
 
-/// Handle `$module <path>`: record the current file's module identity.
-///
 /// At most one `$module` per file, and it must appear before any
-/// non-directive token of the file (blank lines, comments, and other
-/// directives don't count as content).
+/// non-directive token (blank lines, comments, and directives don't count).
 pub(crate) fn handle_module(
     pp: &mut Preprocessor,
     rest: &[Token],
@@ -77,10 +49,9 @@ pub(crate) fn handle_module(
     Ok(())
 }
 
-/// Handle `$import <path>`: record the dependency edge, and — the first
-/// time this module path is imported anywhere in the compilation — resolve
-/// it against the `-I` roots, load every file of the module, and verify
-/// each file's `$module` declaration against the import path.
+/// Records the dependency edge, and — the first time this module path is
+/// imported anywhere — resolves it against the `-I` roots, loads every file,
+/// and verifies each file's `$module` against the import path.
 pub(crate) fn handle_import(
     pp: &mut Preprocessor,
     rest: &[Token],
@@ -122,8 +93,7 @@ pub(crate) fn handle_import(
     Ok(())
 }
 
-/// Parse a module path (`segment('/'segment)*`) from the directive line's
-/// remaining tokens. Returns the canonical `a/b/c` string form.
+/// Returns the canonical `a/b/c` string form.
 pub(crate) fn parse_module_path(
     directive: &'static str,
     rest: &[Token],
@@ -178,10 +148,8 @@ pub(crate) fn parse_module_path(
     Ok(path)
 }
 
-/// Resolve an import path to the on-disk files of the module, per `-I` root
-/// in flag order (see the module docs for the file/directory forms). The
-/// returned list is non-empty and deterministic (directory-form files are
-/// sorted by name).
+/// The returned list is non-empty and deterministic (directory-form files
+/// are sorted by name).
 pub(crate) fn resolve_module_files(
     roots: &[PathBuf],
     module: &str,
@@ -253,8 +221,6 @@ mod tests {
     use super::super::{preprocess_str, preprocess_str_full, PreprocessedSource, Preprocessor};
     use super::*;
 
-    /// The checked-in fixture tree (primary `-I` root) used by these tests
-    /// and mirrored by the `tests/programs/module_*.ap` integration tests.
     fn fixture_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests")
@@ -268,7 +234,6 @@ mod tests {
             .join("modules_alt")
     }
 
-    /// Preprocess an in-memory entry file against the given search roots.
     fn run(source: &str, roots: &[PathBuf]) -> Result<PreprocessedSource, PreprocessError> {
         let mut pp = Preprocessor::new();
         for root in roots {
@@ -277,8 +242,6 @@ mod tests {
         preprocess_str_full(pp, source)
     }
 
-    /// The imports recorded for `module`, panicking when the module has no
-    /// entry at all.
     fn imports_of<'a>(src: &'a PreprocessedSource, module: &str) -> &'a [String] {
         src.imports
             .get(module)
@@ -385,7 +348,6 @@ mod tests {
             src.modules,
             vec![(0, String::new()), (1, "mathlib".to_string())]
         );
-        // The module's tokens really are in the stream.
         assert!(src
             .tokens
             .iter()
@@ -553,8 +515,8 @@ mod tests {
 
     // ── Define scoping ──────────────────────────────────────────────────
 
-    /// True iff any emitted token is the identifier `name` (i.e. it was left
-    /// unexpanded), false when every occurrence was substituted away.
+    /// True when `name` survived as a bare identifier — i.e. was *not*
+    /// substituted away.
     fn has_identifier(src: &PreprocessedSource, name: &str) -> bool {
         src.tokens
             .iter()

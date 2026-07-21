@@ -2,10 +2,8 @@ use crate::lexer::{LangType, Position};
 use crate::scope::ScopeStack;
 use thiserror::Error;
 
-/// Errors produced when mutating the symbol table.
-///
-/// These carry no source position — the caller knows the offending site and
-/// attaches it when converting to a `ParserError`.
+/// Positionless — the caller knows the offending site and attaches it when
+/// converting to a `ParserError`.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SymbolError {
     #[error("variable '{0}' is already declared in this scope")]
@@ -27,11 +25,8 @@ pub struct Symbol {
 
 pub type VarSymbol = Symbol;
 
-/// Function symbol.
-///
-/// Stored in [`crate::symbol::module::ModuleSymbols`] (the cross-phase table).
-/// Kept here alongside [`SymbolError`] because the parser builds these while it
-/// parses; the symbol *table* below only manages variable scopes.
+/// Stored in [`crate::symbol::module::ModuleSymbols`], but defined here because
+/// the parser builds these while it parses.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionSymbol {
     pub name: String,
@@ -39,24 +34,17 @@ pub struct FunctionSymbol {
     pub return_type: LangType,
     pub is_extern: bool,
     pub has_body: bool,
-    /// Module visibility — whether another module may call this function
-    /// through `$import`. Mirrors [`crate::parser::ast::FunctionProto::vis`];
-    /// stored here so the parser's call-resolution can enforce it (the
-    /// function/global analogue of the `public type` gate). Independent of
-    /// LLVM linkage.
+    /// Whether another module may call this through `$import` — mirrors
+    /// [`crate::parser::ast::FunctionProto::vis`], stored here so call
+    /// resolution can enforce it. Independent of LLVM linkage.
     pub vis: crate::symbol::module::Visibility,
     pub pos: Position,
 }
 
-/// Transient, parse-time table of variable scopes.
-///
-/// Functions, type-structs, and aliases live in
-/// [`crate::symbol::module::ModuleSymbols`] (which rides on the `Program`).
-/// This table holds only the lexical variable scopes the parser needs while
-/// parsing function bodies, and is discarded once parsing completes.
+/// The transient, parse-time variable scopes, discarded once parsing completes
+/// (global symbols live in [`crate::symbol::module::ModuleSymbols`]).
 #[derive(Debug)]
 pub struct SymbolTable {
-    /// Lexical scopes mapping variable names to their symbols.
     var_scopes: ScopeStack<VarSymbol>,
 }
 
@@ -82,7 +70,6 @@ impl SymbolTable {
         self.var_scopes.exit();
     }
 
-    /// Add a variable to the current scope
     /// # Errors
     /// Returns [`SymbolError::DuplicateVariable`] if a variable of the same name
     /// already exists in the current scope.
@@ -104,16 +91,15 @@ impl SymbolTable {
         Ok(())
     }
 
-    /// Look up a variable in all scopes (from innermost to outermost)
+    /// Searches innermost scope outward.
     #[must_use]
     pub fn lookup_variable(&self, name: &str) -> Option<&VarSymbol> {
         self.var_scopes.lookup(name)
     }
 
-    /// Like [`SymbolTable::lookup_variable`], additionally reporting whether
-    /// the binding is a *global* (lives in the outermost scope). The
-    /// import-visibility check applies to globals only — locals and
-    /// parameters are same-function by construction.
+    /// Also reports whether the binding is a *global* (outermost scope) — the
+    /// import-visibility check applies to globals only, locals being
+    /// same-function by construction.
     #[must_use]
     pub fn lookup_variable_scoped(&self, name: &str) -> Option<(&VarSymbol, bool)> {
         self.var_scopes.lookup_scoped(name)

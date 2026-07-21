@@ -87,18 +87,15 @@ pub struct Parser {
     /// moved into `Program` at the end of `parse_program` so the type checker
     /// inherits it for its own error formatting.
     pub(crate) source_files: Vec<std::path::PathBuf>,
-    /// Module of each file, indexed by `Position::file_id` (parallel to
-    /// `source_files`). Set via [`Parser::with_module_info`]; files without
-    /// an entry — including everything when no module info was threaded —
-    /// belong to the anonymous root module `""`.
+    /// Module of each file, indexed by `Position::file_id`. Files without an
+    /// entry — including everything when no module info was threaded — belong
+    /// to the anonymous root module `""`.
     file_modules: Vec<String>,
-    /// Module → its *direct* imports, from the preprocessor. Drives the
-    /// import-visibility check ([`Parser::check_import_visibility`]).
+    /// Module → its *direct* imports, driving the import-visibility check.
     module_imports: std::collections::HashMap<String, Vec<String>>,
-    /// Global-variable name → its module visibility. Globals live in the
-    /// parser's outermost variable scope, whose `Symbol` carries no
-    /// visibility, so the reference-site public/private gate reads it here.
-    /// Names are program-unique (the outer scope rejects duplicates).
+    /// Global-variable name → module visibility: globals live in the outermost
+    /// variable scope, whose `Symbol` carries no visibility, so the
+    /// reference-site gate reads it here.
     pub(crate) global_vis: std::collections::HashMap<String, crate::symbol::module::Visibility>,
 }
 
@@ -139,11 +136,8 @@ impl Parser {
         self
     }
 
-    /// Set the module registry from the preprocessor: each file's module (one
-    /// entry per file in `file_id` order, mirroring
-    /// `PreprocessedSource::modules`) and each module's *direct* imports.
-    /// Enables the import-visibility check — without this, every file belongs
-    /// to the anonymous root module `""` and every reference is same-module.
+    /// Enables the import-visibility check. Without this, every file belongs to
+    /// the anonymous root module `""` and every reference is same-module.
     #[must_use]
     pub fn with_module_info(
         mut self,
@@ -198,17 +192,11 @@ impl Parser {
         ))
     }
 
-    /// Visibility check for *using* a type-struct: naming it (type
-    /// annotation, struct literal, the `Type` in a static `Type.method`
-    /// reference) or calling any of its methods, including on an instance.
-    /// Two gates, in order: the defining module must be the referring module
-    /// or one of its direct imports (the general import rule), and a
-    /// cross-module use additionally requires the struct to be declared
-    /// `public type` (module encapsulation). A member's own `public` is
-    /// capped by the type's: a public method of a private type is visible
-    /// module-wide but never outside it. Values of a foreign private type
-    /// may still *flow* through outside code (returned from and passed back
-    /// into the defining module's public functions).
+    /// Two gates for naming a type-struct (or calling its methods): the general
+    /// import rule, plus a cross-module use additionally requiring `public
+    /// type`. A member's own `public` is capped by the type's — a public method
+    /// of a private type is module-visible only. Values of a foreign private
+    /// type may still *flow* through outside code.
     fn check_struct_visibility(&self, id: u32, use_pos: Position) -> Result<(), ParserError> {
         let info = self.module.struct_info(id);
         self.check_import_visibility("type-struct", &info.name, info.file_id, use_pos)?;
@@ -222,11 +210,8 @@ impl Parser {
         Ok(())
     }
 
-    /// Visibility check for *using* an enum: naming it (type annotation) or
-    /// referencing one of its variants (`Enum.Variant`). The enum twin of
-    /// [`Self::check_struct_visibility`]: the defining module must be the
-    /// referring module or one of its direct imports, and a cross-module use
-    /// additionally requires the enum to be declared `public enum`.
+    /// The enum twin of [`Self::check_struct_visibility`]: the import rule plus
+    /// a cross-module use requiring `public enum`.
     fn check_enum_visibility(&self, id: u32, use_pos: Position) -> Result<(), ParserError> {
         let info = self.module.enum_info(id);
         self.check_import_visibility("enum", &info.name, info.file_id, use_pos)?;
@@ -240,18 +225,12 @@ impl Parser {
         Ok(())
     }
 
-    /// Visibility check for *using* a free function or global variable: the
-    /// function/global analogue of [`Self::check_struct_visibility`]. Two gates:
-    /// the defining module must be the referring module or one of its direct
-    /// imports, and a cross-module use additionally requires the symbol to be
-    /// declared `public` (the default is module-private). `def_file_id` is the
-    /// symbol's defining file and `vis` its declared module visibility.
+    /// The free-function/global analogue of [`Self::check_struct_visibility`]:
+    /// the import rule plus a cross-module use requiring `public`.
     ///
     /// Mangled method names (containing `$`) are exempt from the `public` gate:
-    /// a method's cross-module reach is governed by its type's visibility
-    /// ([`Self::check_struct_visibility`]) and its own `MethodSig.vis`, checked
-    /// in the type checker — not by the mangled free-function name, which is
-    /// always private.
+    /// a method's cross-module reach is governed by its type's visibility and
+    /// its own `MethodSig.vis`, checked in the type checker.
     fn check_name_visibility(
         &self,
         kind: &'static str,
@@ -389,7 +368,6 @@ impl Parser {
         }
     }
 
-    /// Expect a specific token kind and consume it
     pub(crate) fn expect(
         &mut self,
         kind: &TokenKind,
@@ -534,7 +512,6 @@ impl Parser {
         self.parse_cast()
     }
 
-    /// Parse cast expressions (expr as type)
     fn parse_cast(&mut self) -> Result<Expression, ParserError> {
         let mut expr = self.parse_unary()?;
 
@@ -556,7 +533,6 @@ impl Parser {
         Ok(expr)
     }
 
-    /// Parse unary expressions (`-`, `!`, `&`, `*`, `~`)
     pub(crate) fn parse_unary(&mut self) -> Result<Expression, ParserError> {
         let pos = self.peek().pos;
 
@@ -602,9 +578,8 @@ impl Parser {
                 self.advance();
                 let expr = self.parse_unary()?;
 
-                // Fold negation into numeric literals so that e.g. `-128` becomes
-                // `Literal(Integer(-128))` with the correct type, enabling coercion to
-                // narrow signed types like i8 without an explicit cast.
+                // Fold negation into a numeric literal so `-128` becomes one
+                // node, letting it coerce to narrow signed types (i8) uncast.
                 match &expr.kind {
                     ExprKind::Literal(LiteralValue::Integer(val)) => {
                         let neg = -(*val);
@@ -650,8 +625,6 @@ impl Parser {
             TokenKind::LogicalNot => {
                 self.advance();
                 let expr = self.parse_unary()?;
-
-                // Logical not locally yields a boolean.
                 let result_type = LangType::BOOL;
 
                 Ok(Expression::new(
@@ -675,8 +648,7 @@ impl Parser {
         }
     }
 
-    /// Parse postfix expressions (function calls, array access).
-    /// Loops so that chained operations like arr[i][j] or f()() parse correctly.
+    /// Loops so chained operations like `arr[i][j]` or `f()()` parse correctly.
     fn parse_postfix(&mut self) -> Result<Expression, ParserError> {
         let mut expr = self.parse_primary()?;
 
@@ -701,7 +673,6 @@ impl Parser {
         Ok(expr)
     }
 
-    /// Parse function call (after opening paren)
     fn parse_function_call(&mut self, callee: &Expression) -> Result<Expression, ParserError> {
         let pos = callee.pos;
 
@@ -716,9 +687,7 @@ impl Parser {
             let return_type = func_symbol.return_type;
             let def_file_id = func_symbol.pos.file_id;
             let def_vis = func_symbol.vis;
-            // `variable_reference` already vetted the ref, but keep the call
-            // site guarded in its own right (defense in depth — the check is
-            // one hash lookup).
+            // Defense in depth: `variable_reference` already vetted the ref.
             self.check_name_visibility("function", &func_name, def_file_id, def_vis, pos)?;
 
             let args = self.parse_comma_separated(&TokenKind::CloseParen, Self::parse_expression)?;
@@ -797,7 +766,6 @@ impl Parser {
         }
     }
 
-    /// Parse primary expressions (literals, identifiers, parenthesized expressions)
     fn parse_primary(&mut self) -> Result<Expression, ParserError> {
         let pos = self.peek().pos;
 
@@ -835,10 +803,9 @@ impl Parser {
                 self.advance();
                 Ok(Self::bool_literal(value, pos))
             }
-            // `null` — the untyped null pointer. Stamps `u8*` as a placeholder
-            // (any single-pointer type would do — pointer-to-pointer coercion
-            // is structural by depth, not by base). The type checker upgrades
-            // the stamp to the contextual target in `check` mode.
+            // `null` stamps `u8*` as a placeholder (any single-pointer type
+            // would do — coercion is structural by depth). The checker upgrades
+            // it to the contextual target in `check` mode.
             TokenKind::Keyword(Keyword::Null) => {
                 self.advance();
                 let placeholder = LangType::U8_PTR;
@@ -867,7 +834,7 @@ impl Parser {
         }
     }
 
-    /// Build an integer-literal node, choosing the smallest signed type that fits.
+    /// Chooses the smallest signed type that fits.
     fn integer_literal(value: i64, pos: Position) -> Expression {
         let expr_type = if value >= i32::MIN as i64 && value <= i32::MAX as i64 {
             LangType::I32
@@ -877,13 +844,11 @@ impl Parser {
         Expression::new(ExprKind::Literal(LiteralValue::Integer(value)), expr_type, pos)
     }
 
-    /// Build a float-literal node (default type `f64`).
     fn float_literal(value: f64, pos: Position) -> Expression {
         let expr_type = LangType::F64;
         Expression::new(ExprKind::Literal(LiteralValue::Float(value)), expr_type, pos)
     }
 
-    /// Build a boolean-literal node (`true`/`false`).
     fn bool_literal(value: bool, pos: Position) -> Expression {
         let expr_type = LangType::BOOL;
         Expression::new(ExprKind::Literal(LiteralValue::Bool(value)), expr_type, pos)
@@ -949,45 +914,35 @@ impl Parser {
         ))
     }
 
-    /// Parse a type (including array types like u32[4])
     pub(crate) fn parse_type(&mut self) -> Result<LangType, ParserError> {
         let pos = self.peek().pos;
         let kind = self.peek().kind.clone();
         match kind {
-            // `const <type>` for a *named* base (`const Point*`, `const MyAlias`)
-            // or a re-split builtin (`const u8[MAX]` after define substitution):
-            // the scanner only fuses `const` with a built-in scalar spelling, so
-            // anything else arrives as a bare `const` keyword here. Const applies
-            // to the whole resolved type — under "const is truly immutable" it is
-            // a single flag, so we simply parse the inner type and set it.
+            // A bare `const` keyword reaches here only for a *named* base or a
+            // re-split builtin (`const u8[MAX]` after define substitution) — the
+            // scanner fuses `const` with built-in scalar spellings. `const` is a
+            // single flag over the whole resolved type.
             TokenKind::Keyword(Keyword::Const) => {
                 self.advance();
                 let inner = self.parse_type()?;
                 Ok(inner.with_const(true))
             }
-            // Built-in types usually arrive pre-folded from the lexer
-            // (`u8[10]*` is one token), but the scanner only folds `[N]` for
-            // literal N — `u8[MAX_SIZE]` reaches us as `u8` `[` `1024` `]`
-            // after define substitution, so the trailing modifiers must be
-            // (re-)applied here too.
+            // Usually pre-folded (`u8[10]*` is one token), but the scanner only
+            // folds `[N]` for literal N — `u8[MAX_SIZE]` reaches us as `u8` `[`
+            // `1024` `]` after define substitution, so re-apply the modifiers.
             TokenKind::LangType(lang_type) => {
                 self.advance();
                 Ok(self.apply_type_modifiers(lang_type))
             }
-            // Named types: aliases and type-structs. The lexer leaves these as
-            // bare identifiers (it cannot know the declared type names), so we
+            // Named types (aliases, type-structs) lex as bare identifiers, so
             // resolve them against the module table — enforcing import
-            // visibility against each name's declaring file — and attach any
-            // `*` pointer modifiers here (built-in types arrive pre-folded
-            // from the lexer).
+            // visibility against each name's declaring file.
             TokenKind::Identifier(name) => {
                 self.advance();
                 let base = if let Some(info) = self.module.alias_info(&name) {
                     self.check_import_visibility("type alias", &name, info.file_id, pos)?;
-                    // An alias is a name binding, not an export: aliasing a
-                    // type-struct or enum does not launder its module
-                    // visibility, so the underlying type is checked as if named
-                    // directly.
+                    // Aliasing does not launder module visibility, so the
+                    // underlying type is checked as if named directly.
                     if let TypeBase::Struct(id) = info.ty.base {
                         self.check_struct_visibility(id, pos)?;
                     } else if let TypeBase::Enum(id) = info.ty.base {
@@ -1005,11 +960,9 @@ impl Parser {
                 };
                 Ok(self.apply_type_modifiers(base))
             }
-            // Parenthesised type: `(T)` — purely a grouping marker. The lexer
-            // greedily folds `T[N]` and `T*` into the preceding type token, so
-            // parens are the only way to spell things like "array of pointers"
-            // (`(i32*)[3]`) or "array of fn-pointers" (`(fn(...) -> R)[N]`).
-            // The grouped type composes with the normal trailing modifiers.
+            // Parens are the only way to spell "array of pointers" (`(i32*)[3]`)
+            // or "array of fn-pointers": the lexer greedily folds `T[N]`/`T*`
+            // into the preceding type token.
             TokenKind::OpenParen => {
                 self.advance();
                 let inner = self.parse_type()?;
@@ -1040,17 +993,12 @@ impl Parser {
         }
     }
 
-    /// Consume trailing pointer (`*`) modifiers on a named type and apply them.
-    ///
-    /// Built-in types arrive from the lexer with `*`/`[N]` already folded in;
-    /// named types (aliases / type-structs) lex as a bare identifier, so the
-    /// parser attaches pointer modifiers here. Stacks on top of any pointer
-    /// depth the resolved type already carries (e.g. `alias P u8*` then `P*`
-    /// yields `pointer_depth == 2`).
+    /// Attaches `[N]`/`*` modifiers to a named type (built-in types arrive
+    /// pre-folded). Stacks on any depth the resolved type already carries
+    /// (`alias P u8*` then `P*` yields `pointer_depth == 2`).
     fn apply_type_modifiers(&mut self, mut ty: LangType) -> LangType {
-        // Mirror the built-in lexer's order: array suffix first, then pointer
-        // depth. Restore the cursor on a malformed `[`, so a later `[i]`
-        // (index expression) isn't accidentally consumed here.
+        // Array suffix first, then pointer depth (the lexer's order). Restore
+        // the cursor on a malformed `[` so a later index `[i]` isn't consumed.
         if ty.array_size.is_none() && self.check(&TokenKind::OpenBracket) {
             let saved_current = self.current;
             self.advance();
@@ -1178,14 +1126,10 @@ impl Parser {
         match self.peek().kind {
             TokenKind::LangType(alloc_type) => {
                 self.advance();
-                // The scanner greedily folds `type[<digits>]` (e.g. `u8[256]`)
-                // into a single `LangType` token carrying `array_size = Some(n)`,
-                // so no separate `[` survives for the explicit path below. Accept
-                // that folded spelling by synthesising the count from the folded
-                // size. `u8[n]` and `u8[(256)]` never fold (the fold only fires on
-                // bare digits), so they still take the explicit-bracket path.
-                // Note this is stack (inside a function) or BSS (module scope)
-                // allocation, not heap — see `generate_alloc`.
+                // The scanner folds `type[<digits>]` (`u8[256]`) into one token
+                // carrying `array_size`; synthesise the count from it. `u8[n]`
+                // and `u8[(256)]` don't fold and take the explicit-bracket path.
+                // This is stack/BSS allocation, not heap — see `generate_alloc`.
                 let (elem_type, count_expr) = if let Some(n) = alloc_type.array_size {
                     (
                         LangType {
@@ -1223,31 +1167,25 @@ impl Parser {
         }
     }
 
-    /// Parse a `.ident` postfix — the `.` was already consumed. The followup
-    /// distinguishes two forms:
-    /// - `base.method(args)` → a method call, desugared to a `FunctionCall`
-    ///   with the mangled name `Type$method` (autorefs value receivers; static
-    ///   form `Type.method(...)` carries no receiver).
-    /// - `base.field` → a `FieldAccess`, with a best-effort field-type stamp.
+    /// The `.` was already consumed. Distinguishes `base.method(args)` (a
+    /// method call desugared to `FunctionCall` with mangled name `Type$method`)
+    /// from `base.field` (a `FieldAccess`).
     fn parse_dot_postfix(&mut self, base: Expression) -> Result<Expression, ParserError> {
         let pos = base.pos;
         let name = self.parse_ident("field or method name")?;
 
-        // Method call: `.ident(args)` — only when `ident` is actually a method
-        // of the base's type. Otherwise (e.g. `.callback(` where `callback` is
-        // a *field* of function-pointer type), drop through to field access
-        // and let the postfix loop's `OpenParen` arm emit an indirect call.
+        // Method call only when `name` is actually a method of the base's type;
+        // otherwise (e.g. `.callback(` on a fn-pointer *field*) fall through to
+        // field access and let the postfix loop emit an indirect call.
         if self.check(&TokenKind::OpenParen) && self.identifier_is_method_of_base(&base, &name) {
             self.advance();
             let args = self.parse_comma_separated(&TokenKind::CloseParen, Self::parse_expression)?;
             return self.build_method_call(base, &name, args, pos);
         }
 
-        // Enum variant value: `EnumName.Variant` where `base` is a bare
-        // identifier naming a known enum, not shadowed by a local, and `name` is
-        // one of its variants. Resolves to a compile-time constant of the enum
-        // type (the variant's index). Mirrors the static `Type.method` path
-        // below. An unknown variant on a known enum is a precise parse error.
+        // Enum variant value `EnumName.Variant`: `base` names a known enum, not
+        // shadowed by a local. Resolves to a compile-time constant (the
+        // variant's index); an unknown variant is a precise parse error.
         if let ExprKind::Variable(var_name) = &base.kind
             && let Some(id) = self.module.enum_id(var_name)
             && self.symbol_table.lookup_variable(var_name).is_none()
@@ -1276,16 +1214,11 @@ impl Parser {
             }
         }
 
-        // Static reference to a method as a function-pointer *value*:
-        // `Type.method` with no following call (`base` names a known
-        // type-struct, not shadowed by a local, and `name` is one of its
-        // methods). Resolves to the method's mangled free function, typed
-        // from that function's *actual* signature — whose first parameter is
-        // already the receiver `Type*` — so the value is `fn(Type*, ...) -> R`
-        // and drops straight into a fn-ptr variable or dispatch table, called
-        // through the pointer with the receiver passed first. The bound form
-        // (`instance.method` as a value, carrying a receiver) stays out of
-        // scope and falls through to field access below.
+        // Static method as a function-pointer *value*: `Type.method` with no
+        // following call. Typed from the mangled function's *actual* signature
+        // — whose first parameter is already the receiver `Type*` — so the
+        // value is `fn(Type*, ...) -> R`. The bound form (`instance.method` as
+        // a value) is out of scope and falls through to field access.
         if let ExprKind::Variable(var_name) = &base.kind
             && let Some(id) = self.module.struct_id(var_name)
             && self.symbol_table.lookup_variable(var_name).is_none()
@@ -1308,7 +1241,6 @@ impl Parser {
             return Ok(Expression::new(ExprKind::FunctionRef(mangled), ty, pos));
         }
 
-        // Field access.
         let field_type = match base.expr_type.base {
             TypeBase::Struct(id) => self
                 .module

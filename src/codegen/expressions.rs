@@ -1,14 +1,6 @@
-//! Runtime expression code-generation: the `walk_expression` tree walker.
-//!
-//! `walk_expression` is the single recursive walker for the *runtime* path —
-//! it emits LLVM IR via the builder (`RuntimeEmitter`). Its compile-time
-//! counterpart, which folds constants in Rust and reconstructs LLVM constants
-//! (`ConstantEmitter`), lives in [`super::const_eval`]. The two were once a
-//! single `EmitMode`-parameterised walker; they are now split by path.
-//!
-//! Entry points on `CodeGenerator`:
-//! - `generate_expression` → `walk_expression` (runtime IR emission)
-//! - constant folding      → [`super::const_eval::const_eval`]
+//! Runtime expression code-generation: `walk_expression` emits LLVM IR via the
+//! builder (`RuntimeEmitter`). Its compile-time counterpart (`ConstantEmitter`)
+//! lives in [`super::const_eval`].
 
 use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::values::{BasicValue, BasicValueEnum, PointerValue};
@@ -25,10 +17,8 @@ use crate::parser::{BinaryOp, ExprKind, Expression, LiteralValue};
 
 // ─── Leaf-level helpers ───────────────────────────────────────────────────────
 
-/// Dispatch a non-pointer binary operation through the given emitter.
-///
-/// Shared by the runtime walker (`RuntimeEmitter`) and the constant evaluator
-/// (`ConstantEmitter`, in [`super::const_eval`]).
+/// Non-pointer binary op, shared by the runtime walker and the constant
+/// evaluator (`RuntimeEmitter` / `ConstantEmitter`).
 pub(crate) fn emit_binary_dispatch<'ctx>(
     e: &dyn ValueEmitter<'ctx>,
     left_val: BasicValueEnum<'ctx>,
@@ -111,16 +101,13 @@ fn emit_pointer_arithmetic<'ctx>(
 
 // ─── Main walker ──────────────────────────────────────────────────────────────
 
-/// Recursively evaluate `expr`, emitting runtime LLVM IR via the builder.
-///
-/// This is the runtime-only walker; compile-time constant folding lives in
+/// The runtime-only walker; compile-time folding lives in
 /// [`super::const_eval::const_eval`].
 pub(crate) fn walk_expression<'ctx>(
     expr: &Expression,
     cg: &mut CodeGenerator<'ctx>,
 ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
     match &expr.kind {
-        // ── Literals ──────────────────────────────────────────────────────
         ExprKind::Literal(lit) => match lit {
             LiteralValue::Integer(val) => RuntimeEmitter {
                 builder: &cg.builder,
@@ -143,7 +130,6 @@ pub(crate) fn walk_expression<'ctx>(
                 .into()),
         },
 
-        // ── Variable load ─────────────────────────────────────────────────
         ExprKind::Variable(name) => {
             let (ptr, llvm_type, lang_type, const_value) = {
                 let v = cg
@@ -196,9 +182,7 @@ pub(crate) fn walk_expression<'ctx>(
             Ok(loaded)
         }
 
-        // ── Binary operations ─────────────────────────────────────────────
         ExprKind::Binary { left, op, right } => {
-            // Evaluate sub-expressions first (recursive, needs &mut cg).
             let left_val = walk_expression(left, cg)?;
             let right_val = walk_expression(right, cg)?;
 
@@ -221,7 +205,6 @@ pub(crate) fn walk_expression<'ctx>(
             )
         }
 
-        // ── Comparison ────────────────────────────────────────────────────
         ExprKind::Comparison { left, op, right } => {
             let left_val = walk_expression(left, cg)?;
             let right_val = walk_expression(right, cg)?;
@@ -257,7 +240,6 @@ pub(crate) fn walk_expression<'ctx>(
             }
         }
 
-        // ── Address-of ────────────────────────────────────────────────────
         ExprKind::Reference(inner) => match &inner.kind {
             ExprKind::Variable(name) => {
                 let ptr = cg
@@ -294,7 +276,6 @@ pub(crate) fn walk_expression<'ctx>(
             }
         },
 
-        // ── Dereference ───────────────────────────────────────────────────
         ExprKind::Dereference(inner_expr) => {
             let ptr = walk_expression(inner_expr, cg)?;
             if inner_expr.expr_type.pointer_depth == 0 {
@@ -313,10 +294,8 @@ pub(crate) fn walk_expression<'ctx>(
                 .build_load(pointee_type, ptr.into_pointer_value(), "deref")?)
         }
 
-        // ── Function call ─────────────────────────────────────────────────
         ExprKind::FunctionCall { name, args } => cg.generate_function_call(name, args, expr.pos),
 
-        // ── Cast ──────────────────────────────────────────────────────────
         ExprKind::Cast {
             expr: inner,
             target_type,
@@ -332,10 +311,8 @@ pub(crate) fn walk_expression<'ctx>(
             .emit_cast(val, target_llvm, &inner.expr_type, target_type, inner.pos)
         }
 
-        // ── Alloc (stack alloc inside a function) ─────────────────────────
         ExprKind::Alloc { alloc_type, count } => cg.generate_alloc(alloc_type, count),
 
-        // ── Logical NOT ───────────────────────────────────────────────────
         ExprKind::UnaryNot(inner) => {
             let raw = walk_expression(inner, cg)?;
             // `!p` on a pointer is a null test: compare the address as an
@@ -362,19 +339,16 @@ pub(crate) fn walk_expression<'ctx>(
                 .into())
         }
 
-        // ── Bitwise NOT ───────────────────────────────────────────────────
         ExprKind::BitwiseNot(inner) => {
             let val = walk_expression(inner, cg)?.into_int_value();
             Ok(cg.builder.build_not(val, "bnottmp")?.into())
         }
 
-        // ── List initializer (always invalid as a standalone expression) ──
         ExprKind::ListInitializer(_) => Err(CodegenError::InvalidOperation(
             "list initializer is only valid in a variable declaration".to_string(),
             expr.pos,
         )),
 
-        // ── Field access `base.field` ─────────────────────────────────────
         ExprKind::FieldAccess { .. } => {
             let (field_ptr, field_ty) = cg.emit_address(expr)?;
             // Arrays decay to a pointer (matching the variable-load rule);
@@ -388,7 +362,6 @@ pub(crate) fn walk_expression<'ctx>(
             Ok(cg.builder.build_load(field_llvm, field_ptr, "field")?)
         }
 
-        // ── Struct literal `Name { f = v, ... }` ──────────────────────────
         ExprKind::StructLiteral { struct_id, fields } => {
             let struct_ty = *cg.struct_types.get(struct_id).ok_or_else(|| {
                 CodegenError::TypeError(
@@ -423,8 +396,7 @@ pub(crate) fn walk_expression<'ctx>(
             Ok(agg.into())
         }
 
-        // ── Function reference: bare function name as a value. Function
-        // addresses are LLVM-level constants (resolved at link time).
+        // A bare function name is a link-time-constant address.
         ExprKind::FunctionRef(name) => {
             let function = cg
                 .functions
@@ -434,29 +406,24 @@ pub(crate) fn walk_expression<'ctx>(
             Ok(function.as_global_value().as_pointer_value().into())
         }
 
-        // ── Enum variant value: a compile-time `i32` constant. ────────────
         ExprKind::EnumValue { value, .. } => {
             Ok(cg.context.i32_type().const_int(*value as u64, false).into())
         }
 
-        // ── Indirect call through a function-pointer value. ───────────────
         ExprKind::IndirectCall { callee, args } => cg.generate_indirect_call(callee, args),
 
-        // ── `sizeof(T)` — emit a `u64` constant from the target data layout.
         ExprKind::SizeOf(ty) => {
             let bytes = cg.sizeof_lang_type(ty, expr.pos)?;
             Ok(cg.context.i64_type().const_int(bytes, false).into())
         }
 
-        // ── `null` — opaque-ptr null constant. All pointer types lower to
-        // LLVM `ptr`, so one constant covers every target pointer type.
+        // All pointer types lower to LLVM `ptr`, so one null covers them all.
         ExprKind::Null => Ok(cg
             .context
             .ptr_type(inkwell::AddressSpace::default())
             .const_null()
             .into()),
 
-        // ── Value-block `{ ...; return v }` — executes statements. ─────────
         ExprKind::ValueBlock(stmts) => {
             cg.generate_value_block(stmts, expr.expr_type, expr.pos)
         }
@@ -469,7 +436,6 @@ pub(crate) fn walk_expression<'ctx>(
 // ─── impl CodeGenerator — expression entry-points ────────────────────────────
 
 impl<'ctx> CodeGenerator<'ctx> {
-    /// Generate code for an expression (runtime path).
     pub(crate) fn generate_expression(
         &mut self,
         expr: &Expression,
@@ -495,11 +461,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .into())
     }
 
-    /// Generate an expression (runtime path), coercing it to `target` when the
-    /// types differ.
-    ///
-    /// Integer/float literals assigned to a concrete target type are checked for
-    /// overflow at this stage and emitted directly at the target width.
+    /// Coerces the expression to `target` when the types differ. Integer/float
+    /// literals assigned to a concrete target are overflow-checked here and
+    /// emitted directly at the target width.
     pub(crate) fn generate_coerced_value(
         &mut self,
         expr: &Expression,
@@ -634,7 +598,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Ok(());
         }
 
-        // Fast path: all elements are integer/float literals -> emit a single ConstantArray store
+        // Fast path: all-literal elements emit one ConstantArray store.
         let all_const = elements.iter().all(|e| {
             matches!(
                 e.kind,
@@ -648,9 +612,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Ok(());
         }
 
-        // Runtime path: store each element via two-index GEP [0, i]
-        // This correctly addresses into a [N x elem] array pointer.
-        // i.e gep(array_ptr, [0, i]) = &(*array_ptr)[i]
+        // Runtime path: two-index GEP `[0, i]` addresses into the `[N x elem]`
+        // array pointer — `gep(array_ptr, [0, i]) == &(*array_ptr)[i]`.
         for (i, elem_expr) in elements.iter().enumerate() {
             let zero = self.context.i64_type().const_int(0, false);
             let index = self.context.i64_type().const_int(i as u64, false);

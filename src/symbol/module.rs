@@ -1,18 +1,14 @@
 //! Unified, cross-phase module symbol table.
 //!
 //! [`ModuleSymbols`] is the single authoritative table of a program's global
-//! symbols — functions, type-structs, enums, and aliases. It is built by the parser
-//! and rides on [`crate::parser::Program`] (like `string_literals`), so the
-//! type checker and code generator consume the *same* table rather than each
-//! re-deriving its own (which is how function signatures used to be tripled).
+//! symbols (functions, type-structs, enums, aliases). Built by the parser and
+//! riding on [`crate::parser::Program`], so the checker and codegen consume the
+//! *same* table. Struct *ids* are interned once at parse time and codegen's GEP
+//! field indices must agree with them, so the registry cannot be rebuilt per
+//! phase.
 //!
-//! Struct *ids* are an interning decision fixed once at parse time; codegen's
-//! GEP field indices must agree with them, so the registry genuinely cannot be
-//! rebuilt per phase — hence the shared home here.
-//!
-//! The parser's per-function *variable* scope is a separate, transient concern
-//! and lives in [`crate::symbol::table::SymbolTable`]; it is not part of this
-//! table and is discarded after parsing.
+//! The parser's per-function *variable* scope is separate and transient — it
+//! lives in [`crate::symbol::table::SymbolTable`], not here.
 
 use crate::lexer::LangType;
 use crate::parser::ast::Attribute;
@@ -53,7 +49,6 @@ pub struct FieldInfo {
     pub attrs: Vec<Attribute>,
 }
 
-/// The signature of a type-struct method (populated in Milestone 3).
 #[derive(Debug, Clone, PartialEq)]
 pub struct MethodSig {
     /// The mangled free-function name this method lowers to, e.g. `"Type$method"`.
@@ -75,22 +70,17 @@ pub struct MethodSig {
 pub struct StructInfo {
     pub id: u32,
     pub name: String,
-    /// `Position::file_id` of the file whose `type` keyword declared this
-    /// struct — the provenance the import-visibility check resolves to a
-    /// defining module.
+    /// `Position::file_id` of the declaring file — the provenance the
+    /// import-visibility check resolves to a defining module.
     pub file_id: u32,
-    /// Module visibility of the type itself: `public type` opts the struct
-    /// into being nameable from other modules; the default is private to its
-    /// defining module. Like `file_id`, this is a declaration-site fact fixed
-    /// at intern (prescan) time — it must be known before the `type` body
-    /// parses, because under import cycles a module's uses can legally
+    /// `public type` makes the struct nameable from other modules. Fixed at
+    /// intern (prescan) time, since under import cycles a module's uses can
     /// precede the definition in the inlined token stream.
     pub vis: Visibility,
     /// Fields in declaration/layout order. Empty until [`ModuleSymbols::set_fields`].
     pub fields: Vec<FieldInfo>,
     /// Field name -> index into `fields` (mirrors the LLVM struct element order).
     pub field_index: HashMap<String, usize>,
-    /// Methods keyed by their (unmangled) source name. Populated in Milestone 3.
     pub methods: HashMap<String, MethodSig>,
     /// Leading attributes of the `type` declaration itself, in source order
     /// (outside-in, leftmost applied last). Empty until
@@ -98,31 +88,23 @@ pub struct StructInfo {
     pub attrs: Vec<Attribute>,
 }
 
-/// A registered C-style enum: its name, ordered variants, and provenance.
-///
 /// Shaped in parallel to [`StructInfo`] (id, `file_id`, `vis`, `attrs`) so the
-/// import-visibility check and any future metaprogram query index treat the two
-/// item kinds uniformly. An enum has no layout or methods — a variant's value
-/// is just its index into `variants`, and the type lowers to `i32`.
+/// visibility check treats both item kinds uniformly. An enum has no layout or
+/// methods — a variant's value is its index into `variants`, lowering to `i32`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumInfo {
     pub id: u32,
     pub name: String,
-    /// `Position::file_id` of the file whose `enum` keyword declared this enum
-    /// — the provenance the import-visibility check resolves to a defining
-    /// module.
+    /// `Position::file_id` of the declaring file — provenance for the
+    /// import-visibility check.
     pub file_id: u32,
-    /// Module visibility: `public enum` opts the enum into being nameable from
-    /// other modules; the default is private to its defining module. Like
-    /// [`StructInfo::vis`], it is fixed at intern (prescan) time — import
-    /// cycles can place a use before the definition in the token stream.
+    /// `public enum` makes the enum nameable from other modules. Fixed at
+    /// intern time, like [`StructInfo::vis`].
     pub vis: Visibility,
     /// Variant names in declaration order; the index *is* the variant's value.
     /// Empty until [`ModuleSymbols::set_enum_variants`].
     pub variants: Vec<String>,
-    /// Leading attributes of the `enum` declaration, in source order
-    /// (outside-in, leftmost applied last). Empty until
-    /// [`ModuleSymbols::set_enum_attrs`].
+    /// Leading attributes of the `enum` declaration, in source order.
     pub attrs: Vec<Attribute>,
 }
 
@@ -134,9 +116,8 @@ pub struct FnPtrSig {
     pub return_type: LangType,
 }
 
-/// A defined type alias: the (eagerly resolved) target type plus the
-/// `Position::file_id` of the file whose `alias` directive declared it —
-/// the provenance the import-visibility check resolves to a defining module.
+/// The eagerly-resolved target type plus the `file_id` of the declaring file
+/// (provenance for the import-visibility check).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AliasInfo {
     pub ty: LangType,
@@ -171,11 +152,8 @@ impl ModuleSymbols {
 
     // ── Functions ─────────────────────────────────────────────────────────────
 
-    /// Add or update a function.
-    ///
-    /// Mirrors the previous `SymbolTable::add_function`: a declaration may be
-    /// followed by a matching definition, but two bodies, or a definition that
-    /// disagrees with an earlier declaration, are errors.
+    /// A declaration may be followed by a matching definition, but two bodies —
+    /// or a definition disagreeing with an earlier declaration — are errors.
     ///
     /// # Errors
     /// [`SymbolError::FunctionAlreadyDefined`] if two definitions supply a body,
@@ -205,23 +183,16 @@ impl ModuleSymbols {
         self.functions.get(name)
     }
 
-    /// Iterate over all registered functions.
     pub fn functions(&self) -> impl Iterator<Item = (&String, &FunctionSymbol)> {
         self.functions.iter()
     }
 
     // ── Type-structs ────────────────────────────────────────────────────────────
 
-    /// Reserve an id for a struct name, creating an empty (body-less) entry.
-    /// `file_id` records the declaring file (from the `type` keyword token)
-    /// and `vis` the declared module visibility (`public type` vs `type`),
-    /// both consumed by the visibility checks.
-    ///
-    /// Called during the parser's name-collection prescan so that struct names
-    /// resolve regardless of declaration order (including self/mutual reference).
-    /// Returns the existing id if the name was already interned (the first
-    /// declaration's `file_id`/`vis` win; a second `type` body for the same
-    /// name is a duplicate-type error downstream).
+    /// Called during the parser's prescan so struct names resolve regardless of
+    /// declaration order (self/mutual reference included). Returns the existing
+    /// id if already interned — the first declaration's `file_id`/`vis` win, and
+    /// a second `type` body is a duplicate-type error downstream.
     pub fn intern_struct(&mut self, name: &str, file_id: u32, vis: Visibility) -> u32 {
         if let Some(&id) = self.structs_by_name.get(name) {
             return id;
@@ -274,10 +245,8 @@ impl ModuleSymbols {
         info.field_index = field_index;
     }
 
-    /// Attach the leading attributes of a `type` declaration to its struct
-    /// (`@attr type Name { ... }`). Interning happens in the prescan, long
-    /// before the attributes are parsed — hence a setter rather than an
-    /// `intern_struct` parameter.
+    /// A setter (not an `intern_struct` parameter) because interning happens in
+    /// the prescan, before the attributes are parsed.
     pub fn set_struct_attrs(&mut self, id: u32, attrs: Vec<Attribute>) {
         self.structs_by_id[id as usize].attrs = attrs;
     }
@@ -290,23 +259,14 @@ impl ModuleSymbols {
         Some((idx, &info.fields[idx]))
     }
 
-    /// Register a method signature on a struct (Milestone 3).
     pub fn add_method(&mut self, id: u32, name: String, sig: MethodSig) {
         self.structs_by_id[id as usize].methods.insert(name, sig);
     }
 
     // ── Enums ─────────────────────────────────────────────────────────────────
 
-    /// Reserve an id for an enum name, creating an empty (variant-less) entry.
-    /// `file_id` records the declaring file (from the `enum` keyword token) and
-    /// `vis` the declared module visibility (`public enum` vs `enum`), both
-    /// consumed by the visibility checks.
-    ///
-    /// Called during the parser's name-collection prescan so enum names resolve
-    /// regardless of declaration order (forward references, import cycles).
-    /// Returns the existing id if the name was already interned (the first
-    /// declaration's `file_id`/`vis` win; a second `enum` body for the same
-    /// name is a duplicate-type error downstream).
+    /// The enum twin of [`Self::intern_struct`]: prescan-called so enum names
+    /// resolve regardless of order; returns the existing id if already interned.
     pub fn intern_enum(&mut self, name: &str, file_id: u32, vis: Visibility) -> u32 {
         if let Some(&id) = self.enums_by_name.get(name) {
             return id;
@@ -344,9 +304,7 @@ impl ModuleSymbols {
         self.enums_by_id[id as usize].variants = variants;
     }
 
-    /// Attach the leading attributes of an `enum` declaration to its info.
-    /// Interning happens in the prescan, before the attributes are parsed —
-    /// hence a setter rather than an `intern_enum` parameter.
+    /// A setter for the same reason as [`Self::set_struct_attrs`].
     pub fn set_enum_attrs(&mut self, id: u32, attrs: Vec<Attribute>) {
         self.enums_by_id[id as usize].attrs = attrs;
     }

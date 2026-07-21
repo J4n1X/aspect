@@ -4,27 +4,18 @@ use crate::parser::AsmSpec;
 use crate::typechecker::errors::TypeCheckError;
 
 impl TypeChecker {
-    /// Validate an `asm fn`'s register contract against the compilation
-    /// target.
-    ///
-    /// Every collision check compares the canonical register *family*, never
-    /// the spelling: `rax` and `eax` are one physical register, and LLVM
-    /// diagnoses nothing if two operands name it — it silently drops one.
-    /// Comparing spellings would let that through.
-    ///
-    /// The duplicate rule deliberately applies **only among parameters**. An
-    /// output sharing a register with an input (`-> i64: rax` alongside
-    /// `i64 nr: rax`) is the ordinary in-out syscall form and must be
-    /// accepted.
+    /// Every collision check compares the canonical register *family*, not the
+    /// spelling: `rax` and `eax` are one physical register that LLVM silently
+    /// drops if two operands name it. The duplicate rule applies **only among
+    /// parameters** — an output sharing a register with an input (the in-out
+    /// syscall form) must be accepted.
     pub(crate) fn check_asm_function(
         &mut self,
         proto: &crate::parser::FunctionProto,
         asm: &AsmSpec,
     ) {
-        // An arch whose register model we don't have cannot be validated at
-        // all, so there is no point resolving x86 names against it. Both x86
-        // flavours are modelled; the register table then decides which names
-        // are legal (e.g. `rax` exists on x86-64 but not i386).
+        // Only the modelled x86 arches can be validated; the register table
+        // then decides which names are legal (`rax` on x86-64 but not i386).
         let Some(arch) = self
             .target
             .arch_define()
@@ -77,10 +68,9 @@ impl TypeChecker {
             Some(info.family)
         });
 
-        // Clobbers: `memory` is a pseudo-register that names no hardware, so
-        // it skips register resolution and every family-based check — but a
-        // repeat of it is the same user mistake the duplicate rule exists to
-        // catch, so it is reported through the same diagnostic.
+        // `memory` is a pseudo-register naming no hardware, so it skips
+        // resolution and family checks — but a repeat is still reported as a
+        // duplicate.
         let mut clobber_families: Vec<&'static str> = Vec::new();
         let mut saw_memory = false;
         for clobber in &asm.clobbers {
@@ -145,20 +135,12 @@ impl TypeChecker {
         Some(info)
     }
 
-    /// Reject an operand pinned to a register spelling too narrow to hold it.
-    ///
-    /// This is the one place [`crate::asm::RegInfo::width_bits`] is consulted,
-    /// and it deliberately checks in one direction only. A *narrower* type in
-    /// a wider spelling (`i32 x: rax`) is the orthogonality rule working:
-    /// LLVM sizes the physical register from the operand's LLVM type and
-    /// selects `%eax`. A *wider* type in a narrower spelling (`i64 v: al`) is
-    /// the same mechanism silently discarding what the user wrote — LLVM hands
-    /// back the full `rax`, so `al` means `rax` and the author's belief that
-    /// only the low byte is live is wrong. LLVM diagnoses nothing either way.
-    ///
-    /// This does not infer a type from a register: the declared type still
-    /// drives every conversion. It only rejects a pairing that cannot mean
-    /// what it says.
+    /// Checks one direction only. A narrower type in a wider spelling
+    /// (`i32 x: rax`) is fine — LLVM selects `%eax` from the operand's type. A
+    /// wider type in a narrower spelling (`i64 v: al`) is rejected: LLVM would
+    /// silently hand back the full `rax`, so the author's belief that only the
+    /// low byte is live is wrong. The declared type still drives every
+    /// conversion; this only rejects a pairing that can't mean what it says.
     fn check_register_fits(
         &mut self,
         arch: &str,
@@ -166,10 +148,8 @@ impl TypeChecker {
         info: &crate::asm::RegInfo,
         reg: &crate::parser::AsmReg,
     ) {
-        // A pointer occupies the target's full pointer width regardless of its
-        // pointee (`u8*` is 64-bit on x86-64, though its `size_bits` is 8).
-        // `check_pinnable_type` has already rejected anything that is neither
-        // pointer-like nor an 8/16/32/64-bit integer.
+        // A pointer occupies the full pointer width regardless of pointee
+        // (`u8*` is 64-bit on x86-64, though its `size_bits` is 8).
         let type_bits = if ty.is_pointer_like() {
             crate::asm::pointer_width_bits(arch)
         } else {
@@ -187,13 +167,10 @@ impl TypeChecker {
         }
     }
 
-    /// Reject operand types that cannot be pinned to any register: integers of
-    /// 8/16/32/64 bits, floats of 32/64, and pointer-like values qualify.
-    /// Other widths are a real `X86ISelLowering` error, and a struct-by-value
-    /// operand would take the `byval` path, which is meaningless under
-    /// register pinning. (`u0` parameters are already rejected by
-    /// `check_proto`.) Which *bank* the type belongs in is
-    /// [`Self::check_register_class`]'s job.
+    /// Only 8/16/32/64-bit integers, 32/64-bit floats, and pointer-like values
+    /// can be pinned. Other widths are a real `X86ISelLowering` error, and a
+    /// struct-by-value operand would take the meaningless `byval` path. Which
+    /// *bank* the type belongs in is [`Self::check_register_class`]'s job.
     fn check_pinnable_type(&mut self, ty: LangType, pos: crate::lexer::Position) {
         let pinnable = ty.is_pointer_like()
             || (ty.is_plain_int() && matches!(ty.size_bits, 8 | 16 | 32 | 64))

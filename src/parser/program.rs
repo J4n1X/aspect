@@ -18,8 +18,6 @@ pub(crate) struct PendingBody {
 }
 
 impl Parser {
-    /// Parse a complete program.
-    /// Returns all accumulated errors if any were encountered during parsing.
     /// # Errors
     /// Returns `Err(Vec<ParserError>)` if one or more parse errors occurred.
     pub fn parse_program(&mut self) -> Result<crate::parser::Program, Vec<ParserError>> {
@@ -51,11 +49,9 @@ impl Parser {
         let mut functions = Vec::new();
         let mut global_vars = Vec::new();
 
-        // Pre-register all type-struct and enum names and pre-install all
-        // aliases so named types resolve regardless of declaration order
-        // (self/mutual reference, alias chains in any order). Enums are interned
-        // before the alias prescan so an alias colliding with an enum name is
-        // caught there.
+        // Pre-register type/enum names and aliases so named types resolve
+        // regardless of declaration order. Enums are interned before the alias
+        // prescan so an alias colliding with an enum name is caught there.
         self.prescan_type_names();
         self.prescan_enum_names();
         self.prescan_aliases();
@@ -70,12 +66,8 @@ impl Parser {
             let kind = self.parse_kind_modifier()?;
             let is_extern = matches!(&kind, Some((Keyword::Extern, _)));
 
-            // `extern` names a symbol defined in another object file. It may be
-            // `public` — that just makes the *declaration* nameable from other
-            // Aspect modules (`public extern fn malloc` lets importers call it)
-            // — but it can never be `export`: `export` gives *this* build's
-            // symbol external linkage, and an extern declaration has no body
-            // here to link out.
+            // `extern` may be `public` (nameable from importers) but never
+            // `export`: there is no local symbol here to give external linkage.
             if is_extern && export {
                 return Err(ParserError::UnexpectedToken(
                     "extern functions cannot be exported — they are defined elsewhere, so there is no local symbol to give external linkage".to_string(),
@@ -83,10 +75,9 @@ impl Parser {
                 ));
             }
 
-            // `public` = module visibility (nameable via `$import`) for
-            // functions, globals and type-structs. `export` = external linkage,
-            // which only symbols that *have* a linked object-file symbol can
-            // carry — functions and globals, never a type or alias.
+            // `public` = module visibility (functions, globals, type-structs).
+            // `export` = external linkage, which only a symbol with a linked
+            // object-file symbol can carry — never a type or alias.
             let defines_a_fn = matches!(&kind, Some((Keyword::Asm, _) | (Keyword::Naked, _)))
                 || (self.check_keyword(&Keyword::Fn) && !self.starts_fnptr_var_decl());
             let defines_a_type =
@@ -123,9 +114,8 @@ impl Parser {
                 let func = self.parse_naked_function(*naked_pos, vis, export, attrs)?;
                 functions.push(func);
             }
-            // `fn ident(...)` is a function definition; `fn(...)` (no name
-            // between `fn` and `(`) is a function-pointer-typed global. The
-            // statement-table dispatch handles the local-decl variant.
+            // `fn ident(...)` is a definition; `fn(...)` is a function-pointer
+            // -typed global.
             else if self.check_keyword(&Keyword::Fn) && !self.starts_fnptr_var_decl() {
                 let func = self.parse_function(is_extern, vis, export, attrs)?;
                 functions.push(func);
@@ -203,12 +193,10 @@ impl Parser {
         })
     }
 
-    /// Consume the leading module-visibility (`public`) and linkage (`export`)
-    /// modifiers of a top-level declaration, in either order. Returns the
-    /// resolved visibility, whether `export` was given, and the position of the
-    /// first modifier (or the current token when none) for diagnostics. These
-    /// are two orthogonal axes — `public export` is the fully-open form — so
-    /// they are scanned together, and a repeat of either is the error.
+    /// `public` and `export` are two orthogonal axes (`public export` is the
+    /// fully-open form) accepted in either order, so they are scanned together
+    /// and a repeat of either is the error. Returns visibility, whether
+    /// `export` was given, and the first modifier's position for diagnostics.
     fn parse_vis_linkage_modifiers(
         &mut self,
     ) -> Result<(Visibility, bool, Position), ParserError> {
@@ -238,13 +226,9 @@ impl Parser {
         }
     }
 
-    /// Consume the leading kind-modifiers of a top-level declaration, yielding
-    /// the one named (with its position) or `None`.
-    ///
-    /// `extern` and `asm` both answer "which kind of function is this", and a
-    /// function is exactly one kind, so naming two is one error whichever
-    /// order they appear in. Scanning them together rather than testing pairs
-    /// is what keeps that true as kinds are added.
+    /// `extern`/`asm`/`naked` all answer "which kind of function is this", and
+    /// a function is exactly one kind, so naming two is one error in any order.
+    /// Scanning them together (not testing pairs) keeps that true as kinds grow.
     fn parse_kind_modifier(&mut self) -> Result<Option<(Keyword, Position)>, ParserError> {
         let mut kind: Option<(Keyword, Position)> = None;
         loop {
@@ -271,13 +255,11 @@ impl Parser {
         }
     }
 
-    /// Pre-register every `type <Name>` struct name with a reserved id before
-    /// the main parse, so named types resolve regardless of declaration order
-    /// (and self/mutually-referential structs work). Records each name's
-    /// declaring file (the `type` keyword's `pos.file_id`) and its module
-    /// visibility (a directly preceding `public` keyword) for the visibility
-    /// checks — both must be known at intern time, since import cycles can
-    /// legally place a module's *uses* of a struct before its definition in
+    /// Reserves an id for every `type <Name>` before the main parse, so named
+    /// types resolve regardless of order (self/mutual reference included).
+    /// Records each name's declaring file and module visibility (a directly
+    /// preceding `public`) — both must be known at intern time, since import
+    /// cycles can place a module's *uses* of a struct before its definition in
     /// the inlined token stream. Does not consume tokens.
     fn prescan_type_names(&mut self) {
         let names: Vec<(String, u32, Visibility)> = self
@@ -305,12 +287,9 @@ impl Parser {
         }
     }
 
-    /// Pre-register every `enum <Name>` name with a reserved id before the main
-    /// parse — the enum twin of [`Self::prescan_type_names`]. Records each
-    /// name's declaring file (the `enum` keyword's `pos.file_id`) and its module
-    /// visibility (a directly preceding `public` keyword), both of which must be
-    /// known at intern time so forward references and import cycles resolve.
-    /// Does not consume tokens.
+    /// The enum twin of [`Self::prescan_type_names`]: reserves an id for every
+    /// `enum <Name>`, recording its declaring file and visibility at intern
+    /// time so forward references and import cycles resolve.
     fn prescan_enum_names(&mut self) {
         let names: Vec<(String, u32, Visibility)> = self
             .tokens

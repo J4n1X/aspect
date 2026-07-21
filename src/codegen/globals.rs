@@ -11,7 +11,6 @@ use crate::codegen::CodegenError;
 use crate::parser::{ExprKind, Expression, GlobalVar, LangType};
 
 impl<'ctx> CodeGenerator<'ctx> {
-    /// Generate a global variable
     pub(crate) fn generate_global_variable(
         &mut self,
         global: &GlobalVar,
@@ -46,15 +45,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         if let Some(init_expr) = &global.initializer {
-            // Static init: a global initializer that references another global
-            // legitimately reads that global's start value (its initializer),
-            // which is what makes global-declaration order significant. Flag the
-            // context so `const_eval` folds those references instead of refusing
-            // them the way it does for a runtime (local) initializer.
+            // A global initializer legitimately reads another global's start
+            // value, which is why declaration order is significant here. Flag
+            // the context so `const_eval` folds those references (it refuses
+            // them for a runtime/local initializer).
             let prev_in_global_init = self.in_global_init;
             self.in_global_init = true;
             let folded = if let ExprKind::ListInitializer(elements) = &init_expr.kind {
-                // Array literal initializer -> ConstantArray
                 self.generate_constant_array_value(&global.var_type, elements, global.pos)
             } else {
                 // Cast the constant to the declared global type if widths differ
@@ -68,7 +65,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             global_var.set_initializer(&global_type.const_zero());
         }
 
-        // Check if the global is constant, and set the LLVM global accordingly.
         if global.var_type.is_const {
             global_var.set_constant(true);
         }
@@ -84,13 +80,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
-    /// Interned-global name of the `index`-th string literal. The single
-    /// authority for the naming scheme shared with `emit_string_ptr`.
+    /// The single authority for the string-literal naming scheme shared with
+    /// `emit_string_ptr`.
     pub(crate) fn string_literal_name(index: usize) -> String {
         format!(".str.{index}")
     }
 
-    /// Generate a string literal
     pub(crate) fn generate_string_literal(&mut self, index: usize, value: &str) {
         let string_name = Self::string_literal_name(index);
         let string_value = self.context.const_string(value.as_bytes(), true);
@@ -120,30 +115,24 @@ impl<'ctx> CodeGenerator<'ctx> {
         pos: Position,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         let elem_lang_type = var_type.element_type();
-        // Cache-aware: resolves type-struct elements against the named-struct
-        // cache (the context-only `to_llvm` cannot). Scalars/pointers lower
-        // identically, so int/float/ptr arrays keep byte-identical element types.
+        // Cache-aware: resolves type-struct elements through the named-struct
+        // cache (the context-only `to_llvm` can't).
         let elem_llvm_type = self
             .lang_type_to_llvm(&elem_lang_type)
             .map_err(|e| e.with_pos(pos))?;
         let array_size = var_type.array_size.unwrap_or(0) as usize;
 
-        // Fold every element to an LLVM constant via the const-evaluator, which
-        // handles literals, function references (function addresses are
-        // link-time constants), struct literals (folded to a `ConstantStruct`),
-        // and nested constant expressions. A genuinely non-constant element
-        // surfaces its own error.
+        // Fold every element via the const-evaluator; a genuinely non-constant
+        // element surfaces its own error.
         let mut const_vals: Vec<BasicValueEnum<'ctx>> = Vec::with_capacity(array_size);
         for elem in elements {
             const_vals.push(const_eval(elem, self)?);
         }
 
-        // Zero-pad to array_size
         while const_vals.len() < array_size {
             const_vals.push(elem_llvm_type.const_zero());
         }
 
-        // Build ConstantArray for the element type.
         // Literals are emitted at their natural width (e.g. i32), so cast each
         // value to the exact element type before building the array.
         match elem_llvm_type {
@@ -182,9 +171,8 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 }
 
-/// Cast a constant `BasicValueEnum` to `target_type` if the widths differ.
-/// Only handles integer types (the only case where natural-width literals can mismatch).
-/// Float and pointer constants are returned unchanged.
+/// Casts an integer constant to `target` if widths differ — the only case
+/// where natural-width literals can mismatch. Floats/pointers pass through.
 fn coerce_constant_to_type<'ctx>(
     val: BasicValueEnum<'ctx>,
     target: BasicTypeEnum<'ctx>,

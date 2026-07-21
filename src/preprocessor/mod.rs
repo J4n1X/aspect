@@ -1,48 +1,24 @@
 //! Preprocessor — the stage between the raw lexer and the parser.
 //!
-//! Reads a source file, lexes it, and walks the resulting token stream
-//! expanding `$<directive>` lines and define substitutions in place before
-//! the parser ever sees them. Each directive family lives in its own
-//! submodule ([`defines`], [`conditional`], [`modules`]) and is dispatched
-//! by name from the driver's directive table; adding a new directive is a
-//! new submodule plus one dispatch arm here.
+//! Walks the lexer's token stream, expanding `$<directive>` lines and define
+//! substitutions in place before the parser sees them. Each directive family
+//! lives in its own submodule ([`defines`], [`conditional`], [`modules`]),
+//! dispatched by name from the driver's directive table.
 //!
-//! ## Line anchoring
+//! Directives are **line-anchored**: `$` is a directive only as the first
+//! token on its line (leading whitespace aside), and the rest of the line
+//! belongs to it; a `$` anywhere else is an error.
 //!
-//! Directives are **line-anchored**: a directive is only recognised when
-//! `$` is the first token on its line (leading whitespace is fine), and
-//! everything up to the newline belongs to the directive. A `$` anywhere
-//! else on a line is an error.
+//! Conditional directives (`$if*`/`$else`/`$endif`) work anywhere, including
+//! inside a function body — they only gate which tokens reach the parser. The
+//! rest establish module-level state (`$define`/`$undefine`) or file structure
+//! (`$module`/`$import`) and are top-level only: a line-leading `$` for one of
+//! those inside a block is an error.
 //!
-//! ## Directive table
-//!
-//! The driver recognises every directive name (see [`DIRECTIVES`]);
-//! unknown names get a did-you-mean suggestion computed against the
-//! table. The families:
-//!
-//! - `$define NAME [tokens]` / `$undefine NAME` — define table and
-//!   identifier substitution ([`defines`] module).
-//! - `$ifdef`/`$ifndef`/`$if`/`$elseif`/`$elseifdef`/`$else`/`$endif` —
-//!   conditional compilation ([`conditional`] module). The driver owns the
-//!   chain stack; while a branch is skipped, ordinary tokens are dropped
-//!   and non-conditional directives are inert.
-//! - `$module <path>` / `$import <path>` — module identity, `-I` root
-//!   resolution, and import-once loading ([`modules`] module).
-//!
-//! Conditional-compilation directives (`$if*`/`$else`/`$endif`) work
-//! anywhere, including inside a function body — they only gate which tokens
-//! reach the parser. The other directives establish module-level state
-//! (`$define`/`$undefine`) or file structure (`$module`/`$import`), so they
-//! are top-level only: the walk tracks brace depth, and a line-leading `$`
-//! for one of those inside a block is an error.
-//!
-//! ## Why a separate stage
-//!
-//! - The lexer stays pure text-to-tokens; it doesn't touch the filesystem.
-//! - The parser sees a single, already-expanded token stream — no special
-//!   directive AST nodes, no recursive parser entry.
-//! - Substitution over tokens is word-boundary-safe for free and can never
-//!   rewrite string literals (they are single tokens).
+//! Kept a separate stage so the lexer stays pure text-to-tokens (no
+//! filesystem) and the parser sees one already-expanded stream — no directive
+//! AST nodes, no recursive parser entry. Substitution over tokens can never
+//! rewrite string literals, which are single tokens.
 
 pub mod conditional;
 pub mod defines;
@@ -62,39 +38,29 @@ pub use errors::PreprocessError;
 
 use defines::ScopedDefines;
 
-/// The output of the preprocessor: the fully-expanded token stream plus the
-/// file registry that maps each token's `pos.file_id` back to a source path.
-/// Carrying the registry alongside the tokens lets the parser and the type
-/// checker attribute errors to the *file the error came from*, not the entry
-/// file — important once `$import` brings other files into the stream.
+/// The fully-expanded token stream plus the file registry mapping each token's
+/// `pos.file_id` back to a source path — carried together so the parser and
+/// type checker attribute errors to the *file the error came from*, not the
+/// entry file, once `$import` pulls other files into the stream.
 ///
-/// The module fields ([`PreprocessedSource::modules`],
-/// [`PreprocessedSource::imports`], [`PreprocessedSource::search_roots`])
-/// carry the data the import-visibility phase consumes. **The anonymous
-/// root module** — every file without a `$module` declaration, typically
-/// the entry file — **is represented as the empty string `""`** throughout.
+/// **The anonymous root module** — every file without a `$module` declaration,
+/// typically the entry file — **is the empty string `""`** throughout.
 #[derive(Debug, Clone)]
 pub struct PreprocessedSource {
     pub tokens: Vec<Token>,
     pub files: Vec<PathBuf>,
     /// The module each loaded file belongs to: **exactly one entry per file
-    /// in the registry, in `file_id` order** (`modules[i].0 == i`). Files
-    /// that declared no `$module` map to the anonymous root module `""`.
+    /// in the registry, in `file_id` order** (`modules[i].0 == i`).
     pub modules: Vec<(u32, String)>,
     /// Module → its **direct** imports only (no transitive closure),
-    /// deduplicated, in first-import order. Imports made by any file of a
-    /// module accrue to that module; imports by files without a `$module`
-    /// declaration (e.g. the entry file) are recorded under `""`. Every
-    /// module that appears in [`PreprocessedSource::modules`] has an entry,
-    /// even if it imports nothing.
+    /// deduplicated, in first-import order. Every module in `modules` has an
+    /// entry, even if it imports nothing.
     pub imports: HashMap<String, Vec<String>>,
-    /// The `-I` module search roots used, in flag order — kept for error
-    /// reporting downstream.
+    /// The `-I` module search roots used, in flag order — kept for downstream
+    /// error reporting.
     pub search_roots: Vec<PathBuf>,
 }
 
-/// Every directive name the driver recognises. Names missing from this
-/// table produce an unknown-directive error with a did-you-mean suggestion.
 const DIRECTIVES: &[&str] = &[
     "define",
     "undefine",
@@ -109,11 +75,9 @@ const DIRECTIVES: &[&str] = &[
     "import",
 ];
 
-/// Tokenize a source file with a default-configured preprocessor (platform
-/// defines only — no `-D` defines, no `-I` search roots). Convenience
-/// wrapper over [`Preprocessor`] for callers that don't need CLI plumbing;
-/// note that errors formatted from the returned [`PreprocessError`] lack
-/// the `file:line:column` prefix [`Preprocessor::format_error`] provides.
+/// Convenience wrapper over [`Preprocessor`] with only platform defines (no
+/// `-D`, no `-I`). Errors from the returned [`PreprocessError`] lack the
+/// `file:line:column` prefix that [`Preprocessor::format_error`] adds.
 ///
 /// # Errors
 /// Any [`PreprocessError`] raised while lexing or expanding directives.
@@ -121,59 +85,47 @@ pub fn tokenize_file(entry: &Path) -> Result<PreprocessedSource, PreprocessError
     Preprocessor::new().preprocess(entry)
 }
 
-/// The preprocessor driver: owns the define table, the `-I` search roots,
-/// and the expansion state (output tokens, import-once registry, file registry).
-///
-/// One-shot: create a fresh `Preprocessor` per entry file, seed it with
-/// [`Preprocessor::add_cli_define`] / [`Preprocessor::add_include_dir`],
-/// then call [`Preprocessor::preprocess`]. Keep it around after a failure —
-/// [`Preprocessor::format_error`] needs the file registry to attribute the
-/// error's position to the right file.
+/// The preprocessor driver. One-shot: create a fresh `Preprocessor` per entry
+/// file, seed it with [`Preprocessor::add_cli_define`] /
+/// [`Preprocessor::add_include_dir`], then call [`Preprocessor::preprocess`].
+/// Keep it around after a failure — [`Preprocessor::format_error`] needs the
+/// file registry to attribute the error to the right file.
 pub struct Preprocessor {
-    /// Define table: platform defines at construction, `-D` defines next,
-    /// then `$define`/`$undefine` directives as the stream is walked.
+    /// Platform defines at construction, `-D` defines next, then
+    /// `$define`/`$undefine` directives as the stream is walked.
     defines: DefineTable,
-    /// `-I` search roots for `$import`, in flag order.
     include_dirs: Vec<PathBuf>,
-    /// Open `$if`/`$ifdef`/`$ifndef` chains. Gates the whole walk: while
-    /// the top chain's branch is inactive, ordinary tokens are dropped and
-    /// non-conditional directives are inert.
+    /// Gates the whole walk: while the top chain's branch is inactive,
+    /// ordinary tokens are dropped and non-conditional directives are inert.
     conditionals: conditional::ConditionalStack,
-    /// The fully-expanded output stream.
     tokens: Vec<Token>,
     /// Canonical path → file id; makes repeat inclusion a silent no-op.
     seen: HashMap<PathBuf, u32>,
-    /// Indexed registry; `files[id]` is the canonical path of the file that
-    /// produced any token whose position carries `file_id == id`.
+    /// `files[id]` is the canonical path of the file that produced any token
+    /// whose position carries `file_id == id`.
     files: Vec<PathBuf>,
-    /// `$module` declaration per file, parallel to `files` (`None` until —
-    /// unless — the file declares one). `$import` verification reads it.
+    /// `$module` declaration per file, parallel to `files` (`None` unless the
+    /// file declares one).
     file_modules: Vec<Option<String>>,
-    /// Module → direct imports (deduplicated, first-import order). Each
-    /// file's edges merge in when the file finishes processing.
     module_imports: HashMap<String, Vec<String>>,
-    /// Import-once registry: module paths whose loading has *started* —
-    /// marked before their files process, so import cycles terminate.
+    /// Module paths whose loading has *started* — marked before their files
+    /// process, so import cycles terminate.
     imported: HashSet<String>,
-    /// Per-file processing state, stacked because imports recurse: the top
-    /// entry is the file whose tokens are being walked.
+    /// Stacked because imports recurse: the top entry is the file whose
+    /// tokens are being walked.
     file_stack: Vec<FileContext>,
 }
 
-/// Per-file state while that file's tokens are being walked. Tracks what
-/// the `$module` placement rule and the imports map need to know.
 pub(crate) struct FileContext {
-    /// Index into the driver's `files` registry.
     pub(crate) file_id: u32,
-    /// Where this file's `$module` directive appeared, once seen — drives
-    /// the at-most-one rule's diagnostic.
+    /// Where this file's `$module` directive appeared, once seen — drives the
+    /// at-most-one rule's diagnostic.
     pub(crate) module_pos: Option<Position>,
-    /// True once any non-directive, non-newline token has been emitted for
-    /// this file; `$module` must come before that.
+    /// True once any non-directive, non-newline token has been emitted;
+    /// `$module` must come before that.
     pub(crate) saw_content: bool,
-    /// Direct imports made by this file, in order, deduplicated. Merged
-    /// into `module_imports` when the file finishes (its module identity is
-    /// only final then — `$module` may follow an `$import`).
+    /// Merged into `module_imports` when the file finishes, since its module
+    /// identity is only final then — `$module` may follow an `$import`.
     pub(crate) imports: Vec<String>,
 }
 
@@ -195,20 +147,16 @@ impl Default for Preprocessor {
 }
 
 impl Preprocessor {
-    /// A driver seeded with the compiler-provided platform defines for the
-    /// *host* target ([`TargetSpec::host`]). The ergonomic default for
-    /// tests and any caller that doesn't need cross-target `$ifdef`
-    /// behaviour — equivalent to `Preprocessor::for_target(&TargetSpec::host())`.
+    /// Seeded with platform defines for the *host* target — equivalent to
+    /// `Preprocessor::for_target(&TargetSpec::host())`.
     #[must_use]
     pub fn new() -> Self {
         Self::for_target(&TargetSpec::host())
     }
 
-    /// A driver seeded with the compiler-provided platform defines for an
-    /// explicit compilation target — what `--target` wires up. Every
-    /// subcommand that preprocesses goes through this (via `--target`'s
-    /// host-defaulted value), so `$ifdef OS_*`/`$ifdef ARCH_*` always match
-    /// the target being compiled for, not the host `aspc` happens to run on.
+    /// Seeded with platform defines for an explicit target — what `--target`
+    /// wires up, so `$ifdef OS_*`/`$ifdef ARCH_*` match the target being
+    /// compiled for, not the host `aspc` runs on.
     #[must_use]
     pub fn for_target(target: &TargetSpec) -> Self {
         Self {
@@ -225,9 +173,8 @@ impl Preprocessor {
         }
     }
 
-    /// Register a `-D NAME` / `-D NAME=VALUE` define. Call before
-    /// [`Preprocessor::preprocess`] — CLI defines count as prior defines
-    /// for the redefinition rule.
+    /// Call before [`Preprocessor::preprocess`] — CLI defines count as prior
+    /// defines for the redefinition rule.
     ///
     /// # Errors
     /// [`PreprocessError::InvalidCliDefine`] for malformed specs and
@@ -236,42 +183,28 @@ impl Preprocessor {
         self.defines.add_cli_define(spec)
     }
 
-    /// Register a `-I` module search root (kept in flag order); `$import`
-    /// resolution walks these.
     pub fn add_include_dir(&mut self, dir: impl Into<PathBuf>) {
         self.include_dirs.push(dir.into());
     }
 
-    /// The registered `-I` search roots, in flag order.
     #[must_use]
     pub fn include_dirs(&self) -> &[PathBuf] {
         &self.include_dirs
     }
 
-    /// The current define table (read-only; the driver owns mutation).
     #[must_use]
     pub fn defines(&self) -> &DefineTable {
         &self.defines
     }
 
-    /// Tokenize `entry`, expanding directives recursively.
-    ///
     /// # Errors
     /// Any [`PreprocessError`] from lexing, directive handling, or IO.
     pub fn preprocess(&mut self, entry: &Path) -> Result<PreprocessedSource, PreprocessError> {
         self.process_file(entry)?;
-        // Per-file Eofs are dropped during the walk; cap with a single one.
-        //
-        // The closing EOF inherits the last real token's position rather than
-        // inventing one. It is what the parser reports when input runs out
-        // mid-construct ("Expected '}' but found 'EOF'"), and a synthetic
-        // `Position::new(0, 0)` made every such diagnostic point at line 0,
-        // column 0 of no file — a location that cannot exist and that no
-        // editor can navigate to. The last token is the closest real source
-        // location to where the input actually ended, so an unterminated block
-        // now points at its final token. Only a completely empty translation
-        // unit has no last token; it falls back to the start of the entry file.
-        // (`process_file` registers the entry file first, so it is id 0.)
+        // The closing EOF inherits the last real token's position: it is what
+        // the parser reports when input runs out mid-construct ("Expected '}'
+        // but found 'EOF'"), and line 0:0 of no file is a location no editor
+        // can navigate to. A completely empty unit falls back to the entry file.
         let eof_pos = self
             .tokens
             .last()
@@ -281,9 +214,8 @@ impl Preprocessor {
         Ok(self.build_output())
     }
 
-    /// Assemble the [`PreprocessedSource`] from the driver's state: the
-    /// token stream is moved out, everything else is copied. Files without
-    /// a `$module` declaration map to the anonymous root module `""`.
+    /// Files without a `$module` declaration map to the anonymous root module
+    /// `""`.
     fn build_output(&mut self) -> PreprocessedSource {
         let modules = self
             .file_modules
@@ -303,9 +235,8 @@ impl Preprocessor {
         }
     }
 
-    /// Format an error prefixed with the source file it came from (resolved
-    /// via `pos.file_id` against the file registry) and its line/column —
-    /// the same shape the parser and type checker produce.
+    /// Prefixes the error with `file:line:column` (resolved via `pos.file_id`
+    /// against the file registry) — the shape the parser and checker produce.
     #[must_use]
     pub fn format_error(&self, err: &PreprocessError) -> String {
         let Some(pos) = err.position() else {
@@ -317,10 +248,8 @@ impl Preprocessor {
         }
     }
 
-    /// Lex one file and walk its tokens, returning its file id. Used as the
-    /// entry point AND as the recursive descent step for `$import`. An
-    /// already-seen canonical path is a silent no-op that returns the
-    /// existing id (canonical-path dedup).
+    /// The entry point AND the recursive descent step for `$import`. An
+    /// already-seen canonical path is a silent no-op returning the existing id.
     pub(crate) fn process_file(&mut self, path: &Path) -> Result<u32, PreprocessError> {
         let canon = path
             .canonicalize()
@@ -328,8 +257,6 @@ impl Preprocessor {
                 path: path.to_path_buf(),
                 reason: e.to_string(),
             })?;
-        // Allocate a fresh file id the first time we see this canonical
-        // path; subsequent inclusions of the same file are silent no-ops.
         if let Some(&id) = self.seen.get(&canon) {
             return Ok(id);
         }
@@ -350,10 +277,9 @@ impl Preprocessor {
         Ok(file_id)
     }
 
-    /// Close out the current file: pop its context and merge its direct
-    /// imports into the imports map under the file's (now final) module —
-    /// the anonymous root module `""` when it declared none. Ensures every
-    /// processed file's module has an entry, even an empty one.
+    /// Merges the file's direct imports into the imports map under its now-final
+    /// module — `""` when it declared none — ensuring every processed file's
+    /// module has an entry, even an empty one.
     fn finish_file(&mut self) {
         let ctx = self
             .file_stack
@@ -370,21 +296,18 @@ impl Preprocessor {
         }
     }
 
-    /// Walk one file's raw token stream: dispatch line-anchored directives,
-    /// substitute defines into everything else. While a conditional branch
-    /// is skipped, ordinary tokens (newlines included) are discarded and
-    /// only the conditional directives themselves have any effect.
+    /// Dispatch line-anchored directives, substitute defines into everything
+    /// else. While a conditional branch is skipped, ordinary tokens (newlines
+    /// included) are discarded and only conditional directives have effect.
     ///
     /// Conditional chains are per-file: the stack depth at entry is the
-    /// baseline this file must return to — anything still open at its end
-    /// is unterminated (and `conditional.rs` refuses to close a frame
-    /// another file opened).
+    /// baseline this file must return to — anything still open at its end is
+    /// unterminated.
     fn process_tokens(&mut self, raw: &[Token]) -> Result<(), PreprocessError> {
         let cond_baseline = self.conditionals.depth();
-        // Raw-source brace depth for top-level directive enforcement. Only
-        // active tokens count: skipped content is discarded wholesale, and
-        // a skip can only start at depth 0 (the opening directive would
-        // itself have errored otherwise), so the depth stays honest.
+        // Only active tokens count toward brace depth: a skip can only start at
+        // depth 0 (the opening directive would have errored otherwise), so
+        // discarding skipped content wholesale keeps the depth honest.
         let mut brace_depth = 0usize;
         let mut i = 0;
         let mut at_line_start = true;
@@ -397,23 +320,17 @@ impl Preprocessor {
                         if self.conditionals.active() {
                             return Err(PreprocessError::MidLineDirective(token.pos));
                         }
-                        // Skipped-branch content is discarded, a mid-line
-                        // `$` included.
                         i += 1;
                         continue;
                     }
-                    // Everything up to the newline belongs to the directive.
-                    // Brace-depth enforcement is deferred to
-                    // `process_directive_line`: conditional directives are
-                    // valid inside a block, the rest are top-level only.
                     let line_len = raw[i..]
                         .iter()
                         .position(|t| matches!(t.kind, TokenKind::Newline | TokenKind::Eof))
                         .unwrap_or(raw.len() - i);
                     self.process_directive_line(&raw[i..i + line_len], brace_depth)?;
                     i += line_len;
-                    // Consume the terminating newline too (nothing of the
-                    // directive line reaches the output stream).
+                    // Consume the terminating newline; nothing of the directive
+                    // line reaches the output.
                     if matches!(raw.get(i).map(|t| &t.kind), Some(TokenKind::Newline)) {
                         i += 1;
                     }
@@ -433,8 +350,6 @@ impl Preprocessor {
                             _ => {}
                         }
                         {
-                            // Substitute using the current file's scope: its
-                            // own module and direct imports, plus globals.
                             let ctx = self.file_stack.last().expect(
                                 "a file context is always active while tokens are processed",
                             );
@@ -449,10 +364,8 @@ impl Preprocessor {
                             );
                             scoped.expand_into(&mut self.tokens, token);
                         }
-                        // The file now has non-directive content — `$module`
-                        // can no longer appear (newlines don't count). Only
-                        // *emitted* tokens count: content inside a skipped
-                        // conditional branch does not block a later `$module`.
+                        // Only *emitted* tokens block a later `$module`:
+                        // content inside a skipped conditional branch does not.
                         if let Some(ctx) = self.file_stack.last_mut() {
                             ctx.saw_content = true;
                         }
@@ -468,21 +381,14 @@ impl Preprocessor {
         Ok(())
     }
 
-    /// Dispatch one directive line (`line[0]` is the `$`, the newline is
-    /// already stripped) to its handler. Each arm is a small function call
-    /// into the directive family's submodule.
+    /// `line[0]` is the `$`, the newline already stripped.
     ///
-    /// Conditional directives are always processed — they steer the skip
-    /// state and keep nesting matched inside skipped branches. Every other
-    /// directive is inert while a branch is skipped: `$define` does not
-    /// define, `$import` does not resolve, unknown names do not error.
-    ///
-    /// `brace_depth` is the raw-source block nesting at the directive.
-    /// Conditional directives (`$if*`/`$else`/`$endif`) are valid at any
-    /// depth — conditional compilation works inside a function body just as
-    /// at the top level. The remaining directives establish module-level
-    /// state (`$define`/`$undefine`) or file structure (`$module`/`$import`),
-    /// so they stay top-level only and error inside a block.
+    /// Conditional directives are always processed — they steer the skip state
+    /// and keep nesting matched inside skipped branches. Every other directive
+    /// is inert while a branch is skipped: `$define` does not define, `$import`
+    /// does not resolve, unknown names do not error. Those directives also
+    /// mutate module-level state or file structure, so they error at
+    /// `brace_depth > 0`; conditionals are valid at any depth.
     fn process_directive_line(
         &mut self,
         line: &[Token],
@@ -536,9 +442,8 @@ impl Preprocessor {
         }
     }
 
-    /// `$define NAME [tokens]` — the rest of the line is the (possibly
-    /// empty) replacement token sequence, stored unexpanded; substitution
-    /// happens at use sites.
+    /// The replacement tokens are stored unexpanded; substitution happens at
+    /// use sites.
     fn handle_define(&mut self, rest: &[Token], pos: Position) -> Result<(), PreprocessError> {
         let Some((name_token, value)) = rest.split_first() else {
             return Err(PreprocessError::ExpectedName {
@@ -562,7 +467,6 @@ impl Preprocessor {
         )
     }
 
-    /// `$undefine NAME` — removes the define; a no-op if it isn't defined.
     fn handle_undefine(&mut self, rest: &[Token], pos: Position) -> Result<(), PreprocessError> {
         let Some(name_token) = rest.first() else {
             return Err(PreprocessError::ExpectedName {
@@ -605,7 +509,6 @@ fn suggest_directive(name: &str) -> Option<String> {
         .map(|(_, candidate)| candidate.to_string())
 }
 
-/// Classic two-row Levenshtein edit distance.
 fn levenshtein(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
@@ -622,8 +525,6 @@ fn levenshtein(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
-/// Run the driver over an in-memory source string (registered as file id 0)
-/// — lets unit tests exercise the walk without touching the filesystem.
 #[cfg(test)]
 pub(crate) fn preprocess_str(source: &str) -> Result<Vec<Token>, PreprocessError> {
     preprocess_str_with(Preprocessor::new(), source)
@@ -638,11 +539,8 @@ pub(crate) fn preprocess_str_with(
     Ok(preprocess_str_full(pp, source)?.tokens)
 }
 
-/// Full-output variant of [`preprocess_str_with`] for tests that inspect
-/// the module registry alongside the tokens. The in-memory source is
-/// registered as file id 0 with a synthetic file context, mirroring what
-/// [`Preprocessor::process_file`] sets up for real files. No trailing EOF
-/// token is appended (matching the historical `preprocess_str` shape).
+/// Full-output variant of `preprocess_str_with` for tests that inspect the
+/// module registry. No trailing EOF token is appended.
 #[cfg(test)]
 pub(crate) fn preprocess_str_full(
     mut pp: Preprocessor,

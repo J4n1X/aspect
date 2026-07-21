@@ -1,15 +1,10 @@
 //! Compile-time constant expression evaluation.
 //!
-//! `const_eval` is the constant-folding counterpart to `walk_expression`
-//! (`super::expressions`). Where `walk_expression` emits runtime LLVM IR via
-//! the builder (`RuntimeEmitter`), `const_eval` folds the expression tree in
-//! Rust and reconstructs LLVM constants via `ConstantEmitter`, returning an
-//! `Err` for any sub-expression that has no constant-folding path.
-//!
-//! This is the single entry-point for global initializers, `const`-local
-//! folding and the constant array/struct fast-paths. The "is this a constant?"
-//! predicate is just `const_eval(...).ok()` (see
-//! `CodeGenerator::try_fold_constant_expression`).
+//! The constant-folding counterpart to `walk_expression`: folds the expression
+//! tree in Rust and reconstructs LLVM constants via `ConstantEmitter`,
+//! returning `Err` for any sub-expression with no constant-folding path. Drives
+//! global initializers, `const`-local folding, and the constant array/struct
+//! fast-paths.
 
 use inkwell::AddressSpace;
 use inkwell::values::BasicValueEnum;
@@ -24,14 +19,12 @@ use crate::parser::{ExprKind, Expression, LiteralValue};
 
 /// Evaluate `expr` as a compile-time constant, producing an LLVM constant value.
 ///
-/// Returns `Err` when `expr` (or any sub-expression) is not a compile-time
-/// constant — the same errors the old `EmitMode::Constant` walk produced.
+/// Returns `Err` when `expr` (or any sub-expression) is not a compile-time constant.
 pub(crate) fn const_eval<'ctx>(
     expr: &Expression,
     cg: &mut CodeGenerator<'ctx>,
 ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
     match &expr.kind {
-        // ── Literals ──────────────────────────────────────────────────────
         ExprKind::Literal(lit) => match lit {
             LiteralValue::Integer(val) => ConstantEmitter {
                 context: cg.context,
@@ -62,9 +55,8 @@ pub(crate) fn const_eval<'ctx>(
                 .into()),
         },
 
-        // ── Variable ──────────────────────────────────────────────────────
         ExprKind::Variable(name) => {
-            // Check local scope first (const locals store their folded value).
+            // Const locals store their folded value.
             for scope in cg.scope.iter_scopes() {
                 if let Some(var) = scope.get(name) {
                     return var.const_value.ok_or_else(|| {
@@ -75,18 +67,14 @@ pub(crate) fn const_eval<'ctx>(
                     });
                 }
             }
-            // Fall back to global initializer.
             let global_val = cg
                 .module
                 .get_global(name)
                 .ok_or_else(|| CodegenError::UndefinedVariable(name.clone(), expr.pos))?;
             // A mutable global's runtime value is *not* its initializer, so it
-            // cannot be folded — a caller like a local `u64 x = g` would then
-            // capture the compile-time start value instead of the current one.
-            // The one place folding is correct is another global's initializer,
-            // which is order-sensitive static init reading a prior start value;
-            // `in_global_init` marks exactly that context. A `const` global is
-            // immutable, so its initializer *is* its value everywhere.
+            // can't be folded — except inside another global's initializer,
+            // order-sensitive static init reading a prior start value, which
+            // `in_global_init` marks. A `const` global is immutable everywhere.
             if !global_val.is_constant() && !cg.in_global_init {
                 return Err(CodegenError::InvalidOperation(
                     format!("global '{name}' is not a compile-time constant"),
@@ -104,7 +92,6 @@ pub(crate) fn const_eval<'ctx>(
             })
         }
 
-        // ── Binary operations ─────────────────────────────────────────────
         ExprKind::Binary { left, op, right } => {
             let left_val = const_eval(left, cg)?;
             let right_val = const_eval(right, cg)?;
@@ -130,13 +117,11 @@ pub(crate) fn const_eval<'ctx>(
             )
         }
 
-        // ── Comparison (no constant path) ─────────────────────────────────
         ExprKind::Comparison { .. } => Err(CodegenError::InvalidOperation(
             "comparison not supported in constant expressions".to_string(),
             expr.pos,
         )),
 
-        // ── Address-of ────────────────────────────────────────────────────
         ExprKind::Reference(inner) => match &inner.kind {
             ExprKind::Variable(name) => {
                 let ptr = cg
@@ -157,19 +142,16 @@ pub(crate) fn const_eval<'ctx>(
             )),
         },
 
-        // ── Dereference (no constant path) ────────────────────────────────
         ExprKind::Dereference(_) => Err(CodegenError::InvalidOperation(
             "dereference not supported in constant expressions".to_string(),
             expr.pos,
         )),
 
-        // ── Function call (no constant path) ──────────────────────────────
         ExprKind::FunctionCall { .. } => Err(CodegenError::InvalidOperation(
             "function calls not supported in constant expressions".to_string(),
             expr.pos,
         )),
 
-        // ── Cast ──────────────────────────────────────────────────────────
         ExprKind::Cast {
             expr: inner,
             target_type,
@@ -184,10 +166,8 @@ pub(crate) fn const_eval<'ctx>(
             .emit_cast(val, target_llvm, &inner.expr_type, target_type, inner.pos)
         }
 
-        // ── Alloc (global alloc materialises a zeroed global) ─────────────
         ExprKind::Alloc { alloc_type, count } => cg.generate_alloc(alloc_type, count),
 
-        // ── Logical NOT ───────────────────────────────────────────────────
         ExprKind::UnaryNot(inner) => {
             let raw = const_eval(inner, cg)?;
             // `!p` on a pointer is a null test — runtime only, pointers don't fold.
@@ -211,25 +191,21 @@ pub(crate) fn const_eval<'ctx>(
                 .into())
         }
 
-        // ── Bitwise NOT ───────────────────────────────────────────────────
         ExprKind::BitwiseNot(inner) => {
             let val = const_eval(inner, cg)?.into_int_value();
             Ok(val.const_not().into())
         }
 
-        // ── List initializer (only valid in a variable declaration) ───────
         ExprKind::ListInitializer(_) => Err(CodegenError::InvalidOperation(
             "list initializer is only valid in a variable declaration".to_string(),
             expr.pos,
         )),
 
-        // ── Field access (no constant path) ───────────────────────────────
         ExprKind::FieldAccess { .. } => Err(CodegenError::InvalidOperation(
             "field access not supported in constant expressions".to_string(),
             expr.pos,
         )),
 
-        // ── Struct literal — fold every field into a constant struct ──────
         ExprKind::StructLiteral { struct_id, fields } => {
             let struct_ty = *cg.struct_types.get(struct_id).ok_or_else(|| {
                 CodegenError::TypeError(
@@ -256,7 +232,7 @@ pub(crate) fn const_eval<'ctx>(
             Ok(struct_ty.const_named_struct(&vals).into())
         }
 
-        // ── Function reference: a link-time-constant function address ─────
+        // A link-time-constant function address.
         ExprKind::FunctionRef(name) => {
             let function = cg
                 .functions
@@ -266,31 +242,26 @@ pub(crate) fn const_eval<'ctx>(
             Ok(function.as_global_value().as_pointer_value().into())
         }
 
-        // ── Enum variant value: a compile-time `i32` constant ─────────────
         ExprKind::EnumValue { value, .. } => {
             Ok(cg.context.i32_type().const_int(*value as u64, false).into())
         }
 
-        // ── Indirect call (no constant path) ──────────────────────────────
         ExprKind::IndirectCall { .. } => Err(CodegenError::InvalidOperation(
             "indirect call not supported in constant expressions".to_string(),
             expr.pos,
         )),
 
-        // ── `sizeof(T)` — a fixed `u64` from the target data layout ────────
         ExprKind::SizeOf(ty) => {
             let bytes = cg.sizeof_lang_type(ty, expr.pos)?;
             Ok(cg.context.i64_type().const_int(bytes, false).into())
         }
 
-        // ── `null` — opaque-ptr null constant ─────────────────────────────
         ExprKind::Null => Ok(cg
             .context
             .ptr_type(AddressSpace::default())
             .const_null()
             .into()),
 
-        // ── Value-block executes statements — never a constant ────────────
         ExprKind::ValueBlock(_) => Err(CodegenError::InvalidOperation(
             "value block is not a compile-time constant".to_string(),
             expr.pos,

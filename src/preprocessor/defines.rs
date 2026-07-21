@@ -1,41 +1,27 @@
 //! `$define NAME` / `$define NAME <tokens>` / `$undefine NAME` — the define
 //! table and identifier substitution.
 //!
-//! Defines are **object-like only**: a name maps to a replacement token
-//! sequence (empty for flag defines like `$define DEBUG`). There are no
-//! function-like macros — parameterised code generation is the metasystem
+//! Defines are **object-like only** — a name maps to a replacement token
+//! sequence (empty for flag defines). Function-like macros are the metasystem
 //! expansion hook's job, not the preprocessor's.
 //!
-//! ## Substitution
+//! Substitution splices a defined name's tokens in wherever it appears as an
+//! identifier, each stamped with the *use-site* position so downstream errors
+//! point at the usage. It is recursive but a name expands at most once per
+//! chain (self-reference guard, like C): `$define X X + 1` emits `X + 1` with
+//! the inner `X` left plain. Being token-level, it is word-boundary-safe and
+//! never touches string literals (single tokens).
 //!
-//! Wherever a defined name appears as an [`TokenKind::Identifier`] token in
-//! the output stream, the define's tokens are spliced in, each stamped with
-//! the *use-site* position so downstream errors point at the usage.
-//! Substitution is recursive, but a name may expand at most once per
-//! expansion chain (self-reference guard, like C) — `$define X X + 1` emits
-//! `X + 1` with the inner `X` left as a plain identifier. Token-level
-//! substitution is word-boundary-safe by construction, and string literals
-//! are single tokens, so they are never touched.
+//! Redefinition is a uniform error: platform and `-D` defines count as prior
+//! defines exactly like a `$define`. Overridable defaults use an `$ifndef`
+//! guard instead.
 //!
-//! ## Redefinition
-//!
-//! Redefinition is an error, uniformly: compiler-provided platform defines
-//! and `-D` CLI defines count as prior defines exactly like a `$define`
-//! directive. Files that want overridable defaults write the `$ifndef`
-//! guard instead (Phase 2).
-//!
-//! ## Module scoping
-//!
-//! A `$define` is **module-scoped**, mirroring the non-transitive symbol
-//! rule the parser enforces: its macro is visible only from its **defining
-//! module** and any file that **directly `$import`s** that module. Two
-//! *unrelated* modules may therefore `$define` the same name without
-//! colliding — redefinition is an error only within one module (or against a
-//! global define). Compiler-provided and `-D` CLI defines have **no** module
-//! (they are global) and stay visible everywhere. Lookup and expansion go
-//! through a [`ScopedDefines`] view carrying the querying file's module and
-//! direct imports; the raw [`DefineTable::get`] / [`DefineTable::is_defined`]
-//! accessors are module-unaware and only meaningful for global defines.
+//! A `$define` is **module-scoped**, mirroring the non-transitive symbol rule:
+//! visible only from its defining module and any file that **directly**
+//! imports it. Two unrelated modules may define the same name without
+//! colliding. Compiler and `-D` defines have no module and stay visible
+//! everywhere. Lookup goes through a `ScopedDefines` view; the raw
+//! `DefineTable` accessors are module-unaware.
 
 use std::collections::HashMap;
 
@@ -44,21 +30,18 @@ use crate::target::TargetSpec;
 
 use super::errors::PreprocessError;
 
-/// Where a define came from. Drives redefinition diagnostics and makes the
-/// uniform redefinition rule concrete: every origin counts as a prior define.
+/// Every origin counts as a prior define for the uniform redefinition rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DefineOrigin {
     /// Seeded by the compiler itself (platform / version defines).
     Builtin,
     /// Injected with `-D NAME[=VALUE]` on the command line.
     Cli,
-    /// Declared by a `$define` directive at this position.
     Directive(Position),
 }
 
 impl DefineOrigin {
-    /// Human-readable description of the *previous* definition site, spliced
-    /// into redefinition error messages.
+    /// Description of the *previous* definition site, for redefinition errors.
     fn describe(self) -> String {
         match self {
             DefineOrigin::Builtin => "previously provided by the compiler".to_string(),
@@ -68,24 +51,18 @@ impl DefineOrigin {
     }
 }
 
-/// A single define: its replacement tokens (empty for flag defines) and
-/// where it was made.
 #[derive(Debug, Clone)]
 pub struct Define {
+    /// Empty for flag defines.
     pub tokens: Vec<Token>,
     pub origin: DefineOrigin,
 }
 
-/// The define table. Owned by the driver; conditionals and substitution
-/// consult it through a module-scoped [`ScopedDefines`] view.
-///
-/// A name maps to a **list** of defines rather than a single one: because
-/// `$define`s are module-scoped, the same name may be defined independently
-/// in several unrelated modules, and each such define is a distinct entry
-/// (each tagged, via its [`DefineOrigin::Directive`] position's `file_id`,
-/// with the file — hence module — that declared it). Globals occupy a
-/// single entry; the redefinition rule keeps every list free of colliding
-/// entries.
+/// A name maps to a **list** of defines, not one: because `$define`s are
+/// module-scoped, the same name may be defined independently in several
+/// unrelated modules, each a distinct entry tagged (via its
+/// [`DefineOrigin::Directive`] position's `file_id`) with its declaring file.
+/// The redefinition rule keeps every list free of colliding entries.
 #[derive(Debug, Default)]
 pub struct DefineTable {
     map: HashMap<String, Vec<Define>>,
@@ -98,12 +75,9 @@ impl DefineTable {
         Self::default()
     }
 
-    /// A table pre-seeded with the compiler-provided defines: `OS_LINUX` /
-    /// `OS_WINDOWS` / `OS_MACOS` and `ARCH_X86_64` / `ARCH_AARCH64` as flag
-    /// defines from `target` (the *compilation* target — see
-    /// [`crate::target::TargetSpec`], never the compiler binary's own build
-    /// host), plus `ASPECT_VERSION_MAJOR` / `ASPECT_VERSION_MINOR` as integer
-    /// tokens from the crate version.
+    /// Seeds `OS_*` / `ARCH_*` flag defines from `target` (the *compilation*
+    /// target, never the compiler binary's own build host) plus
+    /// `ASPECT_VERSION_MAJOR` / `_MINOR` from the crate version.
     #[must_use]
     pub fn with_platform_defines(target: &TargetSpec) -> Self {
         let mut table = Self::default();
@@ -152,17 +126,14 @@ impl DefineTable {
         );
     }
 
-    /// True iff *any* define named `name` exists — **module-unaware**: it
-    /// ignores visibility and so is only meaningful for global defines (a
-    /// module-scoped `$ifdef`/`defined(NAME)` goes through [`ScopedDefines`]).
+    /// **Module-unaware**: ignores visibility, so meaningful only for global
+    /// defines (module-scoped lookup goes through `ScopedDefines`).
     #[must_use]
     pub fn is_defined(&self, name: &str) -> bool {
         self.map.contains_key(name)
     }
 
-    /// The first define named `name`, if any — **module-unaware** (see
-    /// [`DefineTable::is_defined`]); use [`ScopedDefines::get`] for scoped
-    /// lookup.
+    /// The first define named `name` — **module-unaware** (see `is_defined`).
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&Define> {
         self.map.get(name).and_then(|defs| defs.first())
@@ -177,12 +148,9 @@ impl DefineTable {
         ScopedDefines::new(self, "", &[], &[])
     }
 
-    /// Register `name` → `tokens`, tagging the entry (via `origin`) with the
-    /// module that declared it. Redefinition is an error only when the new
-    /// define collides with a **visible-everywhere** global or with another
-    /// define **in the same module**; the same name in two unrelated modules
-    /// is not a collision. `file_modules` resolves each entry's home module
-    /// from the `file_id` in its origin position.
+    /// Redefinition is an error only when the new define collides with a
+    /// visible-everywhere global or with another define in the same module;
+    /// the same name in two unrelated modules is not a collision.
     ///
     /// # Errors
     /// [`PreprocessError::Redefinition`] when a `$define` directive collides;
@@ -224,11 +192,9 @@ impl DefineTable {
         Ok(())
     }
 
-    /// Remove the current file's own module's `$define` of `name`; a no-op
-    /// when it isn't defined there. Only the module of `this_file` is
-    /// touched — an imported module's define and every global are left in
-    /// place (a `$undefine` in one file must not unbind another module's or
-    /// another file's macro). `file_modules` resolves home modules.
+    /// Touches only `this_file`'s own module: an imported module's define and
+    /// every global stay in place, so a `$undefine` in one file cannot unbind
+    /// another module's or another file's macro.
     pub fn undefine(&mut self, name: &str, this_file: u32, file_modules: &[Option<String>]) {
         let this_module = module_of(file_modules, this_file);
         let Some(defs) = self.map.get_mut(name) else {
@@ -243,9 +209,8 @@ impl DefineTable {
         }
     }
 
-    /// Parse a `-D NAME` / `-D NAME=VALUE` spec and register it. The value
-    /// (everything after the first `=`) is lexed into a token sequence with
-    /// the same scanner source files go through.
+    /// The value (everything after the first `=`) is lexed with the same
+    /// scanner source files go through.
     ///
     /// # Errors
     /// [`PreprocessError::InvalidCliDefine`] for a malformed name or an
@@ -271,13 +236,9 @@ impl DefineTable {
     }
 }
 
-/// A single file's scoped view of the define table for lookup, `$if`/`$ifdef`
-/// evaluation, and identifier substitution. It bundles the shared table with
-/// the querying file's own module and direct imports (plus the file→module
-/// map used to resolve each define's home module), and applies the
-/// module-visibility rule described on this module: globals are visible
-/// everywhere, a `$define` macro only from its home module or a direct
-/// importer of that module.
+/// A single file's scoped view of the define table, applying the module
+/// visibility rule: globals everywhere, a `$define` macro only from its home
+/// module or a direct importer of it.
 pub(crate) struct ScopedDefines<'a> {
     table: &'a DefineTable,
     /// The querying file's module (`""` for the anonymous root).
@@ -316,31 +277,26 @@ impl<'a> ScopedDefines<'a> {
         }
     }
 
-    /// True iff a *visible* define named `name` exists.
     pub(crate) fn is_defined(&self, name: &str) -> bool {
         self.get(name).is_some()
     }
 
-    /// The visible define named `name`, if any. (A name is either a single
-    /// global or a set of module-scoped entries with distinct home modules,
-    /// so at most one entry is visible from any given file.)
+    /// A name is either one global or a set of module-scoped entries with
+    /// distinct home modules, so at most one entry is visible from any file.
     pub(crate) fn get(&self, name: &str) -> Option<&'a Define> {
         self.table.map.get(name)?.iter().find(|def| self.sees(def))
     }
 
-    /// Append `token` to `out`, splicing in its define expansion (recursively)
-    /// when it is an identifier bound to a *visible* define. Spliced tokens
-    /// are re-stamped with the use-site position. Flag defines expand to
-    /// nothing.
+    /// Spliced tokens are re-stamped with the use-site position; flag defines
+    /// expand to nothing.
     pub(crate) fn expand_into(&self, out: &mut Vec<Token>, token: &Token) {
         let mut active = Vec::new();
         self.expand_token(out, token, &mut active);
     }
 
-    /// Recursive step for [`ScopedDefines::expand_into`]. `active` is the
-    /// expansion chain: a name already on it does not expand again
-    /// (self-reference guard), so mutually-recursive defines terminate with
-    /// the inner name left verbatim.
+    /// `active` is the expansion chain: a name already on it does not expand
+    /// again (self-reference guard), so mutually-recursive defines terminate
+    /// with the inner name left verbatim.
     fn expand_token(&self, out: &mut Vec<Token>, token: &Token, active: &mut Vec<String>) {
         if let TokenKind::Identifier(name) = &token.kind
             && !active.iter().any(|n| n == name)
@@ -377,7 +333,6 @@ fn home_module(origin: DefineOrigin, file_modules: &[Option<String>]) -> Option<
     }
 }
 
-/// Parse one Cargo version component (`env!` hands them over as strings).
 fn version_component(s: &str) -> i64 {
     s.parse()
         .expect("Cargo version components are always integers")
@@ -402,7 +357,6 @@ fn is_identifier(name: &str) -> bool {
     )
 }
 
-/// Lex a `-D NAME=VALUE` value into its replacement token sequence.
 fn lex_define_value(spec: &str, value: &str) -> Result<Vec<Token>, PreprocessError> {
     let mut tokens = tokenize(value.to_string()).map_err(|e| PreprocessError::InvalidCliDefine {
         spec: spec.to_string(),
@@ -417,8 +371,6 @@ mod tests {
     use super::super::{preprocess_str, preprocess_str_with, Preprocessor};
     use super::*;
 
-    /// Strip the trailing Eof and any Newline tokens so assertions can focus
-    /// on the interesting kinds.
     fn kinds(tokens: Vec<Token>) -> Vec<TokenKind> {
         tokens
             .into_iter()
@@ -451,7 +403,6 @@ mod tests {
             &err,
             PreprocessError::Redefinition { name, .. } if name == "MAX"
         ));
-        // The message names the prior definition site (line 1).
         assert!(err.to_string().contains("previously defined at 1:"));
     }
 

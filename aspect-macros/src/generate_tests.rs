@@ -16,17 +16,14 @@ struct Annotation {
     run_args: Vec<String>,
     compile_args: Vec<String>,
     requires_arch: Option<String>,
-    /// `# expected_warning: "frag"` — an optional fragment that must appear in
-    /// the type checker's non-fatal warnings (stderr). Only meaningful on a
-    /// runtime (`# expected: <code>`) test, since a warning does not fail the
-    /// build. `None` when absent.
+    /// `# expected_warning: "frag"` — a fragment that must appear in the
+    /// checker's warnings. Only meaningful on a runtime test.
     expected_warning: Option<String>,
 }
 
-/// Map an `ARCH_*` name — the same spelling [`TargetSpec::arch_define`] seeds
-/// for `$ifdef` — to the `cfg(target_arch = ..)` value naming the same
-/// machine. `None` for an unrecognised name, which is treated as "no gate"
-/// rather than silently disabling the test.
+/// Maps an `ARCH_*` name to the `cfg(target_arch = ..)` value for the same
+/// machine. `None` for an unrecognised name — treated as "no gate", not a
+/// silently disabled test.
 fn cfg_target_arch_for(arch_define: &str) -> Option<&'static str> {
     match arch_define {
         "ARCH_X86_64" => Some("x86_64"),
@@ -46,7 +43,7 @@ fn parse_string_list(s: &str) -> Vec<String> {
         if remaining.is_empty() || !remaining.starts_with('"') {
             break;
         }
-        remaining = &remaining[1..]; // skip opening "
+        remaining = &remaining[1..];
         let Some(end) = remaining.find('"') else {
             break;
         };
@@ -56,21 +53,13 @@ fn parse_string_list(s: &str) -> Vec<String> {
     result
 }
 
-/// Scan the first 10 lines of `path` for `# expected:`, `# run_args:`,
-/// `# compile_args:`, and `# requires_arch:` annotations. Returns `None` if
-/// no `# expected:` annotation is found (file is skipped).
+/// Scans the first 10 lines of `path` for `# expected:` and friends; `None`
+/// (file skipped) when no `# expected:` is found.
 ///
-/// `# compile_args:` holds extra compiler flags for the invocation, as a
-/// quoted-string list mirroring the CLI word-for-word — e.g.
-/// `# compile_args: "-D", "DEBUG=1", "-I", "lib"`.
-///
-/// `# requires_arch: ARCH_X86_64` (bare, unquoted) compiles the generated
-/// test only on that host architecture. A program that *runs* can gate itself
-/// with `$ifdef ARCH_X86_64` and compute the same answer in the `$else`
-/// branch, but a program asserting a *compile error* cannot: gating it away
-/// leaves a program that compiles clean, so the test would fail by expecting
-/// an error that no longer exists. Such a test has to be gated from outside,
-/// which is what this does.
+/// `# requires_arch: ARCH_X86_64` compiles the test only on that host arch. A
+/// *running* program can gate itself with `$ifdef` and match in the `$else`,
+/// but a program asserting a *compile error* can't — gating it away leaves a
+/// clean-compiling program, so the test must be gated from outside.
 fn parse_annotation(path: &Path) -> Option<Annotation> {
     let source = fs::read_to_string(path).ok()?;
     let mut expected: Option<Expected> = None;
@@ -133,14 +122,9 @@ fn collect_aspect_files(dir: &Path) -> Vec<PathBuf> {
 
 // ── Test name derivation ──────────────────────────────────────────────────────
 
-/// Derive a valid Rust identifier from a path relative to the scan root.
-/// `prefix` is the leading segment of the test fn name (e.g. `"test"` for
-/// `tests/programs/` files, `"test_demo"` for `demos/` files).
-///
-/// `failures/literal_overflow.ap` with prefix `"test"`
-///   → `test_failures_literal_overflow`
-/// `hello.ap` with prefix `"test_demo"`
-///   → `test_demo_hello`
+/// A valid Rust identifier from a scan-root-relative path, e.g.
+/// `failures/literal_overflow.ap` with prefix `"test"` →
+/// `test_failures_literal_overflow`.
 fn make_test_ident(relative: &Path, prefix: &str) -> proc_macro2::Ident {
     let components: Vec<_> = relative.components().collect();
     let n = components.len();
@@ -169,10 +153,8 @@ pub fn generate_tests_impl(_input: TokenStream) -> TokenStream {
 
     let mut output = TokenStream2::new();
 
-    // One scan root: the integration-test corpus. Demos are showcase
-    // programs, not regression tests — they are deliberately NOT scanned.
-    // Helpers under `tests/programs/include_helpers/` lack `# expected:`
-    // and are silently skipped.
+    // Only the integration-test corpus. Demos are showcase programs, not
+    // regression tests, so they are deliberately NOT scanned.
     let scans: [(&str, &[&str], &str); 1] = [("test", &["tests", "programs"], "")];
 
     for (prefix, base_components, _) in &scans {
@@ -185,7 +167,7 @@ pub fn generate_tests_impl(_input: TokenStream) -> TokenStream {
 
         for abs_path in paths {
             let Some(ann) = parse_annotation(&abs_path) else {
-                continue; // no # expected: annotation — skip
+                continue;
             };
 
             // Path used in compile_and_run calls (relative to workspace root, forward slashes)
@@ -201,9 +183,8 @@ pub fn generate_tests_impl(_input: TokenStream) -> TokenStream {
 
             let compile_args: Vec<&str> = ann.compile_args.iter().map(String::as_str).collect();
 
-            // `# requires_arch:` gates the whole test on the host arch. An
-            // unrecognised name leaves the test ungated rather than silently
-            // compiling it out — a typo should not make a test disappear.
+            // An unrecognised arch name leaves the test ungated — a typo should
+            // not silently make a test disappear.
             let arch_gate: TokenStream2 = ann
                 .requires_arch
                 .as_deref()

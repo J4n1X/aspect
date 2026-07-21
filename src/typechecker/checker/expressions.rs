@@ -8,19 +8,13 @@ use crate::typechecker::types::{
 };
 
 impl TypeChecker {
-    // ── Expression type resolution (synthesis mode) ──────────────────────────
-
-    /// Synthesise the type of `expr` with no contextual expectation.
-    ///
-    /// Walks the expression, emits any type errors found, and returns its
-    /// resolved type. Used at sites where nothing constrains the type: callee
-    /// resolution, indices, conditions, cast/dereference operands.
+    /// Synthesise the type of `expr` with no contextual expectation (callee
+    /// resolution, indices, conditions, cast/dereference operands).
     pub(crate) fn synth_expression(&mut self, expr: &mut Expression) -> LangType {
         let pos = expr.pos;
-        // `MethodCall` is resolved and rewritten *before* the main match: it
-        // replaces the whole node (method → `FunctionCall`, fn-ptr field →
-        // `IndirectCall`), which a `match &mut expr.kind` arm cannot do. This is
-        // the checker's one in-place lowering — see `resolve_method_call`.
+        // `MethodCall` is rewritten *before* the match because it replaces the
+        // whole node — which a `match &mut expr.kind` arm cannot do. The
+        // checker's one in-place lowering; see `resolve_method_call`.
         if matches!(expr.kind, ExprKind::MethodCall { .. }) {
             return self.resolve_method_call(expr);
         }
@@ -28,10 +22,8 @@ impl TypeChecker {
         match &mut expr.kind {
             ExprKind::Literal(_) => default_type,
 
-            // An enum variant value: the parser already resolved the variant and
-            // stamped the enum type. It synthesises to exactly that enum type —
-            // never to a bare integer — which is what keeps enum ↔ int implicit
-            // coercion impossible.
+            // Synthesises to exactly the enum type, never a bare integer —
+            // which is what keeps enum ↔ int implicit coercion impossible.
             ExprKind::EnumValue { enum_id, .. } => {
                 let ty = LangType::enum_type(*enum_id);
                 expr.expr_type = ty;
@@ -66,7 +58,6 @@ impl TypeChecker {
                     expr.expr_type = bool_ty;
                     bool_ty
                 } else {
-                    // Result type: the wider of the two operand types (or left if equal)
                     Self::wider_type(&left_type, &right_type)
                 }
             }
@@ -75,11 +66,9 @@ impl TypeChecker {
                 let left_type = self.synth_expression(left);
                 let right_type = self.synth_expression(right);
 
-                // Enums are a nominal name set: two operands are comparable only
-                // when they are the *same* enum, and only `==`/`!=` are defined
-                // (there is no ordering — a variant's numeric value is an
-                // implementation detail). Enum-vs-int or enum-vs-other-enum is a
-                // type error, which is the whole point of a distinct enum type.
+                // Enums compare only to the *same* enum, and only `==`/`!=`
+                // (there is no ordering). Enum-vs-int or enum-vs-other-enum is a
+                // type error — the point of a distinct enum type.
                 let valid = if matches!(left_type.base, TypeBase::Enum(_))
                     || matches!(right_type.base, TypeBase::Enum(_))
                 {
@@ -100,12 +89,10 @@ impl TypeChecker {
                         position: pos,
                     });
                 }
-                // A comparison never propagates its own (`i32`) result type into
-                // its operands, but a literal operand may adopt its *sibling's*
-                // narrower integer type so codegen compares at that width instead
-                // of widening both sides to the literal's default `i32`. The
-                // boolean result is unaffected because the literal fits the
-                // sibling's exact type.
+                // A literal operand may adopt its *sibling's* narrower integer
+                // type so codegen compares at that width instead of widening
+                // both to the literal's default `i32`. The boolean result is
+                // unaffected since the literal fits the sibling's exact type.
                 Self::narrow_literal_to_sibling(left, right_type);
                 Self::narrow_literal_to_sibling(right, left_type);
                 let bool_ty = LangType::BOOL;
@@ -133,13 +120,10 @@ impl TypeChecker {
                 if inner_type.is_opaque_ptr() {
                     self.errors.push(TypeCheckError::OpaqueDereference(pos));
                 }
-                // Recompute the pointee from the just-synthesized inner type
-                // rather than trusting the parser's best-effort stamp: only the
-                // checker knows the base's const-ness (propagated through
-                // `resolve_field`), so a stale stamp would let `*const_ptr = x`
-                // and `*this.next = n` slip past the write-through-const check
-                // in `DerefAssign`. Const propagates downward — a const pointer
-                // yields a const pointee.
+                // Recompute the pointee from the synthesized inner type, not the
+                // parser's best-effort stamp: only the checker knows the base's
+                // const-ness, so a stale stamp would let `*const_ptr = x` slip
+                // past the write-through-const check. Const propagates downward.
                 let result = if inner_type.is_array() {
                     inner_type.element_type()
                 } else if inner_type.pointer_depth > 0 {
@@ -200,7 +184,6 @@ impl TypeChecker {
                         position: pos,
                     });
                 }
-                // Logical negation yields a boolean.
                 let bool_ty = LangType::BOOL;
                 expr.expr_type = bool_ty;
                 bool_ty
@@ -292,15 +275,12 @@ impl TypeChecker {
                 struct_ty
             }
 
-            // A bare function name (or `&func` collapsed) — the parser stamped
-            // the FnPtr type from the registry. Nothing to check; just hand it
-            // back. An unknown function name would have stayed `Variable` with
-            // a `void` stamp, so it never reaches this arm.
+            // The parser stamped the FnPtr type; nothing to check. An unknown
+            // name would have stayed `Variable` with a `void` stamp.
             ExprKind::FunctionRef(_) => default_type,
 
-            // Indirect call through a function-pointer value: synth the callee,
-            // validate it's a `FnPtr`, then `check` each arg against the
-            // declared parameter type (mirrors `check_call`'s pattern).
+            // Synth the callee, validate it's a `FnPtr`, then `check` each arg
+            // against the declared parameter type (mirrors `check_call`).
             ExprKind::IndirectCall { callee, args } => {
                 let callee_type = self.synth_expression(callee);
                 let sig_params: Option<Vec<LangType>> = match callee_type.base {
@@ -365,9 +345,9 @@ impl TypeChecker {
         }
     }
 
-    /// Resolve a field access on a base type, emitting an error and returning a
-    /// `void` placeholder when the base is not a type-struct or the field is
-    /// unknown. A single-level pointer-to-struct auto-dereferences.
+    /// Emits an error and returns a `void` placeholder when the base is not a
+    /// type-struct or the field is unknown. A single-level pointer-to-struct
+    /// auto-dereferences.
     fn resolve_field(
         &mut self,
         base_type: &LangType,
@@ -438,12 +418,9 @@ impl TypeChecker {
         }
     }
 
-    /// Enforce method encapsulation: a private method is callable only from
-    /// within its own type's methods. `name` is the call's mangled target
-    /// (`Type$method`); a name with no `$` is an ordinary free function and is
-    /// always accessible. The private-method twin of [`Self::resolve_field`]'s
-    /// private-field rule — the two syntactic call forms (`obj.m()`, `T.m()`)
-    /// have both already been lowered to this mangled name by the parser.
+    /// A private method is callable only from within its own type's methods.
+    /// `name` is the mangled target (`Type$method`); a name with no `$` is an
+    /// ordinary free function, always accessible.
     fn check_method_access(&mut self, name: &str, pos: crate::lexer::Position) {
         let Some((type_name, method_name)) = name.split_once('$') else {
             return;
@@ -464,10 +441,8 @@ impl TypeChecker {
         }
     }
 
-    /// Resolve a function call: validate the callee, arity, and argument types.
-    ///
-    /// Each argument is *checked* against its declared parameter type, which
-    /// pushes the parameter type into literal arguments.
+    /// Validates callee, arity, and argument types. Each argument is *checked*
+    /// against its parameter type, pushing that type into literal arguments.
     fn check_call(
         &mut self,
         name: &str,
@@ -501,28 +476,16 @@ impl TypeChecker {
         }
     }
 
-    // ── MethodCall resolution (checker-side lowering) ────────────────────────
-
-    /// Resolve an `ExprKind::MethodCall` in place: build the concrete call node
-    /// (`FunctionCall` for a method, `IndirectCall` for a fn-pointer field),
-    /// install it on `expr`, and return the call's result type by re-checking
-    /// the rewritten node.
+    /// Rewrite an `ExprKind::MethodCall` in place into a `FunctionCall` (method)
+    /// or `IndirectCall` (fn-pointer field), then return its type by re-checking.
     ///
-    /// This is the checker analogue of the parser's `build_method_call`; it
-    /// exists so metaprogram-generated AST (Three-Hook-Metasystem Phases 3/4),
-    /// which carries no parse-time receiver types, can defer method dispatch to
-    /// type-checking. It is a *one-shot* lowering — the resulting node is a
-    /// plain call, so re-checking it is stable — and must not be counted as a
-    /// handler rewrite by any future rounds driver (§14.1).
-    ///
-    /// The per-method privacy gate (`MethodSig.vis`) is enforced for free when
-    /// the rewritten `FunctionCall` flows through `check_call` →
-    /// `check_method_access`. The `public type` cross-module gate is
-    /// deliberately **not** reproduced here — the checker has no
-    /// `file_id → module` map — matching §14.2's accepted carve-out that
-    /// metaprogram-generated code bypasses import visibility. When the parser
-    /// eventually migrates to emit `MethodCall`, that gate (and the module maps
-    /// it needs) must move with it.
+    /// Exists so metaprogram-generated AST (with no parse-time receiver types)
+    /// can defer method dispatch to type-checking. A *one-shot* lowering — the
+    /// result is a plain call, so re-checking is stable. The per-method privacy
+    /// gate is enforced for free via the rewritten `FunctionCall` → `check_call`;
+    /// the `public type` cross-module gate is deliberately **not** reproduced
+    /// (the checker has no `file_id → module` map), an accepted carve-out for
+    /// metaprogram-generated code.
     fn resolve_method_call(&mut self, expr: &mut Expression) -> LangType {
         let pos = expr.pos;
         let (base, name, args) = match std::mem::replace(&mut expr.kind, ExprKind::Null) {
@@ -593,10 +556,9 @@ impl TypeChecker {
                 .symbols
                 .lookup_function(&mangled)
                 .map_or(LangType::VOID, |f| f.return_type);
-            // Receiver: autoref a value, pass a pointer as-is, reject deeper
-            // pointers. Const propagates into the reference type, so calling a
-            // mutating (non-`const fn`) method on a const receiver is rejected
-            // downstream by `check_call`'s coercion of the receiver arg.
+            // Autoref a value, pass a pointer as-is, reject deeper pointers.
+            // Const propagates into the reference type, so a mutating method on
+            // a const receiver is rejected downstream by `check_call`.
             let receiver = match base_type.pointer_depth {
                 0 => {
                     let ref_ty = base_type.with_pointer_depth(1);
@@ -725,18 +687,13 @@ impl TypeChecker {
         }
     }
 
-    // ── Expression type checking (checking mode) ─────────────────────────────
-
-    /// Check `expr` against the expected `target` type.
-    ///
-    /// Stamps `expr.expr_type` and pushes the target into children where the
-    /// child's type *is* the parent's type (arithmetic operands, bitwise-not,
-    /// reference/dereference, list-initialiser elements). Emits a single
-    /// `TypeMismatch` (or a more specific literal-fit error) on failure.
+    /// Stamps `expr.expr_type` and pushes `target` into children where the
+    /// child's type *is* the parent's (arithmetic operands, bitwise-not,
+    /// reference/dereference, list elements). Emits a single `TypeMismatch` (or
+    /// a more specific literal-fit error) on failure.
     pub(crate) fn check_expression(&mut self, expr: &mut Expression, target: &LangType) {
         let pos = expr.pos;
         match &mut expr.kind {
-            // Integer literal: validate value-fit against the target and stamp it.
             ExprKind::Literal(LiteralValue::Integer(val)) => {
                 let val = *val;
                 if literal_int_fits(val, target) {
@@ -750,7 +707,6 @@ impl TypeChecker {
                 }
             }
 
-            // Float literal: any float target accepts it; stamp the target.
             ExprKind::Literal(LiteralValue::Float(_)) => {
                 if literal_float_compatible(target) {
                     expr.expr_type = *target;
@@ -763,15 +719,13 @@ impl TypeChecker {
                 }
             }
 
-            // String literal: type is fixed; verify coercibility only.
             ExprKind::Literal(LiteralValue::String(_)) => {
                 self.assert_coercible(expr.expr_type, target, pos);
             }
 
-            // Binary arithmetic with a plain numeric target: propagate the
-            // target into both operands; the operation shares its result type.
-            // Logical `&&`/`||` are excluded — they yield a boolean, not the
-            // target type, so they fall through to the synth arm below.
+            // Plain-numeric target: propagate it into both operands. Logical
+            // `&&`/`||` are excluded — they yield a boolean, so they fall
+            // through to the synth arm below.
             ExprKind::Binary { left, op, right }
                 if target.is_plain_numeric()
                     && !matches!(op, BinaryOp::LogicalAnd | BinaryOp::LogicalOr) =>
@@ -805,14 +759,12 @@ impl TypeChecker {
                 expr.expr_type = *target;
             }
 
-            // Reference: the inner expression's target is the pointee type.
             // A Reference may produce a const-pointer to a non-const value
-            // (C-style `const T* p = &t`), so the inner itself need not carry
-            // the pointee's const-ness.
+            // (`const T* p = &t`), so the inner need not carry the pointee's
+            // const-ness.
             ExprKind::Reference(inner) => {
-                // Against an opaque `u0*` target the pointee is `u0` — no
-                // value has that type, so nothing useful can be pushed
-                // inward; synthesise instead (any `&lvalue` coerces to u0*).
+                // Against an opaque `u0*` target the pointee is `u0`, which no
+                // value has — synthesise instead (any `&lvalue` coerces to u0*).
                 let opaque_target =
                     target.base == TypeBase::Void && target.pointer_depth == 1;
                 if target.pointer_depth > 0 && !opaque_target {
@@ -840,8 +792,6 @@ impl TypeChecker {
                 expr.expr_type = *target;
             }
 
-            // List initialiser: decay the target to its element type and check
-            // every element against it.
             ExprKind::ListInitializer(elements) => {
                 let elem_target = target.element_type();
                 for elem in elements.iter_mut() {
@@ -849,15 +799,11 @@ impl TypeChecker {
                 }
             }
 
-            // `null` adopts whatever pointer type the context demands. The
-            // parser stamps a `u8*` placeholder that only survives in synth
-            // position (no contextual target); here we upgrade it to the
-            // target so `u8** p = null`, `Point* q = null`, and
-            // `fn() -> R f = null` all yield a null of the correct type —
-            // structural depth otherwise blocks the `u8*` placeholder from
-            // coercing into a deeper or function pointer. A non-pointer (or
-            // array) target falls through to the coercibility check, which
-            // rejects it.
+            // `null` adopts the context's pointer type: the parser's `u8*`
+            // placeholder only survives in synth position, so upgrade it here
+            // (structural depth otherwise blocks it from coercing into a deeper
+            // or function pointer). A non-pointer/array target falls through to
+            // the coercibility check, which rejects it.
             ExprKind::Null
                 if !target.is_array()
                     && (target.pointer_depth > 0
@@ -866,10 +812,8 @@ impl TypeChecker {
                 expr.expr_type = *target;
             }
 
-            // Comparison, unary-not, cast, function call, variable, alloc, and
-            // binary ops with a non-numeric (pointer) target: the expression's
-            // type is not the target's type, so synthesise and assert
-            // coercibility at the boundary.
+            // Everything else: the expression's type is not the target's, so
+            // synthesise and assert coercibility at the boundary.
             _ => {
                 let found = self.synth_expression(expr);
                 self.assert_coercible(found, target, pos);
@@ -891,13 +835,10 @@ impl TypeChecker {
         self.warn_signedness_change(found, target, pos);
     }
 
-    /// Warn on an *implicit* integer conversion that changes signedness —
-    /// whether it widens (`i32 -> u64`, case b) or keeps the same width
-    /// (`i32 -> u32`, case c). Both silently reinterpret the sign bit of a
-    /// runtime value. This runs only on the implicit-coercion path
-    /// (`assert_coercible`); an explicit `as` cast does not pass through here,
-    /// so a cast is the way to silence the warning per-site. Same-sign widening
-    /// (`i32 -> i64`) is deliberately not flagged.
+    /// Warns on an *implicit* integer conversion that changes signedness
+    /// (`i32 -> u32`, `i32 -> u64`) — both silently reinterpret the sign bit.
+    /// Only fires on the implicit path (`assert_coercible`), so an explicit `as`
+    /// cast silences it. Same-sign widening (`i32 -> i64`) is not flagged.
     fn warn_signedness_change(
         &mut self,
         found: LangType,
@@ -915,13 +856,9 @@ impl TypeChecker {
         }
     }
 
-    /// If `operand` is an integer literal that fits the concrete integer type
-    /// `sibling`, restamp the literal to that type.
-    ///
-    /// Used for comparison operands: `u8 i; ... i < 10` compares at `i8` rather
-    /// than zero-extending `i` to `i32` to meet the literal's default width.
-    /// Restricted to literals that fit `sibling`, so the comparison's result is
-    /// unchanged.
+    /// Restamps an integer-literal `operand` to `sibling` when it fits, so a
+    /// comparison like `u8 i; i < 10` compares at `u8` rather than widening `i`
+    /// to the literal's default `i32`. Fit-restricted, so the result is unchanged.
     fn narrow_literal_to_sibling(operand: &mut Expression, sibling: LangType) {
         if let ExprKind::Literal(LiteralValue::Integer(val)) = operand.kind
             && sibling.is_plain_int()
@@ -931,17 +868,11 @@ impl TypeChecker {
         }
     }
 
-    // ── Binary op helpers ────────────────────────────────────────────────────
-
-    /// Whether two operand types may be *compared* (`==`, `!=`, `<`, …).
-    ///
-    /// Pointer comparison keeps the permissive rule that assignment coercion
-    /// dropped in Proposal C: two pointers compare regardless of pointee type,
-    /// because comparing addresses is not aliasing. Kept decoupled from
-    /// [`types_coercible`] so tightening `T* -> U*` binding does not also reject
-    /// `Point* a == Node* b`. Same depth (after decay), or a `u0*` on either
-    /// side (which includes the `null` placeholder, a `u8*`); non-pointer
-    /// operands fall back to the ordinary arithmetic/coercion validity.
+    /// Two pointers compare regardless of pointee type (comparing addresses is
+    /// not aliasing) — kept decoupled from [`types_coercible`] so tightening
+    /// `T* -> U*` binding doesn't also reject `Point* a == Node* b`. Requires
+    /// matching depth after decay, or a `u0*` on either side; non-pointer
+    /// operands fall back to arithmetic validity.
     fn comparison_operands_valid(left: &LangType, right: &LangType) -> bool {
         let l = if left.is_array() { left.decay_to_pointer() } else { *left };
         let r = if right.is_array() { right.decay_to_pointer() } else { *right };
@@ -953,18 +884,16 @@ impl TypeChecker {
         Self::binary_op_types_valid(left, right, &BinaryOp::Add)
     }
 
-    /// Check if two operand types are valid for the given binary operation.
     fn binary_op_types_valid(left: &LangType, right: &LangType, op: &BinaryOp) -> bool {
-        // Enums are a name set, not a number: no arithmetic, bitwise, or shift
-        // operation is defined on them. (Their equality is handled entirely in
-        // the `Comparison` arm and never routes through this helper.)
+        // No arithmetic/bitwise/shift on enums (their equality goes through the
+        // `Comparison` arm, never here).
         if matches!(left.base, TypeBase::Enum(_)) || matches!(right.base, TypeBase::Enum(_)) {
             return false;
         }
 
-        // Pointer arithmetic: `ptr ± int` and `int + ptr` (`int - ptr` has no
-        // meaning). A `u0*` has an unsized pointee: no arithmetic (GEP cannot
-        // scale by sizeof(u0)) — cast to `u8*` for byte offsets.
+        // Pointer arithmetic: `ptr ± int` and `int + ptr` (`int - ptr` is
+        // meaningless). A `u0*` pointee is unsized — GEP can't scale by
+        // sizeof(u0), so cast to `u8*` for byte offsets.
         let ptr_int = left.is_pointer_like() && right.is_plain_int();
         let int_ptr = left.is_plain_int() && right.is_pointer_like();
         if (matches!(op, BinaryOp::Add | BinaryOp::Sub) && ptr_int)

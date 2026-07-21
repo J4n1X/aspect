@@ -18,28 +18,24 @@ use inkwell::IntPredicate;
 pub trait LangTypeExt {
     fn is_signed_int(&self) -> bool;
     fn is_unsigned_int(&self) -> bool;
-    /// `true` for both signed and unsigned integer types (not including floats or pointers).
+    /// Signed or unsigned integer — not floats or pointers.
     fn is_int(&self) -> bool;
     fn is_float(&self) -> bool;
-    /// `true` when `pointer_depth > 0`.
     fn is_pointer(&self) -> bool;
     fn is_void(&self) -> bool;
 
-    /// Convert to the corresponding LLVM value type.
-    ///
-    /// Array types decay to `ptr` (same as pointers). For the backing array
-    /// allocation type use [`LangTypeExt::to_llvm_array`].
-    ///
-    /// Returns a position-less [`TypeLoweringError`]; the caller attaches a
-    /// source position via [`TypeLoweringError::with_pos`].
+    /// Array types decay to `ptr` (same as pointers); for the backing array
+    /// type use [`LangTypeExt::to_llvm_array`]. Returns a position-less
+    /// [`TypeLoweringError`]; the caller attaches a position via `with_pos`.
     fn to_llvm<'ctx>(&self, ctx: &'ctx Context)
         -> Result<BasicTypeEnum<'ctx>, TypeLoweringError>;
 
-    /// Convert to the LLVM `[N x T]` array type. Errors if the type is not an array.
+    /// Errors if the type is not an array.
     fn to_llvm_array<'ctx>(&self, ctx: &'ctx Context)
         -> Result<ArrayType<'ctx>, TypeLoweringError>;
 
-    /// Return the element LLVM type — stripping away array size and pointer depth.
+    /// The element LLVM type, with the array dimension stripped (pointer depth
+    /// is part of the element — `(i32*)[3]` has element `ptr`).
     fn element_to_llvm<'ctx>(
         &self,
         ctx: &'ctx Context,
@@ -109,9 +105,8 @@ impl LangTypeExt for LangType {
                     "Void type cannot be used as a value type".to_string(),
                 ))
             }
-            // Struct *values* are lowered via `CodeGenerator::lang_type_to_llvm`,
-            // which consults the cached named `StructType`; this trait method has
-            // no access to that cache. Pointer-to-struct decays to `ptr` above.
+            // Struct *values* need the cached named `StructType`, which this
+            // trait can't reach — use `lang_type_to_llvm`. (Pointers decay above.)
             TypeBase::Struct(id) => {
                 return Err(TypeLoweringError(format!(
                     "struct#{id} value must be lowered via lang_type_to_llvm"
@@ -138,9 +133,8 @@ impl LangTypeExt for LangType {
         &self,
         ctx: &'ctx Context,
     ) -> Result<BasicTypeEnum<'ctx>, TypeLoweringError> {
-        // The element strips only the array dimension; pointer depth is part
-        // of the element type. `(i32*)[3]` must allocate `[3 x ptr]`, not
-        // `[3 x i32]` — anything else stack-corrupts on the literal store.
+        // Pointer depth is part of the element: `(i32*)[3]` must allocate
+        // `[3 x ptr]`, not `[3 x i32]` — else the literal store corrupts stack.
         if self.pointer_depth > 0 {
             return Ok(ctx.ptr_type(AddressSpace::default()).into());
         }
@@ -236,10 +230,7 @@ macro_rules! const_signed_op {
 
 // ─── Width-matching helpers ───────────────────────────────────────────────────
 
-/// Widen the narrower of two integer values so both have the same bit-width.
-///
-/// Uses `sext` for signed values and `zext` for unsigned.
-/// If widths already match, returns the values unchanged.
+/// `sext` for signed values, `zext` for unsigned; matching widths pass through.
 ///
 /// # Errors
 /// Propagates any `BuilderError` from the underlying LLVM builder.
@@ -285,8 +276,6 @@ pub fn widen_floats_to_match<'ctx>(
     if a.get_type() == b.get_type() {
         return Ok((a, b));
     }
-    // Determine which is wider by bit-width of the LLVM type
-    // f64 > f32; compare via display name length as a heuristic-free approach
     let a_is_f64 = a.get_type() == context.f64_type();
     if a_is_f64 {
         let b_wide = builder.build_float_ext(b, a.get_type(), "fpwiden")?;
@@ -297,12 +286,9 @@ pub fn widen_floats_to_match<'ctx>(
     }
 }
 
-/// Widen the narrower of two integer constant values so both have the same bit-width.
-///
-/// LLVM 19 removed most `LLVMConst*` functions, so this is done by extracting the Rust
-/// value with `get_zero_extended_constant` / `get_sign_extended_constant` and reconstructing
-/// the constant at the wider type.
-/// If widths already match, returns the values unchanged.
+/// LLVM 19 removed most `LLVMConst*` functions, so this extracts the Rust value
+/// with `get_{zero,sign}_extended_constant` and rebuilds the constant at the
+/// wider type. Values with matching widths are returned unchanged.
 pub fn const_widen_ints_to_match<'ctx>(
     a: IntValue<'ctx>,
     a_signed: bool,
@@ -312,7 +298,6 @@ pub fn const_widen_ints_to_match<'ctx>(
     let a_bits = a.get_type().get_bit_width();
     let b_bits = b.get_type().get_bit_width();
     if a_bits > b_bits {
-        // Widen b to a's type
         let raw = if b_signed {
             b.get_sign_extended_constant().unwrap_or(0) as u64
         } else {
@@ -321,7 +306,6 @@ pub fn const_widen_ints_to_match<'ctx>(
         let b_wide = a.get_type().const_int(raw, b_signed);
         (a, b_wide)
     } else if b_bits > a_bits {
-        // Widen a to b's type
         let raw = if a_signed {
             a.get_sign_extended_constant().unwrap_or(0) as u64
         } else {
@@ -336,10 +320,8 @@ pub fn const_widen_ints_to_match<'ctx>(
 
 // ─── Comparison predicate helpers ────────────────────────────────────────────
 
-/// Return the correct `IntPredicate` for a comparison operation.
-///
-/// Signed operations use `S`-prefixed predicates; unsigned use `U`-prefixed.
-/// `EQ` and `NE` are the same regardless of signedness.
+/// Signed uses `S`-prefixed predicates, unsigned `U`-prefixed; `EQ`/`NE` are
+/// signedness-independent.
 #[must_use]
 pub fn int_cmp_pred(op: &ComparisonOp, is_signed: bool) -> IntPredicate {
     match op {

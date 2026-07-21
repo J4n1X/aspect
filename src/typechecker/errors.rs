@@ -3,17 +3,15 @@ use crate::parser::LangType;
 use aspect_macros::ErrorPosition;
 use thiserror::Error;
 
-/// A non-fatal type-checker diagnostic. Unlike [`TypeCheckError`], a warning
-/// does **not** fail the build or change `aspc`'s exit code (v1 — a
-/// `-Werror`/suppression surface is deferred). It carries its own position so
-/// the driver can format it as `file:line:col: warning: <message>`.
+/// A non-fatal diagnostic: unlike [`TypeCheckError`] it does **not** fail the
+/// build or change the exit code (v1). Carries its own position for
+/// `file:line:col: warning: <message>` formatting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeWarning {
     pub message: String,
     pub position: Position,
 }
 
-/// Type checker error types
 #[derive(Error, Debug, Clone, ErrorPosition)]
 pub enum TypeCheckError {
     #[error("Type mismatch: expected '{expected}' but found '{found}' at {position}")]
@@ -170,9 +168,8 @@ pub enum TypeCheckError {
     #[error("Cannot dereference 'u0*' — cast it to a sized pointer type first at {0}")]
     OpaqueDereference(Position),
 
-    /// An `asm fn` declared for a target whose register model we do not
-    /// have. Caught here rather than in codegen: this binary is built with
-    /// only the x86 backend, so a non-x86 triple never reaches codegen at all.
+    /// Caught here rather than in codegen: with only the x86 backend built in,
+    /// a non-x86 triple never reaches codegen.
     #[error("asm fn '{name}' is not supported for target '{triple}' at {position}")]
     AsmUnsupportedTarget {
         name: String,
@@ -180,7 +177,6 @@ pub enum TypeCheckError {
         position: Position,
     },
 
-    /// A register name that is not in the target's register table.
     #[error("Unknown register '{register}' for target '{arch}' at {position}")]
     AsmUnknownRegister {
         register: String,
@@ -203,7 +199,6 @@ pub enum TypeCheckError {
     #[error("Clobbered register '{register}' is also pinned to an operand at {position}")]
     AsmClobberIsOperand { register: String, position: Position },
 
-    /// The same physical register clobbered twice.
     #[error("Register '{register}' is already clobbered at {position}")]
     AsmDuplicateClobber { register: String, position: Position },
 
@@ -214,10 +209,8 @@ pub enum TypeCheckError {
     )]
     AsmReservedRegister { register: String, position: Position },
 
-    /// An operand whose type cannot live in a general-purpose register.
     /// `found` arrives pre-rendered so a type-struct names itself rather than
-    /// printing as the interned `struct#<id>` that `LangType`'s `Display`
-    /// is limited to.
+    /// printing as the interned `struct#<id>` `LangType`'s `Display` is limited to.
     #[error("Type '{found}' cannot be pinned to a register at {position}")]
     AsmUnpinnableType { found: String, position: Position },
 
@@ -235,18 +228,11 @@ pub enum TypeCheckError {
         position: Position,
     },
 
-    /// An operand pinned to a register spelling too narrow to hold it.
-    ///
-    /// LLVM sizes the physical register from the operand's LLVM type, not from
-    /// the spelling, so it does not diagnose this: it silently widens `al` to
-    /// the full `rax` and the written spelling becomes a no-op. An author who
-    /// writes `i64 v: al` believing only the low byte is live is wrong about
-    /// which bits the block touches, so the mismatch is rejected rather than
-    /// silently reinterpreted.
-    ///
-    /// The converse — a *narrower* type in a wider spelling, `i32 x: rax` —
-    /// stays legal: that is the orthogonality rule working as intended, with
-    /// LLVM selecting `%eax` from the operand's type.
+    /// LLVM sizes the physical register from the operand's LLVM type, not the
+    /// spelling, so it silently widens `al` to `rax` — an author writing
+    /// `i64 v: al` and believing only the low byte is live is wrong, so this is
+    /// rejected. The converse (`i32 x: rax`, a narrower type in a wider
+    /// spelling) stays legal — LLVM selects `%eax` from the operand's type.
     #[error(
         "Type '{found}' is {type_bits} bits and does not fit in register \
          '{register}', which is {reg_bits} bits, at {position}"

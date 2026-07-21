@@ -10,7 +10,6 @@ use crate::parser::LangType;
 use crate::parser::{ExprKind, Expression, Statement, StatementKind};
 
 impl<'ctx> CodeGenerator<'ctx> {
-    /// Generate code for a statement
     pub(crate) fn generate_statement(&mut self, stmt: &Statement) -> Result<(), CodegenError> {
         match &stmt.kind {
             StatementKind::Expression(expr) => self.generate_expression_statement(expr),
@@ -103,12 +102,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .map_err(|e| e.with_pos(pos))?
                 .into()
         } else {
-            // `lang_type_to_llvm` resolves type-struct values through the cache;
-            // it falls back to `to_llvm` for scalars/pointers.
             self.lang_type_to_llvm(var_type).map_err(|e| e.with_pos(pos))?
         };
 
-        // Allocate in the entry block for mem2reg compatibility
+        // Allocate in the entry block for mem2reg compatibility.
         let function = self
             .current_function
             .ok_or(CodegenError::UnexpectedStatement(pos))?;
@@ -138,11 +135,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Ok(());
         }
 
-        // Attempt to fold the initializer to a compile-time constant for all variables.
-        // For `const` vars: cache the folded value in the scope entry so reads bypass
-        //                   the alloca/load entirely.
-        // For non-const vars: use the constant as the stored value but don't cache it,
-        //                     since the variable may be reassigned later.
+        // Fold the initializer to a constant when possible. A `const` var caches
+        // the folded value so reads bypass the alloca/load; a non-const var only
+        // uses it as the stored value (it may be reassigned).
         if let Some(init_expr) = initializer
             && let Some(folded) = self.try_fold_constant_expression(init_expr)
         {
@@ -299,13 +294,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
-    /// Generate a value-block expression: `{ ...; return v }` used as a value.
-    ///
-    /// The statements run in a fresh scope. Every `return` inside — routed
-    /// here by `generate_return` via `value_block_stack` — stores into the
-    /// result slot and branches to the exit block. The type checker
-    /// guarantees every path returns, so the fall-through tail is
-    /// unreachable and is terminated as such.
+    /// `{ ...; return v }` used as a value. Every `return` inside — routed here
+    /// by `generate_return` via `value_block_stack` — stores into the result
+    /// slot and branches to the exit block. The checker guarantees every path
+    /// returns, so the fall-through tail is unreachable.
     pub(crate) fn generate_value_block(
         &mut self,
         statements: &[Statement],
@@ -363,7 +355,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(self.builder.build_load(llvm_type, slot, "vblock.val")?)
     }
 
-    /// Generate an if statement
     pub(crate) fn generate_if_statement(
         &mut self,
         condition: &Expression,
@@ -374,7 +365,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             .current_function
             .ok_or(CodegenError::UnexpectedStatement(condition.pos))?;
 
-        // Generate condition
         let cond_value = self.generate_expression(condition)?;
         let cond_int = self.value_to_bool(condition.pos, cond_value)?;
 
@@ -382,11 +372,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let else_bb = self.context.append_basic_block(function, "else");
         let merge_bb = self.context.append_basic_block(function, "ifcont");
 
-        // Branch on condition
         self.builder
             .build_conditional_branch(cond_int, then_bb, else_bb)?;
 
-        // Generate then block
         self.builder.position_at_end(then_bb);
         for stmt in then_block {
             self.generate_statement(stmt)?;
@@ -395,7 +383,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.builder.build_unconditional_branch(merge_bb)?;
         }
 
-        // Generate else block
         self.builder.position_at_end(else_bb);
         if let Some(else_stmts) = else_block {
             for stmt in else_stmts {
@@ -406,13 +393,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.builder.build_unconditional_branch(merge_bb)?;
         }
 
-        // Continue at merge block
         self.builder.position_at_end(merge_bb);
 
         Ok(())
     }
 
-    /// Generate a while loop
     pub(crate) fn generate_while_loop(
         &mut self,
         condition: &Expression,
@@ -426,20 +411,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         let body_bb = self.context.append_basic_block(function, "while.body");
         let end_bb = self.context.append_basic_block(function, "while.end");
 
-        // Push loop context for break/continue
         self.loop_stack.push((end_bb, cond_bb));
 
-        // Jump to condition
         self.builder.build_unconditional_branch(cond_bb)?;
 
-        // Generate condition
         self.builder.position_at_end(cond_bb);
         let cond_value = self.generate_expression(condition)?;
         let cond_int = self.value_to_bool(condition.pos, cond_value)?;
         self.builder
             .build_conditional_branch(cond_int, body_bb, end_bb)?;
 
-        // Generate body
         self.builder.position_at_end(body_bb);
         for stmt in body {
             self.generate_statement(stmt)?;
@@ -448,14 +429,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.builder.build_unconditional_branch(cond_bb)?;
         }
 
-        // Pop loop context and continue after loop
         self.loop_stack.pop();
         self.builder.position_at_end(end_bb);
 
         Ok(())
     }
 
-    /// Generate a for loop
     pub(crate) fn generate_for_loop(
         &mut self,
         init: Option<Box<Statement>>,
@@ -467,10 +446,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .current_function
             .ok_or_else(|| CodegenError::UnexpectedStatement(body[0].pos))?;
 
-        // Enter scope for loop variable
         self.enter_scope();
 
-        // Generate init
         if let Some(init_stmt) = init {
             self.generate_statement(&init_stmt)?;
         }
@@ -480,14 +457,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         let inc_bb = self.context.append_basic_block(function, "for.inc");
         let end_bb = self.context.append_basic_block(function, "for.end");
 
-        // Push loop context for break/continue
-        // break jumps to end_bb, continue jumps to inc_bb
+        // break → end_bb, continue → inc_bb
         self.loop_stack.push((end_bb, inc_bb));
 
-        // Jump to condition
         self.builder.build_unconditional_branch(cond_bb)?;
 
-        // Generate condition
         self.builder.position_at_end(cond_bb);
         let cond_value = if let Some(cond_expr) = condition {
             let cond_val = self.generate_expression(cond_expr)?;
@@ -498,7 +472,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder
             .build_conditional_branch(cond_value, body_bb, end_bb)?;
 
-        // Generate body
         self.builder.position_at_end(body_bb);
         for stmt in body {
             self.generate_statement(stmt)?;
@@ -507,24 +480,20 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.builder.build_unconditional_branch(inc_bb)?;
         }
 
-        // Generate increment
         self.builder.position_at_end(inc_bb);
         if let Some(inc_stmt) = increment {
             self.generate_statement(&inc_stmt)?;
         }
         self.builder.build_unconditional_branch(cond_bb)?;
 
-        // Pop loop context and continue after loop
         self.loop_stack.pop();
         self.builder.position_at_end(end_bb);
 
-        // Exit loop scope
         self.exit_scope();
 
         Ok(())
     }
 
-    /// Convert a value to a boolean (i1) for conditionals
     pub(crate) fn value_to_bool(
         &self,
         pos: crate::lexer::Position,
@@ -532,7 +501,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<IntValue<'ctx>, CodegenError> {
         if value.is_int_value() {
             let int_val = value.into_int_value();
-            // Already i1 (e.g. direct result of icmp/fcmp) — no extra compare needed
+            // Already i1 (e.g. a direct icmp/fcmp result) — no extra compare.
             if int_val.get_type().get_bit_width() == 1 {
                 return Ok(int_val);
             }
@@ -566,7 +535,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// Check if the current block has a terminator
     pub(crate) fn block_has_terminator(&self) -> bool {
         self.builder
             .get_insert_block()
@@ -574,7 +542,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             .is_some()
     }
 
-    /// Get a zero value for a type
     pub(crate) fn get_zero_value(
         &self,
         ty: &crate::lexer::LangType,
@@ -583,7 +550,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(llvm_type.const_zero())
     }
 
-    // Scope management
     pub(crate) fn enter_scope(&mut self) {
         self.scope.enter();
     }
@@ -604,11 +570,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .insert_local(name, ptr, llvm_type, lang_type, const_value);
     }
 
-    /// Try to fold `expr` to a compile-time constant without emitting any IR.
-    ///
-    /// Returns `Some(value)` only when every sub-expression is provably constant
-    /// (literal, previously-folded `const` local, or a global with a known initializer).
-    /// Returns `None` for any dynamic sub-expression (function call, non-const local, etc.).
+    /// `Some(value)` only when every sub-expression is provably constant
+    /// (literal, folded `const` local, or a global with a known initializer);
+    /// `None` for any dynamic sub-expression. Emits no IR.
     pub(crate) fn try_fold_constant_expression(
         &mut self,
         expr: &Expression,

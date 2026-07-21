@@ -86,37 +86,29 @@ pub enum ExprKind {
         struct_id: u32,
         fields: Vec<(String, Expression)>,
     },
-    /// An enum variant value `EnumName.Variant`, resolved by the parser to the
-    /// variant's interned enum id and its integer value (the variant's index).
-    /// Typed as the enum type (`TypeBase::Enum`), which lowers to a compile-time
-    /// `i32` constant in codegen. A dedicated node — *not* an integer literal —
-    /// so the checker never lets it coerce to a bare integer or narrow to a
-    /// sibling's width: an enum value only ever satisfies its own enum type.
+    /// An enum variant value `EnumName.Variant`, resolved to the variant's enum
+    /// id and integer value. A dedicated node — *not* an integer literal — so
+    /// the checker never lets it coerce to a bare integer: an enum value only
+    /// ever satisfies its own enum type. Lowers to a compile-time `i32`.
     EnumValue {
         enum_id: u32,
         value: i64,
     },
-    /// A reference to a named function, as a value (function pointer).
-    /// Produced for a bare function name `foo` and for `&foo` (the parser
-    /// collapses the address-of). Carries the function's name; the FnPtr
-    /// type is stamped on `expr_type`.
+    /// A named function as a value (function pointer). Produced for a bare
+    /// `foo` and for `&foo` (the parser collapses the address-of).
     FunctionRef(String),
     /// An indirect call through a function-pointer value: `callee(args)`.
-    /// Distinct from `FunctionCall` (a direct call by name) because codegen
-    /// must look up the signature via the FnPtr id and emit `build_indirect_call`.
+    /// Distinct from `FunctionCall` because codegen looks up the signature via
+    /// the FnPtr id and emits `build_indirect_call`.
     IndirectCall {
         callee: Box<Expression>,
         args: Vec<Expression>,
     },
-    /// An *unresolved* method or fn-pointer-field call `base.name(args)` whose
-    /// receiver type is not known until type-checking. The parser resolves such
-    /// calls at parse time (`build_method_call`) and never emits this node; it
-    /// exists so metaprogram-generated AST (Three-Hook-Metasystem Phases 3/4),
-    /// which has no parse-time receiver types, can defer method-vs-field
-    /// dispatch, static-vs-instance resolution, and `Type$method` mangling to
-    /// the checker. The checker resolves it and **rewrites the node in place**
-    /// into a `FunctionCall` (method) or `IndirectCall` (fn-ptr field), so
-    /// codegen never sees a `MethodCall`. See `synth_method_call`.
+    /// An *unresolved* method or fn-pointer-field call `base.name(args)`. The
+    /// parser resolves such calls itself and never emits this node; it exists
+    /// so metaprogram-generated AST (with no parse-time receiver types) can
+    /// defer dispatch to the checker, which **rewrites it in place** into a
+    /// `FunctionCall` or `IndirectCall` — codegen never sees a `MethodCall`.
     MethodCall {
         base: Box<Expression>,
         name: String,
@@ -133,15 +125,11 @@ pub enum ExprKind {
     /// `u8*` placeholder so the same coercion rules used for any other
     /// pointer-to-pointer comparison apply.
     Null,
-    /// A value-block: `{ stmt* }` in *expression* position. Its value is
-    /// produced by `return <expr>` statements inside, which bind to the
-    /// innermost value-block rather than the enclosing function (so a
-    /// wrapping block captures every exit path of the code it encases).
-    /// The type checker verifies that every control path returns a value
-    /// and stamps the block's type; `break`/`continue` pass through to
-    /// enclosing loops. Distinguished from a `ListInitializer` at parse
-    /// time: a brace expression that parses as a comma-separated list *is*
-    /// a list; anything else is re-parsed as statements.
+    /// A value-block: `{ stmt* }` in *expression* position. Its value comes
+    /// from `return <expr>` statements inside, which bind to the innermost
+    /// value-block rather than the enclosing function. Distinguished from a
+    /// `ListInitializer` at parse time: a brace expression that parses as a
+    /// comma-separated list *is* a list; anything else re-parses as statements.
     ValueBlock(Vec<Statement>),
 }
 
@@ -242,18 +230,14 @@ pub struct FunctionProto {
     pub name: String,
     pub params: Vec<(LangType, String)>,
     pub return_type: LangType,
-    /// Module visibility: whether another Aspect module may name this function
-    /// through `$import`. `public` exports it across the module boundary;
-    /// private (the default) confines it to its defining module. This is a
-    /// *name-resolution* property enforced at parse time — it has nothing to
-    /// do with LLVM linkage (see `export`).
+    /// Whether another Aspect module may name this function through `$import`.
+    /// A *name-resolution* property enforced at parse time, nothing to do with
+    /// LLVM linkage (see `export`).
     pub vis: crate::symbol::module::Visibility,
-    /// Foreign linkage: whether the symbol leaves the object file with external
-    /// linkage, so non-Aspect code (C, a separate link step, a C runtime) can
-    /// reference it by name. `export` opts in; the default is internal linkage,
-    /// which lets `globaldce` strip the symbol when unreachable — the whole
-    /// reason an unused stdlib doesn't bloat every binary. Orthogonal to `vis`:
-    /// the two compose (`public export fn`).
+    /// Whether the symbol leaves the object file with external linkage, so
+    /// non-Aspect code can reference it by name. The default internal linkage
+    /// lets `globaldce` strip it when unreachable — why an unused stdlib
+    /// doesn't bloat every binary. Orthogonal to `vis`; the two compose.
     pub export: bool,
     /// Leading attributes in source order (outside-in, leftmost applied last).
     pub attrs: Vec<Attribute>,

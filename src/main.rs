@@ -25,11 +25,7 @@ enum EmitTarget {
     Exe,
 }
 
-/// LLVM relocation model for the compiled artifact, mirroring `llc`'s
-/// `-relocation-model`. `pic` is the one that produces position-independent
-/// code (GOT/PLT-relative symbol access) suitable for shared libraries and
-/// PIE executables; `static` forces absolute addressing (e.g. for a
-/// freestanding kernel image); `default` lets LLVM pick per the target triple.
+/// LLVM relocation model, mirroring `llc`'s `-relocation-model`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum RelocModel {
     Default,
@@ -49,9 +45,8 @@ impl RelocModel {
     }
 }
 
-/// Back-end knobs that `build_codegen` consumes, bundled so the driver
-/// functions that thread them stay under a sane argument count. `interpret`
-/// leaves `reloc` at the target default and `verify_each` off; only `compile`
+/// Bundled so the driver functions threading them stay under a sane argument
+/// count. `interpret` leaves `reloc`/`verify_each` at defaults; only `compile`
 /// exposes them on the CLI.
 struct BackendOpts {
     opt_level: u8,
@@ -80,8 +75,6 @@ struct PreprocArgs {
 }
 
 impl PreprocArgs {
-    /// The resolved compilation target: `--target` if given, the host
-    /// triple otherwise (clap already fills in the default).
     fn target_spec(&self) -> TargetSpec {
         TargetSpec::parse(&self.target)
     }
@@ -181,31 +174,20 @@ enum Commands {
     },
 }
 
-/// Splice `ASPC_<MODE>_FLAGS` into the argument list before clap parses it.
-///
-/// `<MODE>` is the upper-cased subcommand name, so `ASPC_COMPILE_FLAGS` feeds
-/// `compile`, `ASPC_INTERPRET_FLAGS` feeds `interpret`, and so on. The value is
-/// split with shell-word rules (quotes and escapes honoured) and inserted
-/// immediately after the subcommand token — the point of the feature is to stop
-/// retyping project-wide flags like `-I lib` on every invocation.
-///
-/// Injected flags land *before* the user's own arguments for that subcommand, so
-/// an explicit command-line value still overrides them for any single-valued
-/// flag (clap keeps the last occurrence), while repeatable flags such as
-/// `-I`/`-D` accumulate. A value that is not valid shell syntax is reported on
-/// stderr and ignored rather than aborting the run.
+/// Splices `ASPC_<MODE>_FLAGS` (`<MODE>` = the upper-cased subcommand) in right
+/// after the subcommand token, so project-wide flags like `-I lib` need not be
+/// retyped. Injected flags precede the user's own, so a single-valued flag on
+/// the command line still wins (clap keeps the last) while `-I`/`-D` accumulate.
+/// An invalid shell value is warned on stderr and ignored, not fatal.
 fn args_with_env_flags() -> Vec<String> {
     inject_env_flags(std::env::args().collect(), |var| std::env::var(var).ok())
 }
 
 /// The environment-free core of [`args_with_env_flags`]: `lookup` stands in for
-/// `std::env::var` so the splicing rules can be tested without mutating the
-/// process environment (which is global and unsound to touch from tests).
+/// `std::env::var` so the rules are testable without mutating the process env.
 fn inject_env_flags(mut args: Vec<String>, lookup: impl Fn(&str) -> Option<String>) -> Vec<String> {
-    // The subcommand is the first argument (after argv[0]) that names one: the
-    // top-level command takes no options of its own, so nothing legitimately
-    // precedes it. If none is present (`aspc --help`, `aspc --version`, a bare
-    // `aspc`), there is no mode to key the variable on.
+    // The subcommand is the first argument (after argv[0]) that names one; the
+    // top-level command takes no options, so nothing legitimately precedes it.
     let subcommands: Vec<String> = Cli::command()
         .get_subcommands()
         .map(|c| c.get_name().to_string())
@@ -286,11 +268,8 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-// ── Shared pipeline stages ───────────────────────────────────────────────────
-
-/// Preprocess `path`: seed `-D` defines and `-I` search roots from the CLI,
-/// then tokenize with directive expansion. Errors are formatted with their
-/// originating file/position via the driver's file registry.
+/// Seeds `-D`/`-I` from the CLI, then tokenizes with directive expansion.
+/// Errors are formatted with their originating file/position.
 fn preprocess_source(path: &Path, preproc: &PreprocArgs) -> Result<PreprocessedSource> {
     let mut pp = Preprocessor::for_target(&preproc.target_spec());
     for dir in &preproc.include_dirs {
@@ -306,8 +285,8 @@ fn preprocess_source(path: &Path, preproc: &PreprocArgs) -> Result<PreprocessedS
         .with_context(|| format!("failed to tokenize '{}'", path.display()))
 }
 
-/// Tokenize `path` (expanding preprocessor directives) and parse it into a
-/// `Program`, formatting parse errors with their originating file/position.
+/// Preprocess then parse `path` into a `Program`, formatting parse errors with
+/// their originating file/position.
 fn parse_program_from(path: &Path, preproc: &PreprocArgs) -> Result<Program> {
     let pp = preprocess_source(path, preproc)?;
 
@@ -346,9 +325,8 @@ fn build_program(path: &Path, preproc: &PreprocArgs) -> Result<Program> {
     Ok(program)
 }
 
-/// Back-end setup shared by `compile` and `interpret`: generate LLVM IR for
-/// `program` (module named after the file stem, targeting `preproc.target`)
-/// and run optimization passes when `opt_level > 0`.
+/// Shared by `compile` and `interpret`: generate LLVM IR (module named after
+/// the file stem) and run optimization passes when `opt_level > 0`.
 fn build_codegen<'ctx>(
     context: &'ctx LLVMContext,
     path: &Path,
@@ -373,8 +351,6 @@ fn build_codegen<'ctx>(
 
     Ok(codegen)
 }
-
-// ── Subcommands ──────────────────────────────────────────────────────────────
 
 fn lex_file(path: &Path, preproc: &PreprocArgs) -> Result<()> {
     let pp = preprocess_source(path, preproc)?;
@@ -558,7 +534,6 @@ fn interpret_file(
 mod tests {
     use super::*;
 
-    /// Build an owned `Vec<String>` argv from string slices.
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(ToString::to_string).collect()
     }

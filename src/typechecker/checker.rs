@@ -8,50 +8,34 @@ use crate::symbol::module::ModuleSymbols;
 use crate::target::TargetSpec;
 use std::collections::HashMap;
 
-/// Single-pass type checker for the Aspect language.
-///
-/// Walks the AST once and emits errors directly into `self.errors`.
-/// No constraint-collection phase — errors are reported immediately upon discovery.
-///
-/// The checker is **bidirectional**: every expression is visited in one of two
-/// modes.
-/// - [`TypeChecker::synth_expression`] *synthesises* a type bottom-up when no
-///   surrounding context constrains it (conditions, callees, indices, cast and
-///   dereference operands).
-/// - [`TypeChecker::check_expression`] *checks* an expression against a target
-///   type supplied by its context (assignment RHS, `return` value, call
-///   arguments, declaration initialisers). It pushes the target down into the
-///   children where the child's type *is* the parent's type, and **stamps
-///   `expr_type` on the AST in place** so codegen reads the final width directly.
-///
-/// Use `with_source_file` to include the filename in formatted error messages.
+/// Single-pass, **bidirectional** type checker: errors are reported immediately,
+/// with no constraint-collection phase. Every expression is visited in one of
+/// two modes.
+/// - `synth_expression` *synthesises* a type bottom-up when no surrounding
+///   context constrains it (conditions, callees, indices, cast/deref operands).
+/// - `check_expression` *checks* an expression against a target type supplied
+///   by its context (assignment RHS, `return` value, call arguments,
+///   initialisers). It pushes the target down where the child's type *is* the
+///   parent's, and **stamps `expr_type` on the AST in place** so codegen reads
+///   the final width directly.
 pub struct TypeChecker {
-    /// The program's shared symbol table, taken from `Program` for the duration
-    /// of `check_program` and restored on exit (so any registry refinement the
-    /// checker performs is preserved, without a divergent copy).
+    /// Taken from `Program` for the duration of `check_program` and restored
+    /// on exit, so any registry refinement is preserved without a divergent copy.
     symbols: ModuleSymbols,
     scopes: ScopeStack<LangType>,
     globals: HashMap<String, LangType>,
     current_function: Option<String>,
-    /// File registry inherited from the parsed `Program` so error messages
-    /// can name the file the error actually came from.
     source_files: Vec<std::path::PathBuf>,
-    /// Stack of enclosing value-block result types, innermost last. A
-    /// `return` statement binds to the top entry instead of the function.
-    /// `Some(t)` once the type is known (checked position, or the first
-    /// `return` in synthesis position); `None` while still undetermined.
+    /// Enclosing value-block result types, innermost last: a `return` binds to
+    /// the top entry instead of the function. `None` while still undetermined.
     value_block_types: Vec<Option<LangType>>,
-    /// The target being compiled for. Only `asm fn` consults it: register
-    /// names are validated against this target's register model, so `rax`
-    /// under an `aarch64-*` target is a clean error. Defaults to the host;
-    /// override with [`TypeChecker::with_target`].
+    /// Only `asm fn` consults it: register names are validated against this
+    /// target's register model, so `rax` under `aarch64-*` is a clean error.
     target: TargetSpec,
     errors: Vec<TypeCheckError>,
-    /// Non-fatal diagnostics accumulated during checking (e.g. an implicit
-    /// signedness-changing conversion). Read by the driver *after* a successful
-    /// `check_program` — they never appear in the `Err` path, and never change
-    /// the exit code (v1). Both `main.rs` and the test harness must read this,
-    /// since each builds its own `TypeChecker`.
+    /// Read by the driver *after* a successful `check_program` — they never
+    /// appear in the `Err` path and never change the exit code (v1). Both
+    /// `main.rs` and the test harness read this, each building its own checker.
     warnings: Vec<super::errors::TypeWarning>,
 }
 
@@ -111,8 +95,7 @@ impl TypeChecker {
         &self.warnings
     }
 
-    /// Format one warning as `file:line:col: warning: <message>`, mirroring
-    /// [`Self::format_error`] and the `aspc: warning:` precedent in `main.rs`.
+    /// Mirrors [`Self::format_error`], as `file:line:col: warning: <message>`.
     #[must_use]
     pub fn format_warning(&self, warn: &super::errors::TypeWarning) -> String {
         let pos = warn.position;
@@ -128,21 +111,15 @@ impl TypeChecker {
         }
     }
 
-    /// Check a complete program.
-    ///
     /// The AST is taken by mutable reference: the checker stamps the resolved
-    /// `expr_type` onto literal and arithmetic nodes as it pushes target types
-    /// down into expressions.
+    /// `expr_type` onto nodes as it pushes target types down into expressions.
     ///
     /// # Errors
     /// Returns `Err(Vec<TypeCheckError>)` listing every type error found.
     pub fn check_program(&mut self, program: &mut Program) -> Result<(), Vec<TypeCheckError>> {
-        // Take the shared symbol table for the duration of checking; restore it
-        // before returning so codegen sees it (plus any refinement we make).
         self.symbols = std::mem::take(&mut program.symbols);
-        // Inherit the parser's file registry — unless caller pre-set one via
-        // `with_source_file` (single-file convenience) — so error messages
-        // can name the originating file for each `Position`.
+        // Inherit the parser's file registry unless the caller pre-set one via
+        // `with_source_file`.
         if self.source_files.is_empty() {
             self.source_files = program.source_files.clone();
         }
@@ -199,11 +176,7 @@ impl TypeChecker {
         }
     }
 
-    /// Check a declaration initializer against the declared type.
-    ///
-    /// A `ListInitializer` validates its element count and each element
-    /// against the declared element type; any other expression is checked
-    /// directly against `var_type`. Shared by global and local declarations.
+    /// Shared by global and local declarations.
     fn check_initializer(&mut self, init_expr: &mut Expression, var_type: &LangType) {
         let init_pos = init_expr.pos;
         if let ExprKind::ListInitializer(elements) = &mut init_expr.kind {

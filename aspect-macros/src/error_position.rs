@@ -11,18 +11,15 @@ enum Binding {
     Indexed(usize),
 }
 
-/// The chosen position source for one variant.
 struct Selected {
     binding: Binding,
-    /// `true` when the chosen field is *not* itself a `Position` but a nested
-    /// error carrying its own `position()` — the arm delegates via
-    /// `field.position()` instead of `Some(*field)`.
+    /// `true` when the chosen field is a nested error carrying its own
+    /// `position()`, so the arm delegates via `field.position()`.
     delegate: bool,
 }
 
-/// Generate `impl <Enum> { pub fn position(&self) -> Option<Position> }` whose
-/// body mirrors the hand-written matchers: return the canonical `Position` for
-/// variants that carry one, `None` otherwise.
+/// Generates `impl <Enum> { pub fn position(&self) -> Option<Position> }`,
+/// returning the canonical `Position` for variants that carry one.
 pub fn derive_error_position(input: DeriveInput) -> TokenStream {
     let enum_name = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
@@ -96,15 +93,9 @@ fn build_arm(enum_name: &Ident, variant: &Variant) -> TokenStream {
     }
 }
 
-/// Pick the canonical `Position` field for a variant, reproducing the
-/// hand-written matchers' choice:
-///
-/// * an explicit `#[position]` field wins (and delegates when it is a nested
-///   error rather than a `Position`);
-/// * otherwise, among `Position`-typed fields: the sole one, else the field
-///   named `pos`, else `position`, else the first.
-///
-/// Returns `None` when the variant carries no position.
+/// An explicit `#[position]` field wins (delegating when it is a nested error);
+/// otherwise, among `Position`-typed fields, the sole one, else `pos`, else
+/// `position`, else the first. `None` when the variant carries no position.
 fn select_position_field(fields: &Fields) -> Option<Selected> {
     let bound: Vec<(Binding, &Field)> = match fields {
         Fields::Named(f) => f

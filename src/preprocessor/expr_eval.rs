@@ -1,21 +1,17 @@
 //! The `$if` / `$elseif` constant-expression evaluator.
 //!
 //! `$if EXPR` takes a constant integer expression over integer literals,
-//! `defined(NAME)` (1 or 0, the name deliberately *not* expanded), defined
-//! names (expanded through the define table first; they must reduce to a
-//! constant expression — an *undefined* identifier is an error, never
-//! silently 0), parentheses, unary `!` / `-`, and the binary operators
-//! `|| && == != < > <= >= | ^ & << >> + - * / %`. Precedence mirrors the
-//! parser's `INFIX_OPS` table so `$if` agrees with runtime expressions —
-//! note this means comparisons bind *looser* than bitwise operators
-//! (`1 & 3 == 1` is `(1 & 3) == 1`), unlike C. Nonzero is true. The whole
-//! expression must be evaluable: division/modulo by zero is an error even
-//! on the dead side of `&&`/`||` (no short-circuit), arithmetic wraps, and
-//! shift counts are masked to 0..=63.
+//! `defined(NAME)` (the name deliberately *not* expanded), defined names
+//! (expanded first; an *undefined* identifier is an error, never silently 0),
+//! parentheses, unary `!`/`-`, and the usual binary operators. Precedence
+//! mirrors the parser's `INFIX_OPS` table so `$if` agrees with runtime
+//! expressions — meaning comparisons bind *looser* than bitwise operators
+//! (`1 & 3 == 1` is `(1 & 3) == 1`), unlike C. The whole expression must be
+//! evaluable: division/modulo by zero is an error even on the dead side of
+//! `&&`/`||` (no short-circuit), arithmetic wraps, shift counts mask to 0..=63.
 //!
-//! [`single_name`] — the single-identifier operand shape of `$ifdef` /
-//! `$ifndef` / `$elseifdef` — also lives here and is shared with the chain
-//! machine in [`super::conditional`].
+//! `single_name` — the single-identifier operand of `$ifdef`/`$ifndef`/
+//! `$elseifdef` — also lives here.
 
 use crate::lexer::{Position, Token, TokenKind};
 
@@ -49,13 +45,11 @@ pub(crate) fn single_name(
 
 // ── `$if` constant-expression evaluator ─────────────────────────────────────
 
-/// Evaluate a `$if` / `$elseif` expression to its integer value. `rest` is
-/// the directive line after the name; `pos` is the directive's position,
-/// used for errors that have no token to point at (e.g. an empty
-/// expression).
+/// `pos` is the directive's position, used for errors that have no token to
+/// point at (e.g. an empty expression).
 ///
-/// Two passes: [`expand_operands`] resolves `defined(NAME)` and splices
-/// define expansions in, then a Pratt walk evaluates the flat token slice.
+/// Two passes: `expand_operands` resolves `defined(NAME)` and splices define
+/// expansions in, then a Pratt walk evaluates the flat token slice.
 pub(crate) fn eval_if_expr(
     rest: &[Token],
     defines: &ScopedDefines,

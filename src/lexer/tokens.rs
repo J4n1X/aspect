@@ -1,7 +1,6 @@
 use crate::lexer::Position;
 use std::fmt;
 
-/// Language keywords
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Keyword {
     Fn,
@@ -98,7 +97,6 @@ impl Keyword {
     }
 }
 
-/// Token kinds
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     // Punctuation
@@ -171,7 +169,6 @@ pub enum TokenKind {
     Eof,     // End of file
 }
 
-/// Language type representation
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
 pub enum TypeBase {
     SInt,   // Signed integer
@@ -179,34 +176,26 @@ pub enum TypeBase {
     SFloat, // Floating point
     Void,   // Void type (u0)
     Bool,   // Boolean (i1 value, i8 storage with !range 0..1)
-    /// A type-struct, identified by an interned id into the program's
-    /// `ModuleSymbols` struct registry. The id (not the name) is stored so that
-    /// `LangType` stays `Copy`/`Eq`. Layout/fields are resolved against the
-    /// registry; this variant carries no inline data beyond the id.
+    /// Interned id into the program's `ModuleSymbols` struct registry. The id
+    /// (not the name) keeps `LangType` `Copy`/`Eq`.
     Struct(u32),
-    /// A C-style enum, identified by an interned id into the program's
-    /// `ModuleSymbols` enum registry. Its underlying representation is `i32`
-    /// (see `LangType::enum_type`); the id keeps `LangType` `Copy`/`Eq` and
-    /// makes the type *nominal* — two different enums are distinct types even
-    /// though both lower to `i32`. Variant names are resolved against the
-    /// registry.
+    /// Interned id into the `ModuleSymbols` enum registry. The representation
+    /// is `i32`, but the id makes the type *nominal* — two enums are distinct
+    /// types even though both lower to `i32`.
     Enum(u32),
-    /// A function pointer, identified by an interned id into the program's
-    /// `ModuleSymbols` function-signature registry. `fn(args) -> R` *is* the
-    /// pointer (machine functions are always called through an address). The
-    /// id keeps `LangType` `Copy`; the signature is resolved against the
-    /// registry.
+    /// Interned id into the `ModuleSymbols` function-signature registry.
+    /// `fn(args) -> R` *is* the pointer (machine functions are always called
+    /// through an address).
     FnPtr(u32),
 }
 
-/// Complete language type with size and modifiers
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
 pub struct LangType {
     pub base: TypeBase,
     pub size_bits: u32,
     pub pointer_depth: u32,
     pub is_const: bool,
-    /// For preallocated arrays: the number of elements. None for non-array types.
+    /// Element count for a preallocated array; `None` for non-array types.
     pub array_size: Option<u32>,
 }
 
@@ -234,37 +223,32 @@ impl LangType {
         }
     }
 
-    /// The void type (`u0`).
     pub const VOID: Self = Self::plain(TypeBase::Void, 0, 0);
-    /// The default integer type (`i32`).
+    /// The default integer type — what integer literals stamp to.
     pub const I32: Self = Self::plain(TypeBase::SInt, 32, 0);
-    /// `i64` — integer literals too large for `i32` default to this.
+    /// Integer literals too large for `i32` default to this.
     pub const I64: Self = Self::plain(TypeBase::SInt, 64, 0);
-    /// `u64` — the type of `sizeof(T)`.
+    /// The type of `sizeof(T)`.
     pub const U64: Self = Self::plain(TypeBase::UInt, 64, 0);
-    /// The default float type (`f64`).
     pub const F64: Self = Self::plain(TypeBase::SFloat, 64, 0);
-    /// The Aspect boolean: an `i1` logical value stored as `i8`.
+    /// An `i1` logical value stored as `i8`.
     pub const BOOL: Self = Self::plain(TypeBase::Bool, 8, 0);
-    /// `u8*` — byte pointer; the type of string literals and the parser's
-    /// placeholder stamp for `null`.
+    /// Byte pointer; the type of string literals and the parser's placeholder
+    /// stamp for `null`.
     pub const U8_PTR: Self = Self::plain(TypeBase::UInt, 8, 1);
 
-    /// A type-struct value type for the interned struct `id`.
     #[must_use]
     pub const fn struct_type(id: u32) -> Self {
         Self::plain(TypeBase::Struct(id), 0, 0)
     }
 
-    /// An enum value type for the interned enum `id`. Enums have a fixed `i32`
-    /// representation, so `size_bits` is 32 (the width the codegen `i32`
-    /// lowering and `sizeof` agree on).
+    /// `size_bits` is 32 — the width codegen's `i32` lowering and `sizeof`
+    /// agree on.
     #[must_use]
     pub const fn enum_type(id: u32) -> Self {
         Self::plain(TypeBase::Enum(id), 32, 0)
     }
 
-    /// A function-pointer type for the interned signature `id`.
     #[must_use]
     pub const fn fnptr_type(id: u32) -> Self {
         Self::plain(TypeBase::FnPtr(id), 0, 0)
@@ -322,7 +306,6 @@ impl LangType {
             return None;
         }
 
-        // `bool`: i1 logical value, stored as i8 (size_bits is the storage width).
         if s == "bool" {
             return Some(Self::BOOL);
         }
@@ -337,7 +320,6 @@ impl LangType {
         let size_str = &s[1..];
         let size: u32 = size_str.parse().ok()?;
 
-        // Special case for void (u0)
         if matches!(base, TypeBase::UInt) && size == 0 {
             Some(Self::VOID)
         } else if size.is_multiple_of(8) && size > 0 {
@@ -358,20 +340,18 @@ impl LangType {
         self
     }
 
-    /// Set the array size for preallocated arrays
     #[must_use]
     pub fn with_array_size(mut self, size: u32) -> Self {
         self.array_size = Some(size);
         self
     }
 
-    /// Check if this type is a preallocated array
     #[must_use]
     pub fn is_array(&self) -> bool {
         self.array_size.is_some()
     }
 
-    /// Get the element type (removes `array_size`, used for array-to-pointer decay)
+    /// Removes `array_size` — used for array-to-pointer decay.
     #[must_use]
     pub fn element_type(&self) -> Self {
         Self {
@@ -383,7 +363,6 @@ impl LangType {
         }
     }
 
-    /// Get the pointer type that this array decays to
     #[must_use]
     pub fn decay_to_pointer(&self) -> Self {
         Self {
@@ -409,8 +388,8 @@ impl fmt::Display for LangType {
             };
         }
 
-        // Type-structs print by interned id here (`Display` cannot reach the
-        // registry). Registry-aware diagnostics print the real name instead.
+        // Structs/enums/fn-pointers print by interned id: `Display` cannot
+        // reach the registry, so registry-aware diagnostics render real names.
         if let TypeBase::Struct(id) = self.base {
             return match self.array_size {
                 Some(size) => write!(f, "{const_str}struct#{id}[{size}]{asterisks}"),
@@ -418,9 +397,8 @@ impl fmt::Display for LangType {
             };
         }
 
-        // Function pointers print by interned id; the registry-aware diagnostic
-        // expands to `fn(T, T) -> R`. `fn(...) -> R` is itself a pointer, so
-        // trailing `*` here means pointer-to-fn-ptr.
+        // `fn(...) -> R` is itself a pointer, so a trailing `*` here means
+        // pointer-to-fn-ptr.
         if let TypeBase::FnPtr(id) = self.base {
             return match self.array_size {
                 Some(size) => write!(f, "{const_str}fn#{id}[{size}]{asterisks}"),
@@ -428,9 +406,6 @@ impl fmt::Display for LangType {
             };
         }
 
-        // Enums print by interned id here (`Display` cannot reach the registry).
-        // Registry-aware diagnostics (`TypeChecker::type_name`) print the real
-        // name instead.
         if let TypeBase::Enum(id) = self.base {
             return match self.array_size {
                 Some(size) => write!(f, "{const_str}enum#{id}[{size}]{asterisks}"),
@@ -447,7 +422,6 @@ impl fmt::Display for LangType {
             }
         };
 
-        // Handle array types
         if let Some(size) = self.array_size {
             write!(
                 f,
@@ -466,7 +440,6 @@ impl fmt::Display for LangType {
     }
 }
 
-/// A token with position information
 #[derive(Debug, Clone)]
 pub struct Token {
     pub kind: TokenKind,

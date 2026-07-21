@@ -38,20 +38,16 @@ pub struct CodeGenerator<'ctx> {
     /// Named LLVM struct type per type-struct id (built in the registration pass).
     pub(crate) struct_types: HashMap<u32, inkwell::types::StructType<'ctx>>,
 
-    /// Ordered field layout per type-struct id: `(field name, field type)` in
-    /// declaration/GEP-index order. A codegen-local index into the shared
-    /// registry (the walker is not threaded the `Program`).
+    /// `(field name, field type)` in GEP-index order — a codegen-local copy of
+    /// the shared registry (the walker is not threaded the `Program`).
     pub(crate) struct_fields: HashMap<u32, Vec<(String, LangType)>>,
 
-    /// Function-pointer signatures by id (indexed by `TypeBase::FnPtr(u32)`).
-    /// Cloned from `program.symbols.fnptr_sigs` during `generate`, since
-    /// `walk_expression` doesn't carry the `Program` reference.
+    /// Indexed by `TypeBase::FnPtr(u32)`; cloned from `program.symbols` during
+    /// `generate` since `walk_expression` doesn't carry the `Program`.
     pub(crate) fnptr_sigs: Vec<crate::symbol::module::FnPtrSig>,
 
-    /// Source-file registry, copied from `Program` at the start of
-    /// `generate`. Used by `format_error` so a codegen error's position
-    /// resolves to the file it actually came from — same mechanism as the
-    /// parser and type checker.
+    /// Copied from `Program` so `format_error` resolves a codegen error's
+    /// position to the file it came from.
     pub(crate) source_files: Vec<std::path::PathBuf>,
 
     pub(crate) scope: ScopeStack<'ctx>,
@@ -61,51 +57,41 @@ pub struct CodeGenerator<'ctx> {
     /// Return type of the function currently being generated — used in `generate_return`.
     pub(crate) current_function_return_type: Option<LangType>,
 
-    // Loop stack for break/continue support; each entry is (break_bb, continue_bb)
+    /// For break/continue: each entry is `(break_bb, continue_bb)`.
     pub(crate) loop_stack: Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>,
 
-    /// While generating a value-block expression, the innermost block's
-    /// (result slot, exit block, result type), innermost last. A `return`
-    /// inside a value-block stores into the slot and branches to the exit
-    /// block instead of returning from the function (see `generate_return`).
+    /// `(result slot, exit block, result type)` per enclosing value-block,
+    /// innermost last. A `return` inside one stores into the slot and branches
+    /// to the exit block instead of returning from the function.
     pub(crate) value_block_stack: Vec<(
         inkwell::values::PointerValue<'ctx>,
         BasicBlock<'ctx>,
         LangType,
     )>,
 
-    /// True only while folding a *global* variable's initializer. Global
-    /// initializers are order-sensitive static init: reading another global
-    /// there yields its start value, so folding a global reference to its
-    /// initializer is correct. Everywhere else (a local var initializer, an
-    /// array-expression element) a mutable global's value is a runtime load,
-    /// not its initializer, so `const_eval` must refuse to fold it. See the
-    /// `Variable` arm of `const_eval`.
+    /// True only while folding a *global* initializer, which is order-sensitive
+    /// static init: reading another global there yields its start value, so
+    /// folding a global reference is correct. Everywhere else a mutable global
+    /// is a runtime load, so `const_eval` must refuse to fold it.
     pub(crate) in_global_init: bool,
 
-    /// True when the program provides its own definition (body, not `extern`)
-    /// of a libc allocation function — the STD_NO_LIBC allocator. Such a
-    /// `malloc`/`calloc`/`realloc`/`free` does not honour libc's contracts, so
-    /// every function we emit is tagged `"no-builtins"` to keep the optimizer's
-    /// name-based allocation reasoning (object-size, alloc/free-pair folding,
-    /// the `noalias`/zeroed-`calloc` assumptions) away from it. Off by default,
-    /// so the ordinary libc-linked build keeps every one of those wins.
+    /// True when the program defines its own libc allocation function
+    /// (STD_NO_LIBC allocator). Such a `malloc`/`free` doesn't honour libc's
+    /// contracts, so every function is tagged `"no-builtins"` to keep the
+    /// optimizer's name-based allocation reasoning away from it. Off by default.
     pub(crate) disable_builtins: bool,
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
-    /// Creates a new `CodeGenerator` for `target` (see [`TargetSpec::host`]
-    /// for the host-defaulting case). Sets up the module's LLVM triple and
-    /// data layout from `target`, so downstream codegen ABI decisions (e.g.
-    /// struct/int alignment) are correct for the target being compiled for,
-    /// not necessarily the machine `aspc` itself is running on.
+    /// Sets the module's LLVM triple and data layout from `target`, so ABI
+    /// decisions (struct/int alignment) are correct for the target compiled
+    /// for, not necessarily the machine `aspc` runs on.
     ///
     /// # Errors
     ///
     /// Returns [`CodegenError::UnsupportedTarget`] when LLVM can't resolve
-    /// `target`'s triple to a usable target/target machine — e.g. an
-    /// `aarch64-*` triple when only the x86 backend is compiled into this
-    /// `aspc` binary (`--features target-x86`), or a malformed triple string.
+    /// `target`'s triple to a usable target machine — e.g. an `aarch64-*`
+    /// triple when only the x86 backend is built in, or a malformed triple.
     pub fn new(
         context: &'ctx Context,
         module_name: &str,
@@ -114,16 +100,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         Self::new_with_reloc(context, module_name, target, RelocMode::Default)
     }
 
-    /// Like [`Self::new`], but selects the LLVM **relocation model** `reloc`
-    /// for the target machine that drives both optimization passes and object
-    /// emission — this is how `aspc` emits position-independent code.
-    ///
-    /// [`RelocMode::PIC`] additionally stamps the module with a `PIC Level`
-    /// flag (value 2) so the emitted IR/object is self-describing as
-    /// position-independent, matching what clang records for `-fPIC`; every
-    /// other model leaves the module unflagged, exactly as before. All the
-    /// target/data-layout setup and [`CodegenError::UnsupportedTarget`] error
-    /// conditions documented on [`Self::new`] apply unchanged.
+    /// Like [`Self::new`], but selects the LLVM **relocation model** `reloc` —
+    /// how `aspc` emits position-independent code. [`RelocMode::PIC`]
+    /// additionally stamps a `PIC Level` flag (value 2), matching `-fPIC`;
+    /// every other model leaves the module unflagged.
     ///
     /// # Errors
     ///
@@ -138,12 +118,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         let module = context.create_module(module_name);
         let builder = context.create_builder();
 
-        // Initializes whichever backend(s) this binary was built with for
-        // the machine it is *running on* — not `target`. That's sufficient
-        // for every triple that backend covers (e.g. the x86 backend covers
-        // every `x86_64-*` triple, windows-msvc included; it just changes
-        // the object format), and any triple outside that coverage fails
-        // cleanly at `Target::from_triple` below rather than here.
+        // Initializes the backend for the machine `aspc` runs on — sufficient
+        // for every triple that backend covers (the x86 backend covers every
+        // `x86_64-*` triple, just changing object format). A triple outside its
+        // coverage fails cleanly at `Target::from_triple` below.
         Target::initialize_native(&InitializationConfig::default()).map_err(|reason| {
             CodegenError::UnsupportedTarget {
                 triple: target.triple().to_string(),
@@ -175,12 +153,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         module.set_triple(&triple);
         module.set_data_layout(&target_machine.get_target_data().get_data_layout());
 
-        // Record the PIC level the way clang does for `-fPIC`, so the emitted
-        // IR/object is self-describing as position-independent. inkwell 0.9's
-        // `FlagBehavior` exposes no `Max` (clang's choice for this flag);
+        // clang uses `FlagBehavior::Max` for this flag, which inkwell 0.9 lacks;
         // `Override` records the identical value and behaves the same for the
-        // single-module compilation `aspc` performs — the merge semantics only
-        // differ when two flagged modules are linked as IR, which never happens.
+        // single-module compilation `aspc` performs (merge semantics only differ
+        // when two flagged modules are IR-linked, which never happens here).
         if reloc == RelocMode::PIC {
             module.add_basic_value_flag(
                 "PIC Level",
@@ -212,7 +188,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         })
     }
 
-    /// Generate LLVM IR from a program
     /// # Errors
     /// Returns `CodegenError` if any of the nested functions fail
     /// # Panics
@@ -254,7 +229,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
-        // Generate global variables
         for global in &program.global_vars {
             if let Err(e) = self.generate_global_variable(global) {
                 anyhow::bail!(
@@ -265,11 +239,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
-        // Second pass: Generate function bodies. An `asm fn` has no statement
-        // body — its body *is* its instructions — so it takes the inline-asm
-        // lowering instead. This dispatch is load-bearing: `generate_function`
-        // would walk the empty body and synthesise a `ret 0`, silently
-        // producing a function that ignores its own assembly.
+        // Second pass: function bodies. The asm/naked dispatch is load-bearing:
+        // `generate_function` would walk their empty statement body and
+        // synthesise a `ret 0`, silently ignoring the actual assembly.
         for func in &program.functions {
             let result = match &func.body {
                 FunctionBody::Asm(spec) => self.generate_asm_function(func, spec),
@@ -290,15 +262,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
-    /// Emit the `_fltused` marker that MSVC's C runtime expects from any object
-    /// using floating point (the CRT references it to pull in FP support).
-    ///
-    /// LLVM/clang emit it lazily — only when the module actually uses FP — but
-    /// detecting that here would need a full AST walk; a spurious 4-byte
-    /// external symbol in a float-free Windows program is harmless, so we emit
-    /// it for every Windows target. External linkage keeps it through
-    /// `globaldce`. A no-op on non-Windows targets (detected from the module
-    /// triple, the same substring test `TargetSpec::os_define` uses).
+    /// The `_fltused` marker MSVC's CRT references to pull in FP support.
+    /// Detecting actual FP use would need a full AST walk, and a spurious 4-byte
+    /// symbol is harmless, so we emit it for every Windows target. External
+    /// linkage keeps it through `globaldce`; a no-op on non-Windows targets.
     fn emit_fltused_if_windows(&mut self) {
         let is_windows = self
             .module
@@ -333,12 +300,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self.module
     }
 
-    /// Get the cached target machine for the current platform.
     pub fn get_target_machine(&self) -> &TargetMachine {
         &self.target_machine
     }
 
-    /// Look up a declared/defined function by name.
     pub fn get_function(&self, name: &str) -> Option<FunctionValue<'ctx>> {
         self.functions.get(name).copied()
     }
@@ -356,11 +321,9 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Returns `CodegenError` if the passes fail to run
     pub fn optimize(&self, level: u8, verify_each: bool) -> Result<(), CodegenError> {
         if level == 0 {
-            // `globaldce` runs even here. It is not an optimization in the
-            // sense -O0 disclaims: it deletes only symbols nothing can reach,
-            // so no code you could step through changes. Skipping it would put
-            // the whole unused stdlib in every debug binary — a program that
-            // imports std/io would carry all 375 syscall wrappers.
+            // `globaldce` runs even at -O0: it deletes only unreachable symbols,
+            // so nothing steppable changes. Skipping it would drag the whole
+            // unused stdlib into every debug binary.
             return self.run_pass_pipeline("globaldce", verify_each);
         }
 
@@ -376,20 +339,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Verifying after each pass helps debugging invalid IR but can be expensive.
         pass_options.set_verify_each(verify_each);
 
-        // Keep O1/O2 close to LLVM defaults, and reserve expensive extras for O3.
+        // O1/O2 stay close to LLVM defaults; reserve the expensive extras for O3.
         match level {
-            1 => {
-                // No extras for O1.
-            }
+            1 => {}
             3 => {
                 pass_options.set_loop_interleaving(true);
                 pass_options.set_loop_slp_vectorization(true);
                 pass_options.set_merge_functions(true);
                 pass_options.set_call_graph_profile(true);
             }
-            _ => {
-                // O2 (and out-of-range values that map to O2 pipeline): no extras.
-            }
+            _ => {}
         }
 
         self.module
@@ -399,7 +358,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             })
     }
 
-    /// Run a named LLVM pass pipeline over the module.
     fn run_pass_pipeline(&self, passes: &str, verify_each: bool) -> Result<(), CodegenError> {
         let pass_options = PassBuilderOptions::create();
         pass_options.set_verify_each(verify_each);
@@ -410,12 +368,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             })
     }
 
-    /// Print the LLVM IR to a string
     pub fn print_ir_to_string(&self) -> String {
         self.module.print_to_string().to_string()
     }
 
-    /// Write LLVM IR to a file
     /// # Panics
     /// When writing to the file fails
     /// # Errors
@@ -427,8 +383,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
-    /// Write target object code to a file
-    ///
     /// # Errors
     /// Returns `CodegenError` when object emission fails
     pub fn write_object_to_file(&self, path: &std::path::Path) -> Result<(), CodegenError> {
@@ -443,15 +397,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             })
     }
 
-    /// JIT-compile the module and run `func_name`, forwarding `args` to it.
-    ///
-    /// Each `GenericValue` must match the corresponding LLVM parameter type
-    /// (build them via `IntType::create_generic_value`,
-    /// `FloatType::create_generic_value`, or
-    /// `GenericValue::create_generic_value_of_pointer`). Any backing storage
-    /// referenced by pointer arguments must remain valid for the duration of
-    /// the call.
-    ///
+    /// Each `GenericValue` must match the corresponding LLVM parameter type,
+    /// and any storage behind pointer arguments must stay valid for the call.
     /// Returns the integer return value as `u64`, or `0` for void functions.
     ///
     /// # Errors
@@ -501,11 +448,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// JIT-compile and call `main(u32 argc, u8** argv) -> i32`, forwarding
-    /// `args` as the program's argv. The caller controls the full argv
-    /// (including the conventional `argv[0]` program-name slot).
-    ///
-    /// Returns the value returned by `main`, truncated to `i32`.
+    /// Calls `main(u32 argc, u8** argv) -> i32` with `args` as argv (the caller
+    /// controls the full argv, including the `argv[0]` program-name slot).
+    /// Returns `main`'s value truncated to `i32`.
     ///
     /// # Errors
     /// Returns an error if `main` is missing or has the wrong arity, any

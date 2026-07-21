@@ -39,10 +39,8 @@ const STATEMENT_TABLE: &[(StatementPred, StatementHandler)] = &[
         |p| matches!(p.peek().kind, TokenKind::LangType(_)),
         Parser::parse_var_decl_or_assignment,
     ),
-    // `const <named-type>` locals (`const Point* p`): the scanner fuses `const`
-    // only with a built-in scalar (yielding a `LangType` token, matched above),
-    // so a bare `const` keyword at statement start begins a const declaration
-    // over a named/fn-ptr/grouped type.
+    // A bare `const` at statement start is a const local over a named/fn-ptr/
+    // grouped type; the scanner already fused `const` with builtin scalars above.
     (
         |p| p.check_keyword(&Keyword::Const),
         Parser::parse_var_decl_or_assignment,
@@ -67,8 +65,6 @@ const STATEMENT_TABLE: &[(StatementPred, StatementHandler)] = &[
 impl Parser {
     pub(crate) fn parse_statement(&mut self) -> Result<Statement, ParserError> {
         self.skip_newlines();
-        // Leading attributes decorate whatever statement follows (`@debug
-        // x = f()`). They are inert — attached, never interpreted here.
         let attrs = self.parse_leading_attrs()?;
         let mut stmt = self.dispatch_statement()?;
         stmt.attrs = attrs;
@@ -95,17 +91,11 @@ impl Parser {
                 if self.check(&TokenKind::CloseBrace) || self.is_at_end() {
                     break;
                 }
-                // Forward progress is this loop's own responsibility, not
-                // `synchronize`'s. `synchronize` deliberately stops *before* a
-                // statement-starting keyword so the next iteration can parse
-                // it — but when that keyword is what failed (a declaration-only
-                // form such as `fn`/`asm fn` written in statement position, which
-                // no statement rule accepts), the cursor has not moved and the
-                // same token would fail identically forever, pushing one error
-                // per iteration until the process OOMs. Consuming the stuck
-                // token bounds the loop at one error per token. Not fixable in
-                // `synchronize`: keeping those keywords in its stop-list is what
-                // makes recovery land on the *next* statement in the common case.
+                // `synchronize` stops *before* a statement-starting keyword so
+                // the next iteration parses it — but if that keyword is what
+                // failed (e.g. a top-level-only `fn` in statement position), the
+                // cursor never moves and the same token fails forever until OOM.
+                // Consuming the stuck token bounds the loop at one error/token.
                 let before = self.current;
                 if let Some(s) = sync!(parse_statement) {
                     stmts.push(s);
@@ -181,7 +171,7 @@ impl Parser {
             };
             Some(blk)
         } else if self.check_keyword(&Keyword::Elif) {
-            self.advance(); // consume 'elif'
+            self.advance();
             Some(vec![self.parse_elif_body()?])
         } else {
             None
@@ -266,8 +256,7 @@ impl Parser {
         ))
     }
 
-    /// Variable declaration inner (no trailing terminator).
-    /// Called by `parse_var_decl_or_assignment` (adds term) and the for-loop init.
+    /// No trailing terminator — the caller (or for-loop init) adds it.
     #[parse_rule]
     fn parse_var_decl_inner(&mut self) -> Result<Statement, ParserError> {
         let pos = pos!();
@@ -291,7 +280,6 @@ impl Parser {
         ))
     }
 
-    /// Parse variable declaration (with trailing terminator)
     fn parse_var_decl_or_assignment(&mut self) -> Result<Statement, ParserError> {
         let stmt = self.parse_var_decl_inner()?;
         self.match_token(&[TokenKind::Semicolon, TokenKind::Newline]);
@@ -316,7 +304,7 @@ impl Parser {
         }
     }
 
-    /// Create a compound assignment expression (e.g., x += 5 becomes x = x + 5)
+    /// Desugars `x += 5` to `x = x + 5`.
     fn create_compound_assignment(
         name: &str,
         var_type: crate::lexer::LangType,
@@ -336,8 +324,7 @@ impl Parser {
         )
     }
 
-    /// Parse expression or assignment without trailing terminator.
-    /// Called by `parse_expression_or_assign_statement` (adds term) and the for-loop.
+    /// No trailing terminator — the caller (or for-loop) adds it.
     fn parse_expression_or_assign_inner(&mut self) -> Result<Statement, ParserError> {
         let pos = self.peek().pos;
         let expr = self.parse_expression()?;
@@ -398,7 +385,6 @@ impl Parser {
         }
     }
 
-    /// Parse expression or assignment statement (with trailing terminator)
     fn parse_expression_or_assign_statement(&mut self) -> Result<Statement, ParserError> {
         let stmt = self.parse_expression_or_assign_inner()?;
         self.match_token(&[TokenKind::Semicolon, TokenKind::Newline]);

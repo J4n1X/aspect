@@ -1,15 +1,8 @@
 use crate::lexer::{LangType, TypeBase};
 
-/// Check if `from` can be implicitly coerced to `to` for non-literal expressions.
-///
-/// Rules:
-/// - Exact match -> compatible
-/// - Array-to-pointer decay -> compatible
-/// - Void is only compatible with void
-/// - Pointer depth must match (after decay)
-/// - Integer family (SInt/UInt): widening or equal width only
-/// - Float family: widening or equal width only
-/// - Integer ↔ Float: NOT compatible (requires explicit cast)
+/// Implicit coercion for non-literal expressions: exact match or array decay;
+/// void only with void; matching pointer depth after decay; widening-only
+/// within the integer or float family; integer ↔ float needs an explicit cast.
 #[must_use]
 pub fn types_coercible(from: &LangType, to: &LangType) -> bool {
     // Exact match (ignoring const)
@@ -39,11 +32,9 @@ pub fn types_coercible(from: &LangType, to: &LangType) -> bool {
         return from_void_value && to_void_value;
     }
 
-    // `u0*` (exactly depth 1) is the universal object pointer, but it bridges
-    // implicitly only at **depth 1**, in both directions: `T* -> u0*` (type
-    // erasure) and `u0* -> T*` (the `malloc` idiom). `T**` and deeper no longer
-    // bridge — they need an explicit `as` cast (Proposal C rule 2). This closes
-    // the unbounded-depth `u0*` hole while keeping the stdlib's depth-1 idiom.
+    // `u0*` is the universal object pointer, but bridges implicitly only at
+    // **depth 1**, both directions: `T* -> u0*` (erasure) and `u0* -> T*` (the
+    // `malloc` idiom). `T**` and deeper need an explicit `as` cast.
     let from_opaque = from.base == TypeBase::Void && decayed_from.pointer_depth == 1;
     let to_opaque = to.base == TypeBase::Void && decayed_to.pointer_depth == 1;
     if (to_opaque && decayed_from.pointer_depth == 1)
@@ -52,16 +43,13 @@ pub fn types_coercible(from: &LangType, to: &LangType) -> bool {
         return true;
     }
 
-    // Pointer depth must match after decay
     if decayed_from.pointer_depth != decayed_to.pointer_depth {
         return false;
     }
 
-    // Pointer-to-pointer of matching depth is no longer a free pass. The pointee
-    // type must match exactly (rule 1 — a different pointee, including a
-    // different signedness like `i32* -> u32*`, needs an explicit `as` cast),
-    // and const may be *added* implicitly but never *removed* (rule 4 —
-    // dropping const needs a cast). Pointer *comparisons* keep the old
+    // Pointer-to-pointer of matching depth: the pointee must match exactly (a
+    // different signedness like `i32* -> u32*` needs an `as` cast), and const
+    // may be added implicitly but never removed. Pointer *comparisons* keep the
     // permissive rule via `comparison_operands_valid`, not this path.
     if decayed_from.pointer_depth > 0 {
         if decayed_from.base != decayed_to.base
@@ -82,18 +70,14 @@ pub fn types_coercible(from: &LangType, to: &LangType) -> bool {
         // integer. Integers do NOT implicitly coerce to `bool` (that needs a
         // `!= 0` test, not a width cast), so the reverse direction is absent.
         (TypeBase::Bool, TypeBase::Bool | TypeBase::SInt | TypeBase::UInt) => true,
-        // An enum coerces only to the *same* enum (nominal identity). Enum ↔
-        // integer and enum ↔ other-enum are never implicit — they need an `as`
-        // cast. (Exact-equal enums already returned `true` at the top; this arm
-        // also lets a `const Enum` value satisfy a non-const `Enum` target.)
+        // Nominal identity: an enum coerces only to the *same* enum (this arm
+        // also lets a `const Enum` satisfy a non-const `Enum` target). Enum ↔
+        // integer needs an `as` cast.
         (TypeBase::Enum(a), TypeBase::Enum(b)) => a == b,
         _ => false,
     }
 }
 
-/// Check if an integer literal value `val` can be used as type `to`.
-///
-/// Returns `true` when `val` fits in the value range of `to`.
 #[must_use]
 pub fn literal_int_fits(val: i64, to: &LangType) -> bool {
     if to.pointer_depth > 0 || to.is_array() {
@@ -119,36 +103,30 @@ pub fn literal_int_fits(val: i64, to: &LangType) -> bool {
                 (val as u64) < (1u64 << to.size_bits)
             }
         }
-        // A `bool` accepts only the literals `0` and `1`.
         TypeBase::Bool => val == 0 || val == 1,
         _ => false,
     }
 }
 
-/// Check if a float literal is compatible with `to`.
-///
-/// Float literals are accepted by any float type; precision loss is permitted.
+/// Any float type accepts a float literal; precision loss is permitted.
 #[must_use]
 pub fn literal_float_compatible(to: &LangType) -> bool {
     matches!(to.base, TypeBase::SFloat) && to.pointer_depth == 0 && !to.is_array()
 }
 
-/// Check if an explicit `as` cast from `from` to `to` is valid.
 #[must_use]
 pub fn cast_valid(from: &LangType, to: &LangType) -> bool {
-    // Type-struct *values* are aggregates and cannot be bit-reinterpreted by a
-    // cast; only the identical struct type "casts" to itself. Pointer-to-struct
-    // casts (e.g. `Point* as u64`) fall through to the pointer rules below.
+    // Type-struct *values* are aggregates: only the identical struct type
+    // "casts" to itself. Pointer-to-struct casts fall through to the pointer
+    // rules below.
     if (matches!(from.base, TypeBase::Struct(_)) && from.pointer_depth == 0)
         || (matches!(to.base, TypeBase::Struct(_)) && to.pointer_depth == 0)
     {
         return from == to;
     }
-    // Enums share the `i32` representation, so they cast to/from integers and
-    // to/from another enum (both are ints under the hood) — but never directly
-    // to/from a float or pointer, which must go through an integer. `int as
-    // Enum` performs no range check on the value (C-like); `Enum as iN` may
-    // narrow the repr.
+    // Enums share the `i32` repr, so they cast to/from integers and other enums
+    // but never directly to/from a float or pointer (go through an integer).
+    // `int as Enum` performs no range check (C-like).
     let from_is_enum = matches!(from.base, TypeBase::Enum(_)) && from.pointer_depth == 0;
     let to_is_enum = matches!(to.base, TypeBase::Enum(_)) && to.pointer_depth == 0;
     if from_is_enum || to_is_enum {
@@ -157,9 +135,8 @@ pub fn cast_valid(from: &LangType, to: &LangType) -> bool {
             || (matches!(other.base, TypeBase::SInt | TypeBase::UInt) && other.pointer_depth == 0);
     }
 
-    // Function pointers are pointer-shaped values. Allow casts to/from any
-    // other pointer-like type or an integer (so `0 as fn(...) -> R` builds a
-    // null function pointer, and integer ↔ FnPtr round-trips work).
+    // Function pointers are pointer-shaped: cast to/from any pointer-like type
+    // or an integer (so `0 as fn(...) -> R` builds a null function pointer).
     let from_is_fnptr = matches!(from.base, TypeBase::FnPtr(_)) && from.pointer_depth == 0;
     let to_is_fnptr = matches!(to.base, TypeBase::FnPtr(_)) && to.pointer_depth == 0;
     if from_is_fnptr || to_is_fnptr {

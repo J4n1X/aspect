@@ -14,8 +14,7 @@ pub struct Position {
 }
 
 impl Position {
-    /// Construct a position with the default `file_id` of 0 — the entry file
-    /// for compiled programs, or "unattributed" for synthetic positions.
+    /// Defaults `file_id` to 0 — the entry file, or "unattributed".
     #[must_use]
     pub fn new(line: usize, column: usize) -> Self {
         Self {
@@ -25,8 +24,6 @@ impl Position {
         }
     }
 
-    /// Construct a position with an explicit `file_id`, used by the lexer
-    /// when tokenising imported files.
     #[must_use]
     pub fn with_file(line: usize, column: usize, file_id: u32) -> Self {
         Self {
@@ -48,7 +45,6 @@ impl std::fmt::Display for Position {
     }
 }
 
-/// Lexer error types
 #[derive(Error, Debug, ErrorPosition)]
 pub enum LexerError {
     #[error("Unexpected character '{0}' at {1}")]

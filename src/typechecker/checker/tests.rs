@@ -12,18 +12,10 @@
         (program, result)
     }
 
-    /// Lex, parse, and type-check `src` against an explicit `--target`,
-    /// mirroring what the driver does for `aspc --target <triple>`.
-    ///
-    /// The integration harness cannot reach these rules — it always compiles
-    /// for the host, and its `# compile_args:` supports `-D`/`-I` only — so
-    /// the target-arch rules are covered here instead.
-    ///
-    /// Note that a non-x86 target is *not* merely hypothetical for a binary
-    /// built with only the x86 backend: `i686-*` is an x86 triple that LLVM
-    /// accepts and happily emits a 32-bit module for, while having no `rax`.
-    /// Nothing downstream would catch that, which is precisely why the check
-    /// belongs to the type checker.
+    /// Checks `src` against an explicit `--target`. The integration harness only
+    /// compiles for the host, so the target-arch rules are covered here. A
+    /// non-x86 target isn't hypothetical: `i686-*` is an x86 triple LLVM accepts
+    /// and emits a 32-bit module for, with no `rax` — which only the checker catches.
     fn check_for_target(src: &str, triple: &str) -> Result<(), Vec<TypeCheckError>> {
         let tokens = tokenize(src.to_string()).expect("tokenization should succeed");
         let mut parser = Parser::new(tokens);
@@ -640,14 +632,9 @@ asm fn f(i64 a: rdi) -> i64: rax
         assert!(res.is_ok(), "expected ok, got {res:?}");
     }
 
-    // ── Checker-resolved `MethodCall` (Three-Hook-Metasystem Phase 0) ─────────
-    //
-    // The parser never emits `ExprKind::MethodCall` — it resolves method calls
-    // at parse time. These tests exercise the checker's resolution path
-    // directly (the coverage vehicle for this slice, per §14.2): they parse a
-    // fixture that registers the type/methods/fields, inject a hand-built
-    // `MethodCall` into a probe function's body, run the full checker, and
-    // assert the node was rewritten (and mangled) as expected.
+    // Checker-resolved `MethodCall`: the parser never emits `MethodCall`, so
+    // these tests inject a hand-built one into a probe function's body, run the
+    // full checker, and assert it was rewritten (and mangled) as expected.
 
     const METHOD_SETUP: &str = "\
 type Widget {

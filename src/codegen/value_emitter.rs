@@ -1,15 +1,9 @@
 //! `ValueEmitter` trait — the runtime/constant abstraction layer.
 //!
-//! Both `RuntimeEmitter` and `ConstantEmitter` implement `ValueEmitter<'ctx>`.
-//! They perform identical arithmetic but materialise results differently:
-//! - `RuntimeEmitter` emits LLVM IR instructions via the builder.
-//! - `ConstantEmitter` folds values in Rust and reconstructs LLVM constants.
-//!
-//! The runtime walker (`walk_expression`, in `super::expressions`) drives
-//! `RuntimeEmitter`; the constant evaluator (`const_eval`, in
-//! `super::const_eval`) drives `ConstantEmitter`. Both share this trait's
-//! operand-classification and widening helpers so the two paths stay
-//! bug-for-bug consistent.
+//! `RuntimeEmitter` and `ConstantEmitter` do identical arithmetic but
+//! materialise results differently: one emits LLVM IR via the builder, the
+//! other folds in Rust and reconstructs LLVM constants. Sharing this trait's
+//! widening/classification helpers keeps the two paths bug-for-bug consistent.
 
 use inkwell::{
     builder::Builder,
@@ -33,10 +27,8 @@ use crate::{
 pub trait ValueEmitter<'ctx> {
     fn context(&self) -> &'ctx Context;
 
-    /// Emit a binary operation on two `IntValue`s.
-    ///
-    /// The caller is responsible for widening both values to the same bit-width
-    /// first (via `emit_widen_ints`).
+    /// The caller must widen both values to the same bit-width first (via
+    /// `emit_widen_ints`).
     fn emit_int_binary(
         &self,
         op: &BinaryOp,
@@ -46,9 +38,7 @@ pub trait ValueEmitter<'ctx> {
         pos: Position,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError>;
 
-    /// Emit a binary operation on two `FloatValue`s.
-    ///
-    /// The caller is responsible for widening both values first (via `emit_widen_floats`).
+    /// The caller must widen both values first (via `emit_widen_floats`).
     fn emit_float_binary(
         &self,
         op: &BinaryOp,
@@ -57,7 +47,6 @@ pub trait ValueEmitter<'ctx> {
         pos: Position,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError>;
 
-    /// Emit a type cast.
     fn emit_cast(
         &self,
         value: BasicValueEnum<'ctx>,
@@ -67,12 +56,9 @@ pub trait ValueEmitter<'ctx> {
         pos: Position,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError>;
 
-    /// Emit an integer literal at the given language type.
-    ///
-    /// Literals are LLVM constants in both modes, so this shared default
-    /// (which only needs `context()`) serves both emitters. Returns a
-    /// position-less [`TypeLoweringError`]; the caller attaches the position
-    /// via [`TypeLoweringError::with_pos`].
+    /// Literals are LLVM constants in both modes, so this shared default serves
+    /// both emitters. Returns a positionless [`TypeLoweringError`]; the caller
+    /// attaches the position via [`TypeLoweringError::with_pos`].
     fn emit_int_literal(
         &self,
         val: i64,
@@ -86,8 +72,7 @@ pub trait ValueEmitter<'ctx> {
         }
     }
 
-    /// Emit a float literal at the given language type (shared default, as
-    /// for [`ValueEmitter::emit_int_literal`]).
+    /// Shared default, as for [`ValueEmitter::emit_int_literal`].
     fn emit_float_literal(
         &self,
         val: f64,
@@ -586,7 +571,6 @@ impl<'ctx> ValueEmitter<'ctx> for ConstantEmitter<'ctx> {
             .into());
         }
 
-        // int → float
         if target_is_float && value.is_int_value() {
             let int_val = value.into_int_value();
             let float_type = target_llvm.into_float_type();
@@ -609,7 +593,6 @@ impl<'ctx> ValueEmitter<'ctx> for ConstantEmitter<'ctx> {
             return Ok(float_type.const_float(fval).into());
         }
 
-        // float → int
         if target_is_int && value.is_float_value() {
             let float_val = value.into_float_value();
             let int_type = target_llvm.into_int_type();
@@ -628,7 +611,6 @@ impl<'ctx> ValueEmitter<'ctx> for ConstantEmitter<'ctx> {
             return Ok(int_type.const_int(bits, target_signed).into());
         }
 
-        // float → float
         if target_is_float && value.is_float_value() {
             let float_val = value.into_float_value();
             let float_type = target_llvm.into_float_type();
@@ -646,7 +628,6 @@ impl<'ctx> ValueEmitter<'ctx> for ConstantEmitter<'ctx> {
             return Ok(value);
         }
 
-        // int → pointer
         if target_is_pointer && value.is_int_value() {
             return Ok(value
                 .into_int_value()
@@ -654,7 +635,6 @@ impl<'ctx> ValueEmitter<'ctx> for ConstantEmitter<'ctx> {
                 .into());
         }
 
-        // pointer → int
         if target_is_int && value.is_pointer_value() {
             return Ok(value
                 .into_pointer_value()

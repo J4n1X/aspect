@@ -2,7 +2,6 @@ use crate::lexer::Position;
 use aspect_macros::ErrorPosition;
 use thiserror::Error;
 
-/// Code generation error types
 #[derive(Error, Debug, ErrorPosition)]
 pub enum CodegenError {
     #[error("Undefined variable '{0}' at {1}")]
@@ -32,31 +31,23 @@ pub enum CodegenError {
     #[error("Missing return statement in function '{0}' at {1}")]
     MissingReturn(String, Position),
 
-    /// LLVM couldn't resolve the requested `--target` triple to a usable
-    /// target/target machine — e.g. an `aarch64-*` triple when only the x86
-    /// backend is compiled into this `aspc` binary, or a malformed triple
-    /// string. Has no source position: the failure is about the target the
-    /// whole compilation was invoked with, not any one place in the source.
+    /// LLVM couldn't resolve the `--target` triple to a usable target machine.
+    /// Positionless: the failure is about the whole compilation's target, not
+    /// any one place in the source.
     #[error("unsupported compilation target '{triple}': {reason}")]
     UnsupportedTarget { triple: String, reason: String },
 
-    /// A codegen failure with no meaningful source location: whole-module
-    /// backend operations (running LLVM passes, emitting the object file) and
-    /// registration-time type lowering that runs before any statement context.
-    /// Position-less by design, so diagnostics print the bare message instead
-    /// of a fabricated `0:0` prefix.
+    /// A codegen failure with no meaningful source location (whole-module
+    /// backend operations, registration-time type lowering). Positionless by
+    /// design, so diagnostics skip a fabricated `0:0` prefix.
     #[error("{0}")]
     Internal(String),
 }
 
-/// A type-lowering failure with **no** source position attached.
-///
 /// The codegen type-lowering call graph (`LangTypeExt::to_llvm` and friends)
-/// is value-only — a `LangType` carries no position — so those helpers cannot
-/// name a source location on their own. They return this position-less error;
-/// the caller grafts the relevant position on at the phase boundary via
-/// [`TypeLoweringError::with_pos`], mirroring how `ParserError::from_symbol`
-/// attaches a position to a position-less `SymbolError`.
+/// is value-only — a `LangType` carries no position — so it returns this
+/// positionless error and the caller grafts a position on at the phase
+/// boundary via [`TypeLoweringError::with_pos`].
 #[derive(Debug)]
 pub struct TypeLoweringError(pub String);
 
@@ -67,9 +58,8 @@ impl TypeLoweringError {
         CodegenError::TypeError(self.0, pos)
     }
 
-    /// Convert to a position-less [`CodegenError::Internal`], for the few call
-    /// sites (struct-field registration, arg-less sret lowering) that have no
-    /// source location to attach.
+    /// A positionless [`CodegenError::Internal`], for the few call sites with
+    /// no source location to attach.
     #[must_use]
     pub fn without_pos(self) -> CodegenError {
         CodegenError::Internal(self.0)

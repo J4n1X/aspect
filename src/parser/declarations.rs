@@ -5,19 +5,16 @@ use crate::symbol::module::Visibility;
 use aspect_macros::parse_rule;
 
 impl Parser {
-    /// Parse zero or more leading `@name` / `@name(arg, ...)` attributes.
-    ///
-    /// Attributes are inert cargo: the parser validates only the shape (`@`
-    /// must be followed by an identifier) and attaches them, in source order,
-    /// to the statement or item that follows. Source order is outside-in —
-    /// in `@a @b x`, `a` is applied last. Newlines after an attribute are
-    /// skipped, so an attribute on its own line binds to what follows.
+    /// Attributes are inert cargo: the parser validates only the shape and
+    /// attaches them, in source order, to the item that follows. Source order
+    /// is outside-in — in `@a @b x`, `a` is applied last. Newlines after an
+    /// attribute are skipped, so one on its own line binds to what follows.
     #[parse_rule]
     pub(crate) fn parse_leading_attrs(&mut self) -> Result<Vec<Attribute>, ParserError> {
         let mut attrs = Vec::new();
         while self.check(&TokenKind::At) {
             let pos = pos!();
-            self.advance(); // '@'
+            self.advance();
             let name = self.parse_ident("attribute name")?;
             let args = if token_if!(OpenParen) {
                 self.parse_comma_separated(&TokenKind::CloseParen, Self::parse_expression)?
@@ -41,13 +38,11 @@ impl Parser {
         }
     }
 
-    /// Parse a top-level type-struct definition:
-    /// `type Name { [public] Type field <term> ...  [const?] fn method(...) {...} ... }`.
+    /// `type Name { [public] Type field ... [const?] fn method(...) {...} ... }`.
     ///
-    /// Fields must come before methods. Methods are desugared into mangled
-    /// free functions (`Type$method`) and returned to `do_parse_program` for
-    /// inclusion in `Program::functions`. `attrs` are the declaration's
-    /// leading attributes; they land on the struct's `StructInfo`.
+    /// Fields must come before methods. Methods are desugared into mangled free
+    /// functions (`Type$method`) and returned to `do_parse_program`. `attrs`
+    /// land on the struct's `StructInfo`.
     #[parse_rule]
     pub(crate) fn parse_struct_def(
         &mut self,
@@ -63,10 +58,8 @@ impl Parser {
             .struct_id(&name)
             .expect("type-struct name reserved during prescan");
 
-        // A non-empty field set means this name was already defined; a name also
-        // interned as an enum is a cross-namespace collision. (Aliases can't
-        // collide here — the alias prescan already rejects an alias whose name
-        // is a struct or enum.)
+        // A non-empty field set means this name was already defined; a name
+        // also interned as an enum is a cross-namespace collision.
         if !self.module.struct_info(id).fields.is_empty() || self.module.enum_id(&name).is_some() {
             return Err(ParserError::DuplicateType(name, pos));
         }
@@ -99,10 +92,8 @@ impl Parser {
                 Visibility::Private
             };
 
-            // Method vs field. A method is `[const] fn IDENT (...)`; a
-            // function-pointer *field* type is `fn (...)`. They are told apart
-            // by lookahead (`fn` followed by a name vs `(`), so a `public
-            // fn(i32) -> i32 cb` field is not mistaken for a method.
+            // Method vs field by lookahead: a method is `[const] fn IDENT (`,
+            // a function-pointer *field* type is `fn (`.
             if self.upcoming_is_method() {
                 if !fields_set {
                     self.module.set_fields(id, std::mem::take(&mut fields));
@@ -110,7 +101,7 @@ impl Parser {
                 }
                 let is_const_fn = self.check_keyword(&Keyword::Const);
                 if is_const_fn {
-                    self.advance(); // consume `const`
+                    self.advance();
                     skip_nl!();
                 }
                 let method = self.parse_method(id, &name, is_const_fn, vis, member_attrs)?;
@@ -118,7 +109,6 @@ impl Parser {
                 continue;
             }
 
-            // Field. Fields must come before any method.
             if fields_set {
                 return Err(ParserError::UnexpectedToken(
                     "fields must be declared before methods".to_string(),
@@ -145,14 +135,10 @@ impl Parser {
         Ok(methods)
     }
 
-    /// Parse a top-level enum definition: `enum Name { V1, V2, ... }`.
-    ///
-    /// Variants are identifiers separated by commas and/or newlines (either or
-    /// both). Each is assigned its declaration-order index as its value (`V1`=0,
-    /// `V2`=1, ...). The enum id was reserved by the prescan; `attrs` are the
-    /// declaration's leading attributes, stored on its `EnumInfo`. An enum has
-    /// no AST node — like an alias it produces only a symbol-table entry, which
-    /// `parse_type` and `parse_dot_postfix` consult.
+    /// `enum Name { V1, V2, ... }`. Variants are comma- and/or newline-separated
+    /// identifiers, each assigned its declaration-order index as its value. Like
+    /// an alias, an enum has no AST node — only a symbol-table entry; `attrs`
+    /// land on its `EnumInfo`.
     #[parse_rule]
     pub(crate) fn parse_enum_def(&mut self, attrs: Vec<Attribute>) -> Result<(), ParserError> {
         let pos = pos!();
@@ -164,9 +150,8 @@ impl Parser {
             .expect("enum name reserved during prescan");
 
         // A non-empty variant set means this name was already defined; a name
-        // also interned as a type-struct or alias is a cross-namespace
-        // collision. (Rejecting empty enums below keeps the non-empty-variant
-        // set a faithful "already defined" sentinel.)
+        // also interned as a type-struct or alias is a cross-namespace collision.
+        // (Rejecting empty enums below keeps that set a faithful sentinel.)
         if !self.module.enum_info(id).variants.is_empty()
             || self.module.struct_id(&name).is_some()
             || self.module.resolve_alias(&name).is_some()
@@ -190,13 +175,10 @@ impl Parser {
             }
             variants.push(variant);
             skip_nl!();
-            // Optional comma between variants (newlines already skipped) — so
-            // `Red, Green, Blue`, one-per-line, and any mix all parse.
             self.match_token(&[TokenKind::Comma]);
         }
-        // An enum with no variants is uninhabited (no value can ever be formed),
-        // so it is rejected rather than silently accepted. Checked before the
-        // closing brace is consumed so the diagnostic points at the `}`.
+        // An enum with no variants is uninhabited, so it is rejected. Checked
+        // before the closing brace so the diagnostic points at the `}`.
         if variants.is_empty() {
             return Err(ParserError::ExpectedToken(
                 "at least one enum variant".to_string(),
@@ -210,30 +192,24 @@ impl Parser {
         Ok(())
     }
 
-    /// Lookahead from the current position: does a method declaration start
-    /// here? A method is `[const] fn IDENT (`; a function-pointer field type is
-    /// `fn (`, so the token after `fn` — an identifier vs `(` — discriminates.
-    /// Any `public` prefix has already been consumed by the caller.
+    /// A method is `[const] fn IDENT (`; a function-pointer field type is
+    /// `fn (`, so the token after `fn` — identifier vs `(` — discriminates.
+    /// Any `public` prefix was already consumed by the caller.
     fn upcoming_is_method(&self) -> bool {
         let mut i = self.current;
         let kind_at = |idx: usize| self.tokens.get(idx).map(|t| &t.kind);
-        // Optional leading `const`.
         if matches!(kind_at(i), Some(TokenKind::Keyword(Keyword::Const))) {
             i += 1;
         }
-        // Must be `fn` followed by the method name (not `(`, which begins a
-        // function-pointer type used as a field).
         if !matches!(kind_at(i), Some(TokenKind::Keyword(Keyword::Fn))) {
             return false;
         }
         matches!(kind_at(i + 1), Some(TokenKind::Identifier(_)))
     }
 
-    /// Parse a method inside a `type` body. Methods are desugared to free
-    /// functions named `Type$method`. An instance method takes a leading bare
-    /// `this` receiver (no type annotation); the parser supplies it as an
-    /// implicit `*Struct` (or `*const Struct` for `const fn`) first parameter.
-    /// A static method omits `this`.
+    /// Methods are desugared to free functions named `Type$method`. An instance
+    /// method's leading bare `this` receiver is supplied as an implicit `*Struct`
+    /// (or `*const Struct` for `const fn`) first parameter; a static method omits it.
     #[parse_rule]
     fn parse_method(
         &mut self,
@@ -266,7 +242,6 @@ impl Parser {
                 array_size: None,
             };
             params.push((receiver_ty, "this".to_string()));
-            // Optional comma before the next param.
             self.match_token(&[TokenKind::Comma]);
             true
         } else {
@@ -299,9 +274,7 @@ impl Parser {
             params: params.clone(),
             return_type,
             // A method's `public` governs access through its type (the
-            // `MethodSig.vis` gate), not the module namespace or object-file
-            // linkage — nothing outside Aspect calls a mangled method, and the
-            // type's own visibility already gates cross-module reach.
+            // `MethodSig.vis` gate), not the module namespace or linkage.
             vis: Visibility::Private,
             export: false,
             attrs,
@@ -378,15 +351,10 @@ impl Parser {
         false
     }
 
-    /// Reject a parameter list that names the same parameter twice.
-    ///
-    /// A fn *with* a body catches this in pass 2, when the body's scope
-    /// declares each parameter and the second declaration collides. The
-    /// bodyless forms — `extern fn` and `asm fn` — never open that scope, so
-    /// without this check they silently accept `f(i64 a, i64 a)`. Checking the
-    /// proto directly covers all three forms at their declaration site; the
-    /// error matches pass 2's spelling and position so a duplicate reports
-    /// identically no matter which form it appears in.
+    /// A fn *with* a body catches this in pass 2 when its scope re-declares a
+    /// parameter, but the bodyless forms (`extern fn`, `asm fn`) never open
+    /// that scope. Checking the proto directly covers all three forms with a
+    /// matching diagnostic.
     pub(crate) fn check_duplicate_params(
         params: &[(LangType, String)],
         pos: crate::lexer::Position,
@@ -489,9 +457,8 @@ impl Parser {
         self.symbol_table_mut()
             .add_variable(name.clone(), var_type, pos)
             .map_err(|e| ParserError::from_symbol(e, pos))?;
-        // Record the global's module visibility for the reference-site gate
-        // (globals live in the parser's outermost variable scope, whose
-        // `Symbol` carries no visibility of its own).
+        // The reference-site gate needs this: the outermost variable scope's
+        // `Symbol` carries no visibility of its own.
         self.global_vis.insert(name.clone(), vis);
 
         term!();
@@ -533,18 +500,14 @@ impl Parser {
         ))
     }
 
-    /// Disambiguate a bare `{` in expression position.
+    /// A brace expression that parses as a comma-separated list *is* a list
+    /// initializer; anything else re-parses as a **value-block**. The two
+    /// grammars cannot both accept one input: a valid value-block must contain
+    /// a `return`, which can never appear in a valid list.
     ///
-    /// A brace expression that parses as a comma-separated expression list
-    /// *is* a list initializer (`{1, 2, 3}`, `{x}`, `{}`). Anything else —
-    /// statement terminators, declarations, `return` — fails the list parse
-    /// and is re-parsed as a **value-block** (`{ ...; return v }`). The two
-    /// grammars cannot both accept one input: a valid value-block must
-    /// contain a `return`, which can never appear in a valid list.
-    ///
-    /// Speculation is safe here for the same reason as `parse_cast_or_alloc`:
-    /// expression parsing has no side effects beyond interned string
-    /// literals, which are rolled back by truncation.
+    /// Speculation is safe (as in `parse_cast_or_alloc`): expression parsing
+    /// has no side effects beyond interned string literals, rolled back by
+    /// truncation.
     pub(crate) fn parse_brace_expression(&mut self) -> Result<Expression, ParserError> {
         let saved = self.current;
         let saved_strlits = self.string_literals.len();
@@ -568,12 +531,10 @@ impl Parser {
         }
     }
 
-    /// Parse a value-block: `{ stmt* }` as an expression. The opening brace
-    /// has not yet been consumed. Statements are parsed with the regular
-    /// statement grammar in a fresh variable scope; errors propagate (no
-    /// `sync!` recovery — inside an expression there is no safe resync
-    /// point). The expression type is a `void` placeholder; the type
-    /// checker resolves it from the block's `return` statements.
+    /// `{ stmt* }` as an expression (opening brace not yet consumed). Errors
+    /// propagate with no `sync!` recovery — inside an expression there is no
+    /// safe resync point. The type is a `void` placeholder the checker later
+    /// resolves from the block's `return` statements.
     #[parse_rule]
     fn parse_value_block(&mut self) -> Result<Expression, ParserError> {
         let pos = pos!();
