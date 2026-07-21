@@ -65,6 +65,71 @@ public const i32 TYPE_BOOL          = 4
 public const i32 TYPE_STRUCT        = 5
 public const i32 TYPE_FNPTR         = 6
 
+# `token.kind()` — a coarse grouping of the lexer's TokenKind. Punctuation and
+# operators share TOKEN_PUNCT; use `token.text()` for the exact lexeme.
+public const i32 TOKEN_IDENT        = 0
+public const i32 TOKEN_INTEGER      = 1
+public const i32 TOKEN_FLOAT        = 2
+public const i32 TOKEN_STRING       = 3
+public const i32 TOKEN_BOOL         = 4
+public const i32 TOKEN_KEYWORD      = 5
+public const i32 TOKEN_TYPE         = 6
+public const i32 TOKEN_PUNCT        = 7
+public const i32 TOKEN_NEWLINE      = 8
+public const i32 TOKEN_EOF          = 9
+
+# NOTE: every `*_KIND`/`TOKEN_*`/`TYPE_*` block above is a stand-in for a missing
+# language feature — enums. When Aspect gains an `enum` type these become type-
+# safe variants (an `ExprKind` can't be compared to a `StmtKind`) instead of
+# interchangeable `i32`s. Tracked as an open decision — see the interface doc.
+
+# ── Raw tokens (expansion input; pre-parse, no types) ────────────────────────
+# An expansion (hook #1) captures the `TokenTree` inside its braces and reads
+# it syntactically — this is the surface it works over, distinct from the typed
+# AST (Expr/Stmt) that rules and transforms see.
+public type Token {
+    u64 handle
+    public fn from_handle(u64 h) -> Token { return Token { handle = h } }
+    public fn raw(this) -> u64 { return this.handle }
+
+    public fn kind(this) -> i32 { return meta_token_kind(this.handle) }  # TOKEN_*
+    public fn text(this) -> u8* { return meta_token_text(this.handle) }  # lexeme
+    public fn pos(this)  -> Pos { return Pos.from_handle(meta_token_pos(this.handle)) }
+}
+
+public type TokenTree {
+    u64 handle
+    public fn from_handle(u64 h) -> TokenTree { return TokenTree { handle = h } }
+    public fn raw(this) -> u64 { return this.handle }
+
+    public fn count(this) -> u64 { return meta_tokentree_count(this.handle) }
+    public fn at(this, u64 i) -> Token { return Token.from_handle(meta_tokentree_at(this.handle, i)) }
+
+    # Convenience for string interpolation: split an interior string literal into
+    # text runs and `{ident}` holes, in source order. (May belong in std/fmt
+    # rather than core — see the doc's open questions.)
+    public fn segments(this) -> SegmentList { return SegmentList.from_handle(meta_tokentree_segments(this.handle)) }
+}
+
+public type Segment {
+    u64 handle
+    public fn from_handle(u64 h) -> Segment { return Segment { handle = h } }
+    public fn raw(this) -> u64 { return this.handle }
+
+    public fn is_text(this)   -> bool { return meta_segment_is_text(this.handle) }
+    public fn text(this)      -> u8*  { return meta_segment_text(this.handle) }       # a text run
+    public fn hole_name(this) -> u8*  { return meta_segment_hole_name(this.handle) }  # a `{ident}` hole
+}
+
+public type SegmentList {
+    u64 handle
+    public fn from_handle(u64 h) -> SegmentList { return SegmentList { handle = h } }
+    public fn raw(this) -> u64 { return this.handle }
+
+    public fn count(this) -> u64 { return meta_segmentlist_count(this.handle) }
+    public fn at(this, u64 i) -> Segment { return Segment.from_handle(meta_segmentlist_at(this.handle, i)) }
+}
+
 # ── Position ─────────────────────────────────────────────────────────────────
 public type Pos {
     u64 handle
@@ -226,6 +291,18 @@ public type Judgments {
 
 # ── extern builtins (the JIT-side contract; implemented in Rust later) ────────
 # Handles cross as bare u64; strings as u8*; 0 is the null handle. See the doc.
+
+extern fn meta_token_kind(u64 h)          -> i32
+extern fn meta_token_text(u64 h)          -> u8*
+extern fn meta_token_pos(u64 h)           -> u64
+extern fn meta_tokentree_count(u64 h)     -> u64
+extern fn meta_tokentree_at(u64 h, u64 i) -> u64
+extern fn meta_tokentree_segments(u64 h)  -> u64
+extern fn meta_segment_is_text(u64 h)     -> bool
+extern fn meta_segment_text(u64 h)        -> u8*
+extern fn meta_segment_hole_name(u64 h)   -> u8*
+extern fn meta_segmentlist_count(u64 h)     -> u64
+extern fn meta_segmentlist_at(u64 h, u64 i) -> u64
 
 extern fn meta_pos_line(u64 h)   -> u64
 extern fn meta_pos_column(u64 h) -> u64

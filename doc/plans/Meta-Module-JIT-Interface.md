@@ -7,11 +7,15 @@ builtins named here are unimplemented; the interface forwards to signatures the
 JIT side will fulfil later. Companion to `doc/plans/Three-Hook-Metasystem.md`
 (this realises its §14/§15 "std/meta handle ABI" item).
 
-**Scope of this pass:** the **read / query / judgment** surface — enough for a
-metaprogram to *inspect* the program and *emit diagnostics*. That is exactly
-what Phase 2a/2b **rules** need. The **construction** surface (`Ast.*` builders)
-and **`quote { … }` / `$(…)`** are **deferred** — their implementation approach
-is not settled (see §8). Mutation/rewrite (transforms) is likewise out of scope.
+**Scope of this pass:** the **read** surfaces of the whole system — the typed-AST
+read/query/judgment surface that **rules** and **transforms** inspect (§6.1–6.9),
+*and* the **raw-token** surface that **expansions** consume pre-parse (§6.10).
+Enough to *inspect* a program (typed) or a captured token tree (untyped) and
+*emit diagnostics*. The **write** surfaces are **deferred**: AST **construction**
+(`Ast.*` builders) and **`quote { … }` / `$(…)`** — the output of expansions and
+transforms — are not settled (§8), and in-place **rewrite** (transforms) is out
+of scope. **Enums** — which the kind-tags below really want — are a missing
+*language* feature flagged as an open decision (§7, §9), not built here.
 
 ---
 
@@ -217,9 +221,43 @@ The driver reads the accumulator after the rule returns and renders each as
 §15 Phase 2a. `Judgment { severity, pos, rule, message }` is the compiler-side
 record; the `rule` name is attached by the driver, not the metaprogram.
 
+### 6.10 Raw tokens — the **expansion** input surface
+
+Distinct from the typed-AST surface above. An **expansion** (hook #1) runs
+*pre-parse* and sees only the `TokenTree` captured inside its braces — no types,
+no names, no resolved AST. This is the layer it reads.
+
+| `extern fn` | → | Semantics |
+|---|---|---|
+| `meta_token_kind(H tok)` | `i32` | tag (§7 `TOKEN_*`) |
+| `meta_token_text(H tok)` | `u8*` | the lexeme verbatim |
+| `meta_token_pos(H tok)` | `H` (`Pos`) | position |
+| `meta_tokentree_count(H tt)` | `u64` | token count |
+| `meta_tokentree_at(H tt, u64 i)` | `H` (`Token`) | i-th token |
+| `meta_tokentree_segments(H tt)` | `H` (`SegmentList`) | split an interior string literal into text runs + `{ident}` holes (the `interp` idiom) |
+| `meta_segment_is_text(H seg)` | `bool` | text run vs. `{ident}` hole |
+| `meta_segment_text(H seg)` | `u8*` | the run's text (for a text segment) |
+| `meta_segment_hole_name(H seg)` | `u8*` | the identifier (for a hole segment) |
+| `meta_segmentlist_count / _at` | — | the usual list pair |
+
+`segments()` is a convenience over the raw token stream, oriented at string
+interpolation; whether it belongs in **core `std/meta`** or in **`std/fmt`**
+(closer to `interp`) is an open question (§9). The **output** of an expansion —
+building AST via `quote`/`Ast.*` — is the deferred construction surface (§8), so
+this pass exposes an expansion's *read* side but not (yet) its *write* side.
+
 ---
 
-## 7. Kind-tag constants (frozen contract)
+## 7. Kind-tag constants — a workaround for missing enums (frozen contract)
+
+**These constants exist only because Aspect has no `enum` type.** As `const i32`
+they are interchangeable — `expr.kind() == STMT_RETURN` type-checks and is
+meaningless — and the "append-only, never renumber" rule is enforced by
+convention, not the type system. When Aspect gains enums, each block below
+becomes a distinct enum type (an `ExprKind` value cannot be compared to a
+`StmtKind` or a raw `i32`), which is both safer and self-documenting. This is a
+tracked **open decision** (§9) — the tags are frozen contract *whatever* the
+representation, but the representation itself should change.
 
 The Aspect interface exposes these as `const` globals so metaprograms compare
 against names, never magic integers. The Rust side maps its internal enums to
@@ -232,6 +270,9 @@ these fixed values (order below is the contract):
 - **`STMT_*`** (mirrors `StatementKind`): `VAR_DECL, VAR_ASSIGN, DEREF_ASSIGN,
   FIELD_ASSIGN, RETURN, IF, WHILE, FOR, BLOCK, EXPRESSION, BREAK, CONTINUE`.
 - **`TYPE_*`** (mirrors `TypeBase`): `SINT, UINT, SFLOAT, VOID, BOOL, STRUCT, FNPTR`.
+- **`TOKEN_*`** (coarse grouping of the lexer's `TokenKind`): `IDENT, INTEGER,
+  FLOAT, STRING, BOOL, KEYWORD, TYPE, PUNCT, NEWLINE, EOF`. Punctuation and
+  operators collapse to `PUNCT`; use `token.text()` for the exact lexeme.
 
 Adding a compiler AST variant is a breaking change to this contract and must
 append (never renumber).
@@ -263,6 +304,16 @@ append (never renumber).
    construction contexts. On the *read* side we expose concrete `Expr`/`Stmt`;
    whether a unifying `Ast` handle is worth it here (vs. only for construction)
    is deferred with §8.
-4. **Language-designer review.** This is a language-surface change; per repo rule
+4. **Enums (a missing *language* feature).** The `*_KIND` / `TOKEN_*` / `TYPE_*`
+   tags want to be enums, not `const i32` (§7). Sequencing decision: design and
+   add an `enum` type to Aspect *first* — so the meta kind-tags are type-safe
+   from the moment the ABI is frozen — or ship the ABI with `const i32` tags now
+   and convert once enums land? Adding enums is its own parser/typechecker/
+   codegen change (and its own `language-designer` gate). Owner's call; leaning
+   "design enums before freezing the tag contract."
+5. **`segments()` home.** Core `std/meta` (as written) or `std/fmt` (closer to
+   `interp`)? It is a string-interpolation convenience, not general token
+   reading.
+6. **Language-designer review.** This is a language-surface change; per repo rule
    it goes through the `language-designer` gate **before any compiler code is
    written** — i.e. once this interface + doc are approved by the owner.
