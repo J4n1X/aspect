@@ -1,0 +1,11 @@
+# expected: "Add", "enum#"
+# Enums are a name set, not a number: arithmetic (and bitwise/shift) operators
+# are not defined on them. `c + Color.Blue` is a type error — cast to `i32`
+# first if integer arithmetic is really intended.
+enum Color { Red, Green, Blue }
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Color c = Color.Red
+    Color d = c + Color.Blue
+    return 0
+}

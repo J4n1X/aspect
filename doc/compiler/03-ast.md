@@ -126,6 +126,7 @@ pub struct Expression {
 | `ListInitializer(Vec<Expression>)` | Brace list | `{ 1, 2, 3 }` |
 | `FieldAccess { base, field }` | Struct field read (auto-derefs a single-level pointer-to-struct) | `p.x` |
 | `StructLiteral { struct_id, fields }` | Struct literal | `Point { x = 1, y = 2 }` |
+| `EnumValue { enum_id, value }` | An enum variant value (interned enum id + its index); typed as the enum, lowers to a constant `i32` | `Color.Green` |
 | `FunctionRef(String)` | A function as a value, from a bare name or `&foo` | `&double` |
 | `IndirectCall { callee, args }` | Call through a function-pointer value | `op(21)` |
 | `SizeOf(LangType)` | Compile-time size, stamped `u64` | `sizeof(Point)` |

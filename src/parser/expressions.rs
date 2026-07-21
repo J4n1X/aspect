@@ -222,6 +222,24 @@ impl Parser {
         Ok(())
     }
 
+    /// Visibility check for *using* an enum: naming it (type annotation) or
+    /// referencing one of its variants (`Enum.Variant`). The enum twin of
+    /// [`Self::check_struct_visibility`]: the defining module must be the
+    /// referring module or one of its direct imports, and a cross-module use
+    /// additionally requires the enum to be declared `public enum`.
+    fn check_enum_visibility(&self, id: u32, use_pos: Position) -> Result<(), ParserError> {
+        let info = self.module.enum_info(id);
+        self.check_import_visibility("enum", &info.name, info.file_id, use_pos)?;
+        let def_module = self.module_of_file(info.file_id);
+        let use_module = self.module_of_file(use_pos.file_id);
+        if info.vis == crate::symbol::module::Visibility::Private && def_module != use_module {
+            return Err(ParserError::private_enum(
+                &info.name, def_module, use_module, use_pos,
+            ));
+        }
+        Ok(())
+    }
+
     /// Visibility check for *using* a free function or global variable: the
     /// function/global analogue of [`Self::check_struct_visibility`]. Two gates:
     /// the defining module must be the referring module or one of its direct
@@ -967,15 +985,21 @@ impl Parser {
                 let base = if let Some(info) = self.module.alias_info(&name) {
                     self.check_import_visibility("type alias", &name, info.file_id, pos)?;
                     // An alias is a name binding, not an export: aliasing a
-                    // type-struct does not launder its module visibility, so
-                    // the underlying struct is checked as if named directly.
+                    // type-struct or enum does not launder its module
+                    // visibility, so the underlying type is checked as if named
+                    // directly.
                     if let TypeBase::Struct(id) = info.ty.base {
                         self.check_struct_visibility(id, pos)?;
+                    } else if let TypeBase::Enum(id) = info.ty.base {
+                        self.check_enum_visibility(id, pos)?;
                     }
                     info.ty
                 } else if let Some(id) = self.module.struct_id(&name) {
                     self.check_struct_visibility(id, pos)?;
                     LangType::struct_type(id)
+                } else if let Some(id) = self.module.enum_id(&name) {
+                    self.check_enum_visibility(id, pos)?;
+                    LangType::enum_type(id)
                 } else {
                     return Err(ParserError::UndefinedType(name, pos));
                 };
@@ -1065,8 +1089,9 @@ impl Parser {
         let TokenKind::Identifier(name) = &self.peek().kind else {
             return false;
         };
-        let known =
-            self.module.resolve_alias(name).is_some() || self.module.struct_id(name).is_some();
+        let known = self.module.resolve_alias(name).is_some()
+            || self.module.struct_id(name).is_some()
+            || self.module.enum_id(name).is_some();
         if known {
             // Known type: skip optional `[N]` array modifier, then any pointer
             // modifiers, then require the variable name.
@@ -1216,6 +1241,39 @@ impl Parser {
             self.advance();
             let args = self.parse_comma_separated(&TokenKind::CloseParen, Self::parse_expression)?;
             return self.build_method_call(base, &name, args, pos);
+        }
+
+        // Enum variant value: `EnumName.Variant` where `base` is a bare
+        // identifier naming a known enum, not shadowed by a local, and `name` is
+        // one of its variants. Resolves to a compile-time constant of the enum
+        // type (the variant's index). Mirrors the static `Type.method` path
+        // below. An unknown variant on a known enum is a precise parse error.
+        if let ExprKind::Variable(var_name) = &base.kind
+            && let Some(id) = self.module.enum_id(var_name)
+            && self.symbol_table.lookup_variable(var_name).is_none()
+        {
+            self.check_enum_visibility(id, pos)?;
+            match self.module.enum_variant_index(id, &name) {
+                Some(idx) => {
+                    let ty = LangType::enum_type(id);
+                    return Ok(Expression::new(
+                        ExprKind::EnumValue {
+                            enum_id: id,
+                            value: idx as i64,
+                        },
+                        ty,
+                        pos,
+                    ));
+                }
+                None => {
+                    let enum_name = self.module.enum_info(id).name.clone();
+                    return Err(ParserError::UnknownVariant {
+                        enum_name,
+                        variant: name,
+                        pos,
+                    });
+                }
+            }
         }
 
         // Static reference to a method as a function-pointer *value*:

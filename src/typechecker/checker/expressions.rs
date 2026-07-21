@@ -1,6 +1,6 @@
 use super::TypeChecker;
 use crate::lexer::{LangType, TypeBase};
-use crate::parser::{BinaryOp, ExprKind, Expression, LiteralValue};
+use crate::parser::{BinaryOp, ComparisonOp, ExprKind, Expression, LiteralValue};
 use crate::symbol::module::Visibility;
 use crate::typechecker::errors::TypeCheckError;
 use crate::typechecker::types::{
@@ -27,6 +27,16 @@ impl TypeChecker {
         let default_type = expr.expr_type;
         match &mut expr.kind {
             ExprKind::Literal(_) => default_type,
+
+            // An enum variant value: the parser already resolved the variant and
+            // stamped the enum type. It synthesises to exactly that enum type —
+            // never to a bare integer — which is what keeps enum ↔ int implicit
+            // coercion impossible.
+            ExprKind::EnumValue { enum_id, .. } => {
+                let ty = LangType::enum_type(*enum_id);
+                expr.expr_type = ty;
+                ty
+            }
 
             ExprKind::Variable(name) => {
                 if let Some(ty) = self.lookup_var(name) {
@@ -61,11 +71,28 @@ impl TypeChecker {
                 }
             }
 
-            ExprKind::Comparison { left, op: _, right } => {
+            ExprKind::Comparison { left, op, right } => {
                 let left_type = self.synth_expression(left);
                 let right_type = self.synth_expression(right);
 
-                if !Self::comparison_operands_valid(&left_type, &right_type) {
+                // Enums are a nominal name set: two operands are comparable only
+                // when they are the *same* enum, and only `==`/`!=` are defined
+                // (there is no ordering — a variant's numeric value is an
+                // implementation detail). Enum-vs-int or enum-vs-other-enum is a
+                // type error, which is the whole point of a distinct enum type.
+                let valid = if matches!(left_type.base, TypeBase::Enum(_))
+                    || matches!(right_type.base, TypeBase::Enum(_))
+                {
+                    matches!(
+                        (left_type.base, right_type.base),
+                        (TypeBase::Enum(a), TypeBase::Enum(b)) if a == b
+                    ) && left_type.pointer_depth == 0
+                        && right_type.pointer_depth == 0
+                        && matches!(op, ComparisonOp::Equal | ComparisonOp::NotEqual)
+                } else {
+                    Self::comparison_operands_valid(&left_type, &right_type)
+                };
+                if !valid {
                     self.errors.push(TypeCheckError::InvalidBinaryOperation {
                         operator: "comparison".to_string(),
                         left: left_type,
@@ -403,6 +430,9 @@ impl TypeChecker {
         if let TypeBase::Struct(id) = ty.base {
             let stars = "*".repeat(ty.pointer_depth as usize);
             format!("{}{}", self.symbols.struct_info(id).name, stars)
+        } else if let TypeBase::Enum(id) = ty.base {
+            let stars = "*".repeat(ty.pointer_depth as usize);
+            format!("{}{}", self.symbols.enum_info(id).name, stars)
         } else {
             format!("{ty}")
         }
@@ -925,6 +955,13 @@ impl TypeChecker {
 
     /// Check if two operand types are valid for the given binary operation.
     fn binary_op_types_valid(left: &LangType, right: &LangType, op: &BinaryOp) -> bool {
+        // Enums are a name set, not a number: no arithmetic, bitwise, or shift
+        // operation is defined on them. (Their equality is handled entirely in
+        // the `Comparison` arm and never routes through this helper.)
+        if matches!(left.base, TypeBase::Enum(_)) || matches!(right.base, TypeBase::Enum(_)) {
+            return false;
+        }
+
         // Pointer arithmetic: `ptr ± int` and `int + ptr` (`int - ptr` has no
         // meaning). A `u0*` has an unsized pointee: no arithmetic (GEP cannot
         // scale by sizeof(u0)) — cast to `u8*` for byte offsets.

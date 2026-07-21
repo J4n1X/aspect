@@ -120,6 +120,9 @@ impl LangTypeExt for LangType {
             // `fn(...) -> R` *is* a pointer — opaque `ptr` in LLVM. The
             // signature is needed only at call sites (resolved via the FnPtr id).
             TypeBase::FnPtr(_) => ctx.ptr_type(AddressSpace::default()).into(),
+            // An enum's underlying representation is a 32-bit integer; the
+            // nominal enum type carries no distinct LLVM shape.
+            TypeBase::Enum(_) => ctx.i32_type().into(),
         })
     }
 
@@ -178,6 +181,8 @@ impl LangTypeExt for LangType {
             // A function-pointer array element is `ptr` (opaque), same as
             // `to_llvm` above — see the comment there.
             TypeBase::FnPtr(_) => ctx.ptr_type(AddressSpace::default()).into(),
+            // An enum element lowers to `i32`, same as `to_llvm` above.
+            TypeBase::Enum(_) => ctx.i32_type().into(),
         })
     }
 

@@ -1,7 +1,7 @@
 //! Unified, cross-phase module symbol table.
 //!
 //! [`ModuleSymbols`] is the single authoritative table of a program's global
-//! symbols — functions, type-structs, and aliases. It is built by the parser
+//! symbols — functions, type-structs, enums, and aliases. It is built by the parser
 //! and rides on [`crate::parser::Program`] (like `string_literals`), so the
 //! type checker and code generator consume the *same* table rather than each
 //! re-deriving its own (which is how function signatures used to be tripled).
@@ -98,6 +98,34 @@ pub struct StructInfo {
     pub attrs: Vec<Attribute>,
 }
 
+/// A registered C-style enum: its name, ordered variants, and provenance.
+///
+/// Shaped in parallel to [`StructInfo`] (id, `file_id`, `vis`, `attrs`) so the
+/// import-visibility check and any future metaprogram query index treat the two
+/// item kinds uniformly. An enum has no layout or methods — a variant's value
+/// is just its index into `variants`, and the type lowers to `i32`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumInfo {
+    pub id: u32,
+    pub name: String,
+    /// `Position::file_id` of the file whose `enum` keyword declared this enum
+    /// — the provenance the import-visibility check resolves to a defining
+    /// module.
+    pub file_id: u32,
+    /// Module visibility: `public enum` opts the enum into being nameable from
+    /// other modules; the default is private to its defining module. Like
+    /// [`StructInfo::vis`], it is fixed at intern (prescan) time — import
+    /// cycles can place a use before the definition in the token stream.
+    pub vis: Visibility,
+    /// Variant names in declaration order; the index *is* the variant's value.
+    /// Empty until [`ModuleSymbols::set_enum_variants`].
+    pub variants: Vec<String>,
+    /// Leading attributes of the `enum` declaration, in source order
+    /// (outside-in, leftmost applied last). Empty until
+    /// [`ModuleSymbols::set_enum_attrs`].
+    pub attrs: Vec<Attribute>,
+}
+
 /// A distinct function-pointer signature (`fn(params) -> return_type`).
 /// Two FnPtr ids are equal iff their `FnPtrSig`s compare equal.
 #[derive(Debug, Clone, PartialEq)]
@@ -124,6 +152,10 @@ pub struct ModuleSymbols {
     structs_by_id: Vec<StructInfo>,
     /// Struct name -> id.
     structs_by_name: HashMap<String, u32>,
+    /// Enums indexed by id (index into the vec == the id).
+    enums_by_id: Vec<EnumInfo>,
+    /// Enum name -> id.
+    enums_by_name: HashMap<String, u32>,
     /// Alias name -> the type it resolves to plus its declaring file.
     aliases: HashMap<String, AliasInfo>,
     /// Function-pointer signatures, interned by structural identity.
@@ -261,6 +293,72 @@ impl ModuleSymbols {
     /// Register a method signature on a struct (Milestone 3).
     pub fn add_method(&mut self, id: u32, name: String, sig: MethodSig) {
         self.structs_by_id[id as usize].methods.insert(name, sig);
+    }
+
+    // ── Enums ─────────────────────────────────────────────────────────────────
+
+    /// Reserve an id for an enum name, creating an empty (variant-less) entry.
+    /// `file_id` records the declaring file (from the `enum` keyword token) and
+    /// `vis` the declared module visibility (`public enum` vs `enum`), both
+    /// consumed by the visibility checks.
+    ///
+    /// Called during the parser's name-collection prescan so enum names resolve
+    /// regardless of declaration order (forward references, import cycles).
+    /// Returns the existing id if the name was already interned (the first
+    /// declaration's `file_id`/`vis` win; a second `enum` body for the same
+    /// name is a duplicate-type error downstream).
+    pub fn intern_enum(&mut self, name: &str, file_id: u32, vis: Visibility) -> u32 {
+        if let Some(&id) = self.enums_by_name.get(name) {
+            return id;
+        }
+        let id = u32::try_from(self.enums_by_id.len()).expect("number of enums exceeds u32::MAX");
+        self.enums_by_id.push(EnumInfo {
+            id,
+            name: name.to_string(),
+            file_id,
+            vis,
+            variants: Vec::new(),
+            attrs: Vec::new(),
+        });
+        self.enums_by_name.insert(name.to_string(), id);
+        id
+    }
+
+    #[must_use]
+    pub fn enum_id(&self, name: &str) -> Option<u32> {
+        self.enums_by_name.get(name).copied()
+    }
+
+    #[must_use]
+    pub fn enum_info(&self, id: u32) -> &EnumInfo {
+        &self.enums_by_id[id as usize]
+    }
+
+    /// All registered enums, in id order.
+    pub fn enums(&self) -> impl Iterator<Item = &EnumInfo> {
+        self.enums_by_id.iter()
+    }
+
+    /// Replace an enum's variant list (finalising its `enum` body).
+    pub fn set_enum_variants(&mut self, id: u32, variants: Vec<String>) {
+        self.enums_by_id[id as usize].variants = variants;
+    }
+
+    /// Attach the leading attributes of an `enum` declaration to its info.
+    /// Interning happens in the prescan, before the attributes are parsed —
+    /// hence a setter rather than an `intern_enum` parameter.
+    pub fn set_enum_attrs(&mut self, id: u32, attrs: Vec<Attribute>) {
+        self.enums_by_id[id as usize].attrs = attrs;
+    }
+
+    /// The value (index) of a variant by name, or `None` if the enum has no
+    /// such variant.
+    #[must_use]
+    pub fn enum_variant_index(&self, id: u32, variant: &str) -> Option<usize> {
+        self.enums_by_id[id as usize]
+            .variants
+            .iter()
+            .position(|v| v == variant)
     }
 
     // ── Aliases ───────────────────────────────────────────────────────────────

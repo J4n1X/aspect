@@ -434,6 +434,11 @@ pub(crate) fn walk_expression<'ctx>(
             Ok(function.as_global_value().as_pointer_value().into())
         }
 
+        // ── Enum variant value: a compile-time `i32` constant. ────────────
+        ExprKind::EnumValue { value, .. } => {
+            Ok(cg.context.i32_type().const_int(*value as u64, false).into())
+        }
+
         // ── Indirect call through a function-pointer value. ───────────────
         ExprKind::IndirectCall { callee, args } => cg.generate_indirect_call(callee, args),
 

@@ -1,0 +1,20 @@
+# expected: 42
+# compile_args: "-I", "tests/modules"
+#-
+  `public enum` exports an enum across a module boundary: an importing module
+  can name the type (declarations, casts) and reference its variants
+  (`Suit.Spades`). Values of the module-private `Secret` enum still flow through
+  this file — via `palette`'s public `secret_beta_code` — without the type ever
+  being named here.
+-#
+
+$import palette
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Suit s = Suit.Spades                 # 3
+    i32 bonus = 0
+    if s == Suit.Spades {
+        bonus = 38
+    }
+    return bonus + (s as i32) + secret_beta_code()   # 38 + 3 + 1 = 42
+}

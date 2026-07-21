@@ -1,0 +1,12 @@
+# expected: "Duplicate type 'Shape'"
+# An enum name shares the one type namespace with type-structs and aliases:
+# declaring both `type Shape` and `enum Shape` is a duplicate-type error.
+type Shape {
+    i32 sides
+}
+
+enum Shape { Circle, Square }
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

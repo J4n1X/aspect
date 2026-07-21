@@ -132,6 +132,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             // A bare function-pointer value is a pointer.
             TypeBase::FnPtr(_) => Ok(u64::from(target_data.get_pointer_byte_size(None))),
+            // An enum is represented as an `i32` — 4 bytes.
+            TypeBase::Enum(_) => Ok(4),
         }
     }
 

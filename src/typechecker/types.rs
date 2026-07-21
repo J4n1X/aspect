@@ -82,6 +82,11 @@ pub fn types_coercible(from: &LangType, to: &LangType) -> bool {
         // integer. Integers do NOT implicitly coerce to `bool` (that needs a
         // `!= 0` test, not a width cast), so the reverse direction is absent.
         (TypeBase::Bool, TypeBase::Bool | TypeBase::SInt | TypeBase::UInt) => true,
+        // An enum coerces only to the *same* enum (nominal identity). Enum ↔
+        // integer and enum ↔ other-enum are never implicit — they need an `as`
+        // cast. (Exact-equal enums already returned `true` at the top; this arm
+        // also lets a `const Enum` value satisfy a non-const `Enum` target.)
+        (TypeBase::Enum(a), TypeBase::Enum(b)) => a == b,
         _ => false,
     }
 }
@@ -139,6 +144,19 @@ pub fn cast_valid(from: &LangType, to: &LangType) -> bool {
     {
         return from == to;
     }
+    // Enums share the `i32` representation, so they cast to/from integers and
+    // to/from another enum (both are ints under the hood) — but never directly
+    // to/from a float or pointer, which must go through an integer. `int as
+    // Enum` performs no range check on the value (C-like); `Enum as iN` may
+    // narrow the repr.
+    let from_is_enum = matches!(from.base, TypeBase::Enum(_)) && from.pointer_depth == 0;
+    let to_is_enum = matches!(to.base, TypeBase::Enum(_)) && to.pointer_depth == 0;
+    if from_is_enum || to_is_enum {
+        let other = if from_is_enum { to } else { from };
+        return matches!(other.base, TypeBase::Enum(_))
+            || (matches!(other.base, TypeBase::SInt | TypeBase::UInt) && other.pointer_depth == 0);
+    }
+
     // Function pointers are pointer-shaped values. Allow casts to/from any
     // other pointer-like type or an integer (so `0 as fn(...) -> R` builds a
     // null function pointer, and integer ↔ FnPtr round-trips work).
@@ -163,4 +181,37 @@ pub fn cast_valid(from: &LangType, to: &LangType) -> bool {
     }
     // All numeric-to-numeric casts are valid
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::LangType;
+
+    /// An enum coerces to the same enum only — never to a different enum or to
+    /// its underlying integer.
+    #[test]
+    fn enum_coerces_only_to_same_enum() {
+        let color = LangType::enum_type(0);
+        let color2 = LangType::enum_type(0);
+        let dir = LangType::enum_type(1);
+        assert!(types_coercible(&color, &color2));
+        assert!(!types_coercible(&color, &dir));
+        assert!(!types_coercible(&color, &LangType::I32));
+        assert!(!types_coercible(&LangType::I32, &color));
+    }
+
+    /// An enum casts to/from an integer and to/from another enum (shared `i32`
+    /// repr), but not to/from a float or a pointer.
+    #[test]
+    fn enum_casts_to_int_and_enum_only() {
+        let color = LangType::enum_type(0);
+        let dir = LangType::enum_type(1);
+        assert!(cast_valid(&color, &LangType::I32));
+        assert!(cast_valid(&LangType::I32, &color));
+        assert!(cast_valid(&color, &dir));
+        assert!(!cast_valid(&color, &LangType::F64));
+        assert!(!cast_valid(&LangType::F64, &color));
+        assert!(!cast_valid(&color, &LangType::U8_PTR));
+    }
 }

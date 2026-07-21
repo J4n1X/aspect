@@ -10,6 +10,7 @@ pub enum Keyword {
     Naked,
     Const,
     Type,
+    Enum,
     Struct,
     Alias,
     Public,
@@ -39,6 +40,7 @@ impl fmt::Display for Keyword {
             Keyword::Naked => "naked",
             Keyword::Const => "const",
             Keyword::Type => "type",
+            Keyword::Enum => "enum",
             Keyword::Struct => "struct",
             Keyword::Alias => "alias",
             Keyword::Public => "public",
@@ -72,6 +74,7 @@ impl Keyword {
             "naked" => Some(Keyword::Naked),
             "const" => Some(Keyword::Const),
             "type" => Some(Keyword::Type),
+            "enum" => Some(Keyword::Enum),
             "struct" => Some(Keyword::Struct),
             "alias" => Some(Keyword::Alias),
             "public" => Some(Keyword::Public),
@@ -181,6 +184,13 @@ pub enum TypeBase {
     /// `LangType` stays `Copy`/`Eq`. Layout/fields are resolved against the
     /// registry; this variant carries no inline data beyond the id.
     Struct(u32),
+    /// A C-style enum, identified by an interned id into the program's
+    /// `ModuleSymbols` enum registry. Its underlying representation is `i32`
+    /// (see `LangType::enum_type`); the id keeps `LangType` `Copy`/`Eq` and
+    /// makes the type *nominal* — two different enums are distinct types even
+    /// though both lower to `i32`. Variant names are resolved against the
+    /// registry.
+    Enum(u32),
     /// A function pointer, identified by an interned id into the program's
     /// `ModuleSymbols` function-signature registry. `fn(args) -> R` *is* the
     /// pointer (machine functions are always called through an address). The
@@ -244,6 +254,14 @@ impl LangType {
     #[must_use]
     pub const fn struct_type(id: u32) -> Self {
         Self::plain(TypeBase::Struct(id), 0, 0)
+    }
+
+    /// An enum value type for the interned enum `id`. Enums have a fixed `i32`
+    /// representation, so `size_bits` is 32 (the width the codegen `i32`
+    /// lowering and `sizeof` agree on).
+    #[must_use]
+    pub const fn enum_type(id: u32) -> Self {
+        Self::plain(TypeBase::Enum(id), 32, 0)
     }
 
     /// A function-pointer type for the interned signature `id`.
@@ -410,11 +428,21 @@ impl fmt::Display for LangType {
             };
         }
 
+        // Enums print by interned id here (`Display` cannot reach the registry).
+        // Registry-aware diagnostics (`TypeChecker::type_name`) print the real
+        // name instead.
+        if let TypeBase::Enum(id) = self.base {
+            return match self.array_size {
+                Some(size) => write!(f, "{const_str}enum#{id}[{size}]{asterisks}"),
+                None => write!(f, "{const_str}enum#{id}{asterisks}"),
+            };
+        }
+
         let base_str = match self.base {
             TypeBase::SInt => "i",
             TypeBase::UInt | TypeBase::Void => "u",
             TypeBase::SFloat => "f",
-            TypeBase::Bool | TypeBase::Struct(_) | TypeBase::FnPtr(_) => {
+            TypeBase::Bool | TypeBase::Struct(_) | TypeBase::FnPtr(_) | TypeBase::Enum(_) => {
                 unreachable!("handled above")
             }
         };

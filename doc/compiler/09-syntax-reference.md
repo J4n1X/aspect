@@ -111,7 +111,7 @@ digit      ::= [0-9]
 Reserved keywords (not usable as identifiers):
 
 ```
-fn  extern  asm  naked  const  type  struct  alias  public  export  sizeof
+fn  extern  asm  naked  const  type  enum  struct  alias  public  export  sizeof
 while  if  else  elif  for  switch
 break  continue  as  return
 true  false  null
@@ -400,6 +400,7 @@ top-decl ::= 'public'? extern-fn-decl
            | vis-linkage global-var-decl
            | 'public'? alias-decl               # 'public' on an alias is an error
            | 'public'? struct-decl
+           | 'public'? enum-decl
 # `public` = module visibility (nameable via `$import`); `export` = external
 # linkage (foreign-visible object-file symbol). They are orthogonal and compose.
 # `export extern`, and `export` on a type/alias, are errors — see "Visibility
@@ -440,6 +441,16 @@ method-params ::= /* empty */
 # `const fn` requires `this`; field access through it propagates const, so
 # any `this.field = ...` is rejected. Fields must come before methods.
 
+enum-decl ::= 'public'? 'enum' ident '{'
+                newline* enum-variant ((',' | newline)+ enum-variant)* (',' | newline)*
+              '}'
+enum-variant ::= ident                     # value = declaration-order index (0, 1, 2, ...)
+# `public enum` exports the enum from its module — same visibility model as
+# `public type`. Variants are separated by commas and/or newlines (either or
+# both). At least one variant is required; there are no explicit `= N` values
+# and no payloads. Enum names may be referenced before their definition (a
+# name-collection prescan reserves them).
+
 param-list ::= /* empty */
              | param (',' param)*
 param      ::= type ident
@@ -454,7 +465,7 @@ term       ::= ';' | '\n'       # statement terminator
 ```
 type       ::= type-atom ('[' integer ']')? ('*')*   # postfix array / pointer modifiers
 type-atom  ::= type-token                            # built-in (lexer-folded)
-             | ident                                 # named: an alias or type-struct
+             | ident                                 # named: an alias, type-struct, or enum
              | fnptr-type                            # function-pointer type
              | '(' type ')'                          # grouping — disambiguates `(T)[N]` etc.
 fnptr-type ::= 'fn' '(' (type (',' type)*)? ')' ('->' type)?
@@ -538,6 +549,54 @@ by an external literal and must be created via one of its own `public` static me
 pattern). A method's visibility is enforced by the type checker after the parser lowers the call to
 the mangled `Type$method` free function; a private method remains freely callable from any of the
 type's own methods (static or instance), exactly like private-field access.
+
+### Enums
+
+An **enum** (`enum Name { A, B, C }`) is a C-style enumeration: a **distinct nominal
+type** whose values are a fixed, named set. Each variant is auto-assigned its
+declaration-order index as its value (`A`=0, `B`=1, `C`=2); there are no explicit `= N`
+values and no payloads. The underlying representation is **`i32`** (4 bytes). Like
+type-structs, enum names may be referenced before their definition (a name-collection
+prescan reserves them) and share the one type namespace — an enum whose name collides with
+a `type`, `alias`, or another `enum` is a duplicate-type error. An empty `enum E { }` is
+uninhabited and rejected.
+
+The only operation is variant access:
+
+```
+enum-value ::= ident '.' ident      # `EnumName.Variant` — `ident` names a known enum
+```
+
+`EnumName.Variant` is a compile-time constant of the enum type. A variant is reachable
+*only* through its enum (`Color.Red`, never a bare `Red`), so variants never pollute a
+namespace. Referencing a variant that the enum does not declare is a parse error.
+
+```
+enum Color { Red, Green, Blue }
+
+Color c = Color.Green               # a value of type Color (constant 1)
+if c == Color.Green { ... }         # equality against another Color
+```
+
+**Type rules.**
+
+- **Coercion.** A `Color` coerces implicitly only to the *same* enum type. Enum ↔ integer
+  is **not** implicit (it needs a cast), and two *different* enums never mix — comparing
+  `Color == Direction` is a type error. This nominal type-safety is the point of a distinct
+  enum type.
+- **Operators.** Only `==` and `!=` are defined, and only between two operands of the same
+  enum. Ordering (`<`, `>`, …) and arithmetic/bitwise operators are **not** defined on enums
+  (cast to `i32` first if integer math is really intended).
+- **Casts.** `Enum as iN` / `iN as Enum` are valid (they share the `i32` repr), as is
+  `Enum as OtherEnum` (both are ints); `int as Enum` performs no range check on the value
+  (C-like). Enum ↔ float and enum ↔ pointer are not valid casts — route through an integer.
+- **Visibility.** `public enum` exports the enum across a module boundary — same model as
+  `public type`. A private enum cannot be *named* from an importing module, though its values
+  may still flow through that module's public functions.
+
+**Codegen.** The enum type lowers to LLVM `i32`; `EnumName.Variant` lowers to the constant
+integer, valid in runtime and constant (`const`/global-initializer) positions alike.
+Comparisons and assignments use ordinary `i32` operations.
 
 ### Statements
 
@@ -793,11 +852,13 @@ elimination. Only `export` changes linkage.
   object file, so there is no local symbol here to give linkage to. `public
   extern fn` **is** allowed — it makes the declaration nameable from importing
   modules (`public extern fn malloc`).
-- `export` on a **type-struct** or **alias** is an error: neither has a linked
-  object-file symbol. `public` on a **type-struct** is the module-visibility
+- `export` on a **type-struct**, **enum**, or **alias** is an error: none has a
+  linked object-file symbol. `public` on a **type-struct** is the module-visibility
   axis applied to a type: a plain `type` is usable only inside its defining
   module, while `public type` may be named — and have its methods called —
-  from any module that imports the defining one. A member's own `public` is
+  from any module that imports the defining one. `public enum` works identically
+  for enums: a plain `enum` is private to its defining module, `public enum` is
+  nameable (variants and all) from any importing module. A member's own `public` is
   capped by the type's: a `public fn` on a private type is callable anywhere
   in the defining module, never outside it. Values of a foreign private type
   still flow through outside code as opaque handles; an alias does not launder

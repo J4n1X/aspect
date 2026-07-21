@@ -1,0 +1,12 @@
+# expected: "enum 'Secret' is private to module 'palette'", "public enum"
+# compile_args: "-I", "tests/modules"
+# Naming a module-private enum from an importing module is an error, even though
+# the module is imported and values of the enum flow freely through its public
+# functions.
+
+$import palette
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Secret s = Secret.Alpha
+    return 0
+}

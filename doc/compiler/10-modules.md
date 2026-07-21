@@ -154,6 +154,25 @@ prescan (`public` token directly before `type`) so it is known before any
 body parses — under import cycles a module's uses can legally precede
 the definition in the inlined stream.
 
+## Enum visibility: `public enum`
+
+Enums follow the exact same model. A plain `enum` is private to its
+defining module; `public enum Name { ... }` exports it. The gate fires
+wherever the enum is *used* from another module — naming it (declarations,
+casts) or referencing a variant (`Name.Variant`):
+
+```
+error: enum 'Secret' is private to module 'palette' and cannot be used
+from the root module — declare it `public enum` to export it
+```
+
+As with type-structs, an alias does not launder an enum's privacy, `public`
+does not bypass the import rule, and the visibility is captured by a
+name-collection prescan (`public` token directly before `enum`) so it is
+known before any body parses. Values of a private enum still flow through
+the defining module's public functions (e.g. returned as an `i32` derived
+from a variant), even though the type itself cannot be named outside.
+
 ## v1 caveat: load units, not namespaces
 
 The symbol table stays **flat**. There is no `io.println` syntax; a

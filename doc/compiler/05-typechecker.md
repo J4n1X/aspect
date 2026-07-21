@@ -212,6 +212,12 @@ All functions are pure (no side effects):
    - Both `SInt↔UInt` families are treated as integers here (widening is allowed even across sign)
 6. **Float widening**: `from.size_bits <= to.size_bits` AND both `SFloat` → `true`
 7. **Int ↔ Float cross-family** → `false` (requires explicit `as` cast)
+8. **Enums are nominal**: an `Enum(a)` coerces only to the *same* `Enum(a)` — never
+   to a different enum and never to/from an integer (both need an explicit `as`
+   cast). Enums are compared only by `==`/`!=` between two of the same enum;
+   ordering and arithmetic on enums are rejected (`InvalidBinaryOperation`). The
+   distinct-type identity is the whole point of an enum — see the handbook's Enums
+   section.
 
 ### Literal Compatibility
 

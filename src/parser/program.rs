@@ -51,10 +51,13 @@ impl Parser {
         let mut functions = Vec::new();
         let mut global_vars = Vec::new();
 
-        // Pre-register all type-struct names and pre-install all aliases so
-        // named types resolve regardless of declaration order (self/mutual
-        // reference, alias chains in any order).
+        // Pre-register all type-struct and enum names and pre-install all
+        // aliases so named types resolve regardless of declaration order
+        // (self/mutual reference, alias chains in any order). Enums are interned
+        // before the alias prescan so an alias colliding with an enum name is
+        // caught there.
         self.prescan_type_names();
+        self.prescan_enum_names();
         self.prescan_aliases();
 
         skip_nl!();
@@ -86,7 +89,8 @@ impl Parser {
             // carry — functions and globals, never a type or alias.
             let defines_a_fn = matches!(&kind, Some((Keyword::Asm, _) | (Keyword::Naked, _)))
                 || (self.check_keyword(&Keyword::Fn) && !self.starts_fnptr_var_decl());
-            let defines_a_type = self.check_keyword(&Keyword::Type);
+            let defines_a_type =
+                self.check_keyword(&Keyword::Type) || self.check_keyword(&Keyword::Enum);
             let defines_a_global = matches!(
                 self.peek().kind,
                 TokenKind::LangType(_) | TokenKind::Identifier(_)
@@ -106,7 +110,7 @@ impl Parser {
             }
             if export && !defines_a_fn && !defines_a_global {
                 return Err(ParserError::UnexpectedToken(
-                    "export can only be used with functions or global variables — a type or alias has no linked symbol"
+                    "export can only be used with functions or global variables — a type, enum or alias has no linked symbol"
                         .to_string(),
                     vis_pos,
                 ));
@@ -145,6 +149,14 @@ impl Parser {
                 }
                 let methods = self.parse_struct_def(attrs)?;
                 functions.extend(methods);
+            } else if self.check_keyword(&Keyword::Enum) {
+                if is_extern {
+                    return Err(ParserError::UnexpectedToken(
+                        "extern can only be used with functions".to_string(),
+                        self.peek().pos,
+                    ));
+                }
+                self.parse_enum_def(attrs)?;
             } else if matches!(
                 self.peek().kind,
                 TokenKind::LangType(_) | TokenKind::Identifier(_)
@@ -293,6 +305,38 @@ impl Parser {
         }
     }
 
+    /// Pre-register every `enum <Name>` name with a reserved id before the main
+    /// parse — the enum twin of [`Self::prescan_type_names`]. Records each
+    /// name's declaring file (the `enum` keyword's `pos.file_id`) and its module
+    /// visibility (a directly preceding `public` keyword), both of which must be
+    /// known at intern time so forward references and import cycles resolve.
+    /// Does not consume tokens.
+    fn prescan_enum_names(&mut self) {
+        let names: Vec<(String, u32, Visibility)> = self
+            .tokens
+            .windows(2)
+            .enumerate()
+            .filter_map(|(i, w)| match (&w[0].kind, &w[1].kind) {
+                (TokenKind::Keyword(Keyword::Enum), TokenKind::Identifier(name)) => {
+                    let vis = if i > 0
+                        && matches!(
+                            self.tokens[i - 1].kind,
+                            TokenKind::Keyword(Keyword::Public)
+                        ) {
+                        Visibility::Public
+                    } else {
+                        Visibility::Private
+                    };
+                    Some((name.clone(), w[0].pos.file_id, vis))
+                }
+                _ => None,
+            })
+            .collect();
+        for (name, file_id, vis) in names {
+            self.module.intern_enum(&name, file_id, vis);
+        }
+    }
+
     /// Pre-install every `alias` definition before pass 1, so aliases resolve
     /// regardless of declaration order. Fixpoint-iterates so chains may appear
     /// in any order (`alias A B` before `alias B i32`). Nothing is reported
@@ -330,7 +374,10 @@ impl Parser {
         let pos = pos!();
         kw!(Alias);
         let name = ident!();
-        if self.module.resolve_alias(&name).is_some() || self.module.struct_id(&name).is_some() {
+        if self.module.resolve_alias(&name).is_some()
+            || self.module.struct_id(&name).is_some()
+            || self.module.enum_id(&name).is_some()
+        {
             return Err(ParserError::DuplicateType(name, pos));
         }
         let target = self.parse_type()?;
@@ -433,7 +480,9 @@ impl Parser {
         if self.alias_prescan_sites.contains(&site) {
             self.parse_type()?;
         } else {
-            if self.module.resolve_alias(&name).is_some() || self.module.struct_id(&name).is_some()
+            if self.module.resolve_alias(&name).is_some()
+                || self.module.struct_id(&name).is_some()
+                || self.module.enum_id(&name).is_some()
             {
                 return Err(ParserError::DuplicateType(name, pos));
             }

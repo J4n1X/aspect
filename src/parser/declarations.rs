@@ -63,8 +63,11 @@ impl Parser {
             .struct_id(&name)
             .expect("type-struct name reserved during prescan");
 
-        // A non-empty field set means this name was already defined.
-        if !self.module.struct_info(id).fields.is_empty() {
+        // A non-empty field set means this name was already defined; a name also
+        // interned as an enum is a cross-namespace collision. (Aliases can't
+        // collide here — the alias prescan already rejects an alias whose name
+        // is a struct or enum.)
+        if !self.module.struct_info(id).fields.is_empty() || self.module.enum_id(&name).is_some() {
             return Err(ParserError::DuplicateType(name, pos));
         }
 
@@ -140,6 +143,71 @@ impl Parser {
         }
 
         Ok(methods)
+    }
+
+    /// Parse a top-level enum definition: `enum Name { V1, V2, ... }`.
+    ///
+    /// Variants are identifiers separated by commas and/or newlines (either or
+    /// both). Each is assigned its declaration-order index as its value (`V1`=0,
+    /// `V2`=1, ...). The enum id was reserved by the prescan; `attrs` are the
+    /// declaration's leading attributes, stored on its `EnumInfo`. An enum has
+    /// no AST node — like an alias it produces only a symbol-table entry, which
+    /// `parse_type` and `parse_dot_postfix` consult.
+    #[parse_rule]
+    pub(crate) fn parse_enum_def(&mut self, attrs: Vec<Attribute>) -> Result<(), ParserError> {
+        let pos = pos!();
+        kw!(Enum);
+        let name = ident!();
+        let id = self
+            .module
+            .enum_id(&name)
+            .expect("enum name reserved during prescan");
+
+        // A non-empty variant set means this name was already defined; a name
+        // also interned as a type-struct or alias is a cross-namespace
+        // collision. (Rejecting empty enums below keeps the non-empty-variant
+        // set a faithful "already defined" sentinel.)
+        if !self.module.enum_info(id).variants.is_empty()
+            || self.module.struct_id(&name).is_some()
+            || self.module.resolve_alias(&name).is_some()
+        {
+            return Err(ParserError::DuplicateType(name, pos));
+        }
+
+        self.module.set_enum_attrs(id, attrs);
+
+        token!(OpenBrace);
+
+        let mut variants: Vec<String> = Vec::new();
+        loop {
+            skip_nl!();
+            if self.check(&TokenKind::CloseBrace) || self.is_at_end() {
+                break;
+            }
+            let variant = ident!();
+            if variants.iter().any(|v| v == &variant) {
+                return Err(ParserError::DuplicateDeclaration(variant, pos));
+            }
+            variants.push(variant);
+            skip_nl!();
+            // Optional comma between variants (newlines already skipped) — so
+            // `Red, Green, Blue`, one-per-line, and any mix all parse.
+            self.match_token(&[TokenKind::Comma]);
+        }
+        // An enum with no variants is uninhabited (no value can ever be formed),
+        // so it is rejected rather than silently accepted. Checked before the
+        // closing brace is consumed so the diagnostic points at the `}`.
+        if variants.is_empty() {
+            return Err(ParserError::ExpectedToken(
+                "at least one enum variant".to_string(),
+                format!("{}", self.peek().kind),
+                pos,
+            ));
+        }
+        token!(CloseBrace);
+
+        self.module.set_enum_variants(id, variants);
+        Ok(())
     }
 
     /// Lookahead from the current position: does a method declaration start
@@ -566,6 +634,34 @@ mod tests {
     #[test]
     fn at_sign_at_eof_is_an_error() {
         let tokens = crate::lexer::tokenize("@".to_string()).expect("lex");
+        assert!(Parser::new(tokens).parse_program().is_err());
+    }
+
+    /// An `enum` registers its variants in declaration order; the index is the
+    /// value. Comma-separated on one line.
+    #[test]
+    fn enum_registers_variants_in_order() {
+        let program = parse("enum Color { Red, Green, Blue }\nfn f() -> i32 {\n    return 0\n}");
+        let id = program.symbols.enum_id("Color").expect("Color interned");
+        let info = program.symbols.enum_info(id);
+        assert_eq!(info.variants, ["Red", "Green", "Blue"]);
+        assert_eq!(program.symbols.enum_variant_index(id, "Blue"), Some(2));
+        assert_eq!(program.symbols.enum_variant_index(id, "Cyan"), None);
+    }
+
+    /// Variants may be separated by newlines, commas, or a mix of both.
+    #[test]
+    fn enum_variants_may_be_newline_separated() {
+        let program = parse("enum E {\n    A\n    B,\n    C\n}\nfn f() -> i32 {\n    return 0\n}");
+        let id = program.symbols.enum_id("E").expect("E interned");
+        assert_eq!(program.symbols.enum_info(id).variants, ["A", "B", "C"]);
+    }
+
+    /// An enum with no variants is uninhabited and rejected.
+    #[test]
+    fn empty_enum_is_rejected() {
+        let tokens = crate::lexer::tokenize("enum E { }\nfn f() -> i32 {\n    return 0\n}".to_string())
+            .expect("lex");
         assert!(Parser::new(tokens).parse_program().is_err());
     }
 }

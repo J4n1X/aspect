@@ -86,6 +86,16 @@ pub enum ExprKind {
         struct_id: u32,
         fields: Vec<(String, Expression)>,
     },
+    /// An enum variant value `EnumName.Variant`, resolved by the parser to the
+    /// variant's interned enum id and its integer value (the variant's index).
+    /// Typed as the enum type (`TypeBase::Enum`), which lowers to a compile-time
+    /// `i32` constant in codegen. A dedicated node — *not* an integer literal —
+    /// so the checker never lets it coerce to a bare integer or narrow to a
+    /// sibling's width: an enum value only ever satisfies its own enum type.
+    EnumValue {
+        enum_id: u32,
+        value: i64,
+    },
     /// A reference to a named function, as a value (function pointer).
     /// Produced for a bare function name `foo` and for `&foo` (the parser
     /// collapses the address-of). Carries the function's name; the FnPtr

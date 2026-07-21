@@ -1,0 +1,31 @@
+# expected: 260
+#-
+  C-style enums: declaration with auto-numbered variants (Idle=0 .. Errored=3),
+  `Enum.Variant` access, `==`/`!=` comparison, the `as` round-trip between an
+  enum and its `i32` representation, and a global initialized to an enum value
+  (folded to a constant at codegen).
+-#
+enum Signal { Idle, Running, Stopped, Errored }
+
+# Global initializer exercises the constant-folding (const_eval) path.
+Signal g_start = Signal.Stopped          # folds to 2
+
+fn code(Signal s) -> i32 {
+    if s == Signal.Errored {
+        return 255
+    }
+    if s != Signal.Idle {
+        return s as i32                  # enum -> i32
+    }
+    return 0
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Signal s = Signal.Running            # 1
+    Signal t = Signal.Errored            # 3
+    i32 a = code(s)                      # s != Idle -> 1
+    i32 b = code(t)                      # Errored   -> 255
+    Signal round = 2 as Signal           # i32 -> enum (Stopped)
+    i32 c = round as i32                 # 2
+    return a + b + c + (g_start as i32)  # 1 + 255 + 2 + 2 = 260
+}

@@ -1,0 +1,9 @@
+# expected: "expected 'i32'", "enum#"
+# An enum does not implicitly coerce to its underlying integer — an explicit
+# `as` cast is required. Assigning `Color.Green` to an `i32` is a type error.
+enum Color { Red, Green, Blue }
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    i32 x = Color.Green
+    return x
+}

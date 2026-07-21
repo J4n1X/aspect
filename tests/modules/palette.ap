@@ -1,0 +1,19 @@
+#-
+  Fixture for enum module visibility. `Suit` is exported (`public enum`) and so
+  is nameable — and its variants referenceable — from an importing module.
+  `Secret` is module-private: its values may still flow across the boundary
+  through a public function, but the type cannot be named outside this module.
+-#
+$module palette
+
+public enum Suit { Hearts, Diamonds, Clubs, Spades }
+
+enum Secret { Alpha, Beta }
+
+# A public function may return an `i32` derived from a private enum's variant —
+# the value crosses the boundary even though the type `Secret` cannot be named
+# by the importer.
+public fn secret_beta_code() -> i32 {
+    Secret s = Secret.Beta
+    return s as i32
+}

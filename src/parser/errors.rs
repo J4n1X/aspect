@@ -18,6 +18,15 @@ pub enum ParserError {
     #[error("Duplicate type '{0}' at {1}")]
     DuplicateType(String, Position),
 
+    /// `EnumName.Variant` where `EnumName` is a known enum but `Variant` is not
+    /// one of its variants.
+    #[error("enum '{enum_name}' has no variant '{variant}' at {pos}")]
+    UnknownVariant {
+        enum_name: String,
+        variant: String,
+        pos: Position,
+    },
+
     #[error("{0} at {1}")]
     MethodCallForm(String, Position),
 
@@ -53,6 +62,17 @@ pub enum ParserError {
     /// via [`ParserError::private_type`].
     #[error("type-struct '{name}' is private to {defining} and cannot be used from {referring} — declare it `public type` to export it at {pos}")]
     PrivateType {
+        name: String,
+        defining: String,
+        referring: String,
+        pos: Position,
+    },
+
+    /// A cross-module use of an enum that is not `public`: the defining module
+    /// is imported, but the enum itself was not exported. `defining`/`referring`
+    /// arrive pre-rendered via [`ParserError::private_enum`].
+    #[error("enum '{name}' is private to {defining} and cannot be used from {referring} — declare it `public enum` to export it at {pos}")]
+    PrivateEnum {
         name: String,
         defining: String,
         referring: String,
@@ -167,6 +187,23 @@ impl ParserError {
         pos: Position,
     ) -> Self {
         ParserError::PrivateType {
+            name: name.into(),
+            defining: Self::describe_module(defining_module),
+            referring: Self::describe_module(referring_module),
+            pos,
+        }
+    }
+
+    /// Build a [`ParserError::PrivateEnum`], rendering each module path via
+    /// [`ParserError::describe_module`].
+    #[must_use]
+    pub(crate) fn private_enum(
+        name: impl Into<String>,
+        defining_module: &str,
+        referring_module: &str,
+        pos: Position,
+    ) -> Self {
+        ParserError::PrivateEnum {
             name: name.into(),
             defining: Self::describe_module(defining_module),
             referring: Self::describe_module(referring_module),

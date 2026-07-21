@@ -266,6 +266,11 @@ pub(crate) fn const_eval<'ctx>(
             Ok(function.as_global_value().as_pointer_value().into())
         }
 
+        // ── Enum variant value: a compile-time `i32` constant ─────────────
+        ExprKind::EnumValue { value, .. } => {
+            Ok(cg.context.i32_type().const_int(*value as u64, false).into())
+        }
+
         // ── Indirect call (no constant path) ──────────────────────────────
         ExprKind::IndirectCall { .. } => Err(CodegenError::InvalidOperation(
             "indirect call not supported in constant expressions".to_string(),

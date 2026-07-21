@@ -1,0 +1,14 @@
+# expected: "comparison", "enum#"
+# Two different enums are distinct types and cannot be compared: nominal
+# type-safety is the whole point of a distinct enum type.
+enum Color { Red, Green, Blue }
+enum Direction { North, East, South, West }
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Color c = Color.Green
+    Direction d = Direction.East
+    if c == d {
+        return 1
+    }
+    return 0
+}

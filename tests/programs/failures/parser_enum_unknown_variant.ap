@@ -1,0 +1,9 @@
+# expected: "no variant 'Purple'"
+# `Enum.Variant` for a variant that does not exist on a known enum is a parse
+# error naming the offending variant.
+enum Color { Red, Green, Blue }
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Color c = Color.Purple
+    return 0
+}

@@ -1,0 +1,9 @@
+# expected: "export can only be used with functions or global variables"
+# `export` is a linkage marker for symbols with a linked object-file symbol. An
+# enum, like a type-struct or alias, has none — `public enum` is the way to
+# share it across modules.
+export enum Color { Red, Green, Blue }
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

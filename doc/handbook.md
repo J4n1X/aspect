@@ -575,6 +575,50 @@ byte b = 255
 Aliases and type-structs may reference each other and be used before
 their textual declaration point — see [§8 Functions](#forward-references-and-mutual-recursion) for why order doesn't matter.
 
+### Enums
+
+An `enum` is a C-style enumeration: a **distinct type** whose values are a fixed,
+named set. Each variant is auto-numbered from `0` in declaration order, and the
+whole type is represented as an `i32`:
+
+```aspect
+enum Color { Red, Green, Blue }        # Red = 0, Green = 1, Blue = 2
+
+Color c = Color.Green                  # a value of type Color
+if c == Color.Blue {
+    # ...
+}
+```
+
+Variants may be separated by commas, newlines, or both — write them on one line
+or one per line. A variant is reached only through its enum (`Color.Red`), so
+`Red` alone is never a name; there are no explicit `= N` values and no payloads.
+
+The point of a distinct `enum` type is **type-safety**: a `Color` is not an `i32`
+and not some other enum, and the compiler keeps them apart.
+
+```aspect
+enum Direction { North, East, South, West }
+
+Color c = Color.Red
+i32 n = c                      # error: enum does not implicitly become i32
+i32 m = c as i32               # ok: explicit cast (m == 0)
+Color back = 2 as Color        # ok: i32 -> Color (Blue); no range check
+
+if c == Direction.North { }    # error: different enums never compare
+```
+
+The only operations are variant access and `==` / `!=` between two values of the
+*same* enum. Ordering (`<`, `>`) and arithmetic on enums are not allowed — cast to
+`i32` first if you truly need the number. An enum can also seed a global:
+
+```aspect
+Color g_theme = Color.Blue     # folded to a constant initializer
+```
+
+Add `public` to share an enum across modules — `public enum Suit { ... }` — with
+the same visibility model as `public type` (see [§12 Modules](#12-modules)).
+
 ---
 
 ## 5. Operators and expressions

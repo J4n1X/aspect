@@ -86,6 +86,7 @@ explicitly for imported files.
 | `asm` | Inline-assembly function declaration (`asm fn`) |
 | `const` | Const modifier (also part of `const <type>` LangType) |
 | `type` | Type-struct / alias definition — struct definitions are spelled `type Name { ... }` |
+| `enum` | C-style enum definition (`enum Name { A, B, C }`) — a distinct `i32`-backed type |
 | `struct` | Reserved, but unused — see `type` |
 | `naked` | Naked function declaration (`naked fn`) — no prologue/epilogue |
 | `alias` | Type alias (`alias myint i32`) |
