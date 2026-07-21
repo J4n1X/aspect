@@ -14,12 +14,13 @@
 //! deliberate "governance sees all" choice consistent with §8.
 
 pub mod builtins;
+pub mod jit;
 pub mod query;
 
 use std::path::PathBuf;
 
 use crate::lexer::{Position, TypeBase};
-use crate::parser::{Program, RuleAnchor};
+use crate::parser::{MetaKind, Program, RuleAnchor};
 use query::QueryIndex;
 
 /// Severity of a rule [`Judgment`]. `Error` fails the build; `Report` is a
@@ -122,26 +123,87 @@ pub fn run_rules(program: &Program) -> Vec<Judgment> {
             RuleAnchor::Attribute(name) => ResolvedAnchor::Attribute(query.attr_carriers(name)),
         };
 
-        let Some(rule_fn) = builtins::lookup(&decl.checker_fn) else {
-            out.push(Judgment {
-                severity: Severity::Error,
-                pos: decl.pos,
-                rule: decl.checker_fn.clone(),
-                message: unknown_builtin_message(&decl.checker_fn),
-            });
+        // Resolution order: a compiler builtin first, then a user-authored
+        // `rule fn`, then error.
+        if let Some(rule_fn) = builtins::lookup(&decl.checker_fn) {
+            for raw in rule_fn(&query, &anchor, decl.pos) {
+                out.push(stamp(&decl.checker_fn, raw));
+            }
             continue;
-        };
-
-        for raw in rule_fn(&query, &anchor, decl.pos) {
-            out.push(Judgment {
-                severity: raw.severity,
-                pos: raw.pos,
-                rule: decl.checker_fn.clone(),
-                message: raw.message,
-            });
         }
+
+        if let Some(func) = program
+            .functions
+            .iter()
+            .find(|f| f.proto.name == decl.checker_fn)
+        {
+            if func.proto.meta_kind != Some(MetaKind::Rule) {
+                out.push(Judgment {
+                    severity: Severity::Error,
+                    pos: decl.pos,
+                    rule: decl.checker_fn.clone(),
+                    message: format!(
+                        "'{}' is an ordinary function; a rule checker must be a `rule fn`",
+                        decl.checker_fn
+                    ),
+                });
+                continue;
+            }
+            if !jit::is_valid_checker(func, program) {
+                out.push(Judgment {
+                    severity: Severity::Error,
+                    pos: decl.pos,
+                    rule: decl.checker_fn.clone(),
+                    message: "a rule fn used as a checker must have signature \
+                              `(Program, Type) -> Judgments`"
+                        .to_string(),
+                });
+                continue;
+            }
+            let ResolvedAnchor::Type(id) = &anchor else {
+                out.push(Judgment {
+                    severity: Severity::Error,
+                    pos: decl.pos,
+                    rule: decl.checker_fn.clone(),
+                    message: "attribute-anchored rule functions are not yet supported"
+                        .to_string(),
+                });
+                continue;
+            };
+            match jit::run_rule_fn(program, &decl.checker_fn, *id, &query) {
+                Ok(raws) => {
+                    for raw in raws {
+                        out.push(stamp(&decl.checker_fn, raw));
+                    }
+                }
+                Err(e) => out.push(Judgment {
+                    severity: Severity::Error,
+                    pos: decl.pos,
+                    rule: decl.checker_fn.clone(),
+                    message: format!("rule fn '{}' failed: {e}", decl.checker_fn),
+                }),
+            }
+            continue;
+        }
+
+        out.push(Judgment {
+            severity: Severity::Error,
+            pos: decl.pos,
+            rule: decl.checker_fn.clone(),
+            message: unknown_builtin_message(&decl.checker_fn),
+        });
     }
     out
+}
+
+/// Attach the rule name to a builtin/meta-fn's raw judgment.
+fn stamp(rule: &str, raw: RawJudgment) -> Judgment {
+    Judgment {
+        severity: raw.severity,
+        pos: raw.pos,
+        rule: rule.to_string(),
+        message: raw.message,
+    }
 }
 
 /// Resolve a type anchor to a struct id, following a one-hop `alias` to a

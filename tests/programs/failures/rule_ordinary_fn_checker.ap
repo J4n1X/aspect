@@ -1,0 +1,10 @@
+# expected: "ordinary function", "rule fn"
+#-
+  A rule checker must be a `rule fn`, not an ordinary function.
+-#
+
+type Config { public i32 x }
+fn plain() -> i32 { return 0 }
+rule Config plain
+
+fn main(u32 argc, u8 **argv) -> i32 { return 0 }

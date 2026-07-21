@@ -1,0 +1,24 @@
+# expected: "rule", "only_one", "more than once"
+# compile_args: "-I", "lib"
+#-
+  Two constructions: the JIT'd Aspect rule fn detects it and emits an error,
+  failing the build.
+-#
+
+rule fn only_one(Program p, Type anchor) -> Judgments {
+    Judgments js = Judgments.new()
+    ExprList sites = p.instantiations_of(anchor.struct_name())
+    if sites.count() > 1 as u64 {
+        js.error(sites.at(1 as u64).pos(), "constructed more than once")
+    }
+    return js
+}
+
+type Config { public i32 x }
+rule Config only_one
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Config a = Config { x = 1 }
+    Config b = Config { x = 2 }
+    return a.x + b.x
+}

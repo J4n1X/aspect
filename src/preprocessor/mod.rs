@@ -208,6 +208,7 @@ impl Preprocessor {
         // ordinary program keeps a clean namespace and pays nothing.
         if self.declares_a_meta_fn() {
             self.inject_std_meta()?;
+            self.inject_rule_trampolines()?;
         }
         // The closing EOF inherits the last real token's position: it is what
         // the parser reports when input runs out mid-construct ("Expected '}'
@@ -291,6 +292,59 @@ impl Preprocessor {
                 edges.push(META_MODULE.to_string());
             }
         }
+        Ok(())
+    }
+
+    /// For each checker-shaped `rule fn` — `rule fn <name>(Program …` — inject a
+    /// scalar-ABI trampoline `__rt_<name>(u64, u64) -> u64`. A `(Program, Type)
+    /// -> Judgments` checker lowers to a `byval`/`sret` ABI that passes its
+    /// struct args on the stack, which a plain `extern "C"` call from the judge
+    /// cannot match; the trampoline wraps the two `u64` handles into std/meta
+    /// values, calls the real checker (codegen handles the inner ABI), and
+    /// returns the result handle — so the judge calls `fn(u64,u64)->u64`.
+    fn inject_rule_trampolines(&mut self) -> Result<(), PreprocessError> {
+        use crate::lexer::Keyword;
+        let names: Vec<String> = self
+            .tokens
+            .windows(5)
+            .filter_map(|w| {
+                let is_rule = matches!(&w[0].kind, TokenKind::Identifier(n) if n == "rule");
+                let is_fn = matches!(w[1].kind, TokenKind::Keyword(Keyword::Fn));
+                let open = matches!(w[3].kind, TokenKind::OpenParen);
+                let takes_program = matches!(&w[4].kind, TokenKind::Identifier(n) if n == "Program");
+                match (&w[2].kind, is_rule && is_fn && open && takes_program) {
+                    (TokenKind::Identifier(name), true) => Some(name.clone()),
+                    _ => None,
+                }
+            })
+            .collect();
+        if names.is_empty() {
+            return Ok(());
+        }
+        let mut src = String::new();
+        for name in names {
+            src.push_str(&format!(
+                "rule fn __rt_{name}(u64 __p, u64 __a) -> u64 {{\n    \
+                 Judgments __r = {name}(Program.from_handle(__p), Type.from_handle(__a))\n    \
+                 return __r.raw()\n}}\n"
+            ));
+        }
+        self.process_synthetic("<rule-trampolines>", src)
+    }
+
+    /// Lex an in-memory synthetic source (a compiler-generated unit like the
+    /// rule trampolines) under a fresh file id and splice its tokens into the
+    /// stream — the file-registry twin of [`Self::process_file`] for source that
+    /// has no path on disk.
+    fn process_synthetic(&mut self, name: &str, source: String) -> Result<(), PreprocessError> {
+        let file_id = u32::try_from(self.files.len())
+            .expect("preprocessor source files exceed u32::MAX");
+        self.files.push(PathBuf::from(name));
+        self.file_modules.push(None);
+        let raw = tokenize_with_file_id(source, file_id)?;
+        self.file_stack.push(FileContext::new(file_id));
+        self.process_tokens(&raw)?;
+        self.finish_file();
         Ok(())
     }
 

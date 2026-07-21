@@ -1,0 +1,24 @@
+# expected: 5
+# compile_args: "-I", "lib"
+#-
+  An Aspect-authored `rule fn` singleton, JIT-compiled and run over the program
+  via the std/meta handle ABI: Config is constructed once, so the rule passes
+  and main runs.
+-#
+
+rule fn only_one(Program p, Type anchor) -> Judgments {
+    Judgments js = Judgments.new()
+    ExprList sites = p.instantiations_of(anchor.struct_name())
+    if sites.count() > 1 as u64 {
+        js.error(sites.at(1 as u64).pos(), "constructed more than once")
+    }
+    return js
+}
+
+type Config { public i32 x }
+rule Config only_one
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Config c = Config { x = 5 }
+    return c.x
+}
