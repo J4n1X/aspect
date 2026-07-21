@@ -1,18 +1,58 @@
 use crate::lexer::{Keyword, LangType, TokenKind, TypeBase};
 use crate::parser::expressions::Parser;
-use crate::parser::{ExprKind, Expression, ParserError};
+use crate::parser::{Attribute, ExprKind, Expression, ParserError};
 use crate::symbol::module::Visibility;
 use aspect_macros::parse_rule;
 
 impl Parser {
+    /// Parse zero or more leading `@name` / `@name(arg, ...)` attributes.
+    ///
+    /// Attributes are inert cargo: the parser validates only the shape (`@`
+    /// must be followed by an identifier) and attaches them, in source order,
+    /// to the statement or item that follows. Source order is outside-in —
+    /// in `@a @b x`, `a` is applied last. Newlines after an attribute are
+    /// skipped, so an attribute on its own line binds to what follows.
+    #[parse_rule]
+    pub(crate) fn parse_leading_attrs(&mut self) -> Result<Vec<Attribute>, ParserError> {
+        let mut attrs = Vec::new();
+        while self.check(&TokenKind::At) {
+            let pos = pos!();
+            self.advance(); // '@'
+            let name = self.parse_ident("attribute name")?;
+            let args = if token_if!(OpenParen) {
+                self.parse_comma_separated(&TokenKind::CloseParen, Self::parse_expression)?
+            } else {
+                Vec::new()
+            };
+            attrs.push(Attribute { name, args, pos });
+            skip_nl!();
+        }
+        Ok(attrs)
+    }
+
+    /// Reject attributes on a construct that takes none (e.g. `alias`).
+    pub(crate) fn reject_attrs(attrs: &[Attribute], what: &str) -> Result<(), ParserError> {
+        match attrs.first() {
+            Some(attr) => Err(ParserError::UnexpectedToken(
+                format!("attributes cannot be applied to {what}"),
+                attr.pos,
+            )),
+            None => Ok(()),
+        }
+    }
+
     /// Parse a top-level type-struct definition:
     /// `type Name { [public] Type field <term> ...  [const?] fn method(...) {...} ... }`.
     ///
     /// Fields must come before methods. Methods are desugared into mangled
     /// free functions (`Type$method`) and returned to `do_parse_program` for
-    /// inclusion in `Program::functions`.
+    /// inclusion in `Program::functions`. `attrs` are the declaration's
+    /// leading attributes; they land on the struct's `StructInfo`.
     #[parse_rule]
-    pub(crate) fn parse_struct_def(&mut self) -> Result<Vec<crate::parser::Function>, ParserError> {
+    pub(crate) fn parse_struct_def(
+        &mut self,
+        attrs: Vec<Attribute>,
+    ) -> Result<Vec<crate::parser::Function>, ParserError> {
         use crate::symbol::module::FieldInfo;
 
         let pos = pos!();
@@ -28,6 +68,8 @@ impl Parser {
             return Err(ParserError::DuplicateType(name, pos));
         }
 
+        self.module.set_struct_attrs(id, attrs);
+
         token!(OpenBrace);
 
         let mut fields: Vec<FieldInfo> = Vec::new();
@@ -41,6 +83,10 @@ impl Parser {
             if self.check(&TokenKind::CloseBrace) || self.is_at_end() {
                 break;
             }
+
+            // Member attributes precede everything else (`@attr public fn ...`)
+            // and attach to whichever member follows — field or method.
+            let member_attrs = self.parse_leading_attrs()?;
 
             // Optional `public` prefix — shared by fields and methods. Absence
             // means private for both (encapsulation by default).
@@ -64,7 +110,7 @@ impl Parser {
                     self.advance(); // consume `const`
                     skip_nl!();
                 }
-                let method = self.parse_method(id, &name, is_const_fn, vis)?;
+                let method = self.parse_method(id, &name, is_const_fn, vis, member_attrs)?;
                 methods.push(method);
                 continue;
             }
@@ -82,6 +128,7 @@ impl Parser {
                 name: field_name,
                 ty: field_type,
                 vis,
+                attrs: member_attrs,
             });
             self.match_token(&[TokenKind::Semicolon, TokenKind::Newline]);
         }
@@ -126,6 +173,7 @@ impl Parser {
         struct_name: &str,
         is_const_fn: bool,
         vis: crate::symbol::module::Visibility,
+        attrs: Vec<Attribute>,
     ) -> Result<crate::parser::Function, ParserError> {
         use crate::parser::{Function, FunctionProto};
         use crate::symbol::module::{mangle_method, MethodSig};
@@ -185,6 +233,7 @@ impl Parser {
             // A method's `public` governs access through its type, not object
             // -file export; nothing outside Aspect calls a mangled method.
             vis: Visibility::Private,
+            attrs,
             pos,
         };
 
@@ -285,6 +334,7 @@ impl Parser {
         &mut self,
         is_extern: bool,
         vis: Visibility,
+        attrs: Vec<Attribute>,
     ) -> Result<crate::parser::Function, ParserError> {
         use crate::parser::{Function, FunctionProto};
         use crate::symbol::table::FunctionSymbol;
@@ -312,6 +362,7 @@ impl Parser {
             params: params.clone(),
             return_type,
             vis,
+            attrs,
             pos,
         };
 
@@ -342,7 +393,11 @@ impl Parser {
     }
 
     #[parse_rule]
-    pub(crate) fn parse_global_var(&mut self, vis: Visibility) -> Result<crate::parser::GlobalVar, ParserError> {
+    pub(crate) fn parse_global_var(
+        &mut self,
+        vis: Visibility,
+        attrs: Vec<Attribute>,
+    ) -> Result<crate::parser::GlobalVar, ParserError> {
         use crate::parser::GlobalVar;
 
         let pos = pos!();
@@ -366,7 +421,8 @@ impl Parser {
             name,
             initializer,
             pos,
-            vis
+            vis,
+            attrs,
         })
     }
 
@@ -458,5 +514,45 @@ impl Parser {
             LangType::VOID,
             pos,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::parser::{FunctionBody, Parser, Program};
+
+    fn parse(source: &str) -> Program {
+        let tokens = crate::lexer::tokenize(source.to_string()).expect("lex");
+        Parser::new(tokens).parse_program().expect("parse")
+    }
+
+    /// Attribute order is source order, which is outside-in: in `@a @b fn`,
+    /// `a` is applied last (`a(b(f))`).
+    #[test]
+    fn stacked_attributes_keep_source_order() {
+        let program = parse("@a @b(1) fn f() {\n    return\n}");
+        let attrs = &program.functions[0].proto.attrs;
+        let names: Vec<&str> = attrs.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["a", "b"]);
+        assert!(attrs[0].args.is_empty());
+        assert_eq!(attrs[1].args.len(), 1);
+    }
+
+    /// An attribute on its own line binds to the following statement.
+    #[test]
+    fn statement_attributes_attach_to_the_statement() {
+        let program = parse("fn f() -> i32 {\n    @debug\n    @trace(2)\n    return 0\n}");
+        let FunctionBody::Aspect(body) = &program.functions[0].body else {
+            panic!("expected an Aspect body");
+        };
+        let names: Vec<&str> = body[0].attrs.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["debug", "trace"]);
+    }
+
+    /// A dangling `@` at EOF is a parse error, not a panic.
+    #[test]
+    fn at_sign_at_eof_is_an_error() {
+        let tokens = crate::lexer::tokenize("@".to_string()).expect("lex");
+        assert!(Parser::new(tokens).parse_program().is_err());
     }
 }

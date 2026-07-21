@@ -15,6 +15,7 @@
 //! table and is discarded after parsing.
 
 use crate::lexer::LangType;
+use crate::parser::ast::Attribute;
 use crate::symbol::table::{FunctionSymbol, SymbolError};
 use std::collections::HashMap;
 
@@ -48,6 +49,8 @@ pub struct FieldInfo {
     pub name: String,
     pub ty: LangType,
     pub vis: Visibility,
+    /// Leading attributes in source order (outside-in, leftmost applied last).
+    pub attrs: Vec<Attribute>,
 }
 
 /// The signature of a type-struct method (populated in Milestone 3).
@@ -82,6 +85,10 @@ pub struct StructInfo {
     pub field_index: HashMap<String, usize>,
     /// Methods keyed by their (unmangled) source name. Populated in Milestone 3.
     pub methods: HashMap<String, MethodSig>,
+    /// Leading attributes of the `type` declaration itself, in source order
+    /// (outside-in, leftmost applied last). Empty until
+    /// [`ModuleSymbols::set_struct_attrs`].
+    pub attrs: Vec<Attribute>,
 }
 
 /// A distinct function-pointer signature (`fn(params) -> return_type`).
@@ -188,6 +195,7 @@ impl ModuleSymbols {
             fields: Vec::new(),
             field_index: HashMap::new(),
             methods: HashMap::new(),
+            attrs: Vec::new(),
         });
         self.structs_by_name.insert(name.to_string(), id);
         id
@@ -223,6 +231,14 @@ impl ModuleSymbols {
         let info = &mut self.structs_by_id[id as usize];
         info.fields = fields;
         info.field_index = field_index;
+    }
+
+    /// Attach the leading attributes of a `type` declaration to its struct
+    /// (`@attr type Name { ... }`). Interning happens in the prescan, long
+    /// before the attributes are parsed — hence a setter rather than an
+    /// `intern_struct` parameter.
+    pub fn set_struct_attrs(&mut self, id: u32, attrs: Vec<Attribute>) {
+        self.structs_by_id[id as usize].attrs = attrs;
     }
 
     /// Look up a field by name, returning its layout index and info.

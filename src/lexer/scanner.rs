@@ -166,6 +166,7 @@ impl Scanner {
             '.' => TokenKind::Dot,
             '?' => TokenKind::Question,
             '$' => TokenKind::Dollar,
+            '@' => TokenKind::At,
             '~' => TokenKind::Tilde,
 
             // Newline (statement terminator)
@@ -572,4 +573,20 @@ pub fn tokenize(input: String) -> Result<Vec<Token>, LexerError> {
 pub fn tokenize_with_file_id(input: String, file_id: u32) -> Result<Vec<Token>, LexerError> {
     let mut scanner = Scanner::with_file_id(input, file_id);
     scanner.scan_all()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tokenize;
+    use crate::lexer::TokenKind;
+
+    /// `@` lexes as its own token — the attribute sigil — and the following
+    /// identifier stays a separate token (no `@name` compound lexeme).
+    #[test]
+    fn at_sign_lexes_as_at_token() {
+        let tokens = tokenize("@nopanic".to_string()).expect("lex");
+        assert!(matches!(tokens[0].kind, TokenKind::At));
+        assert!(matches!(&tokens[1].kind, TokenKind::Identifier(n) if n == "nopanic"));
+        assert!(matches!(tokens[2].kind, TokenKind::Eof));
+    }
 }

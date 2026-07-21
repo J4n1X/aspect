@@ -59,6 +59,15 @@ const STATEMENT_TABLE: &[(StatementPred, StatementHandler)] = &[
 impl Parser {
     pub(crate) fn parse_statement(&mut self) -> Result<Statement, ParserError> {
         self.skip_newlines();
+        // Leading attributes decorate whatever statement follows (`@debug
+        // x = f()`). They are inert — attached, never interpreted here.
+        let attrs = self.parse_leading_attrs()?;
+        let mut stmt = self.dispatch_statement()?;
+        stmt.attrs = attrs;
+        Ok(stmt)
+    }
+
+    fn dispatch_statement(&mut self) -> Result<Statement, ParserError> {
         for &(pred, handler) in STATEMENT_TABLE {
             if pred(self) {
                 return handler(self);

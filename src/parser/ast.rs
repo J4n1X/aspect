@@ -180,16 +180,36 @@ pub enum StatementKind {
     Continue,
 }
 
+/// An `@name` / `@name(args)` attribute: inert metadata the parser attaches
+/// to the item, field, or statement it precedes. The parser never interprets
+/// attributes — meaning is assigned by later phases (rules, transforms), or
+/// never. Args are parsed as ordinary expressions but never type-checked.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Attribute {
+    pub name: String,
+    /// `(...)` arguments in source order; empty for the bare `@name` form.
+    pub args: Vec<Expression>,
+    /// The `@` sigil.
+    pub pos: Position,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Statement {
     pub kind: StatementKind,
     pub pos: Position,
+    /// Leading attributes in source order — which is outside-in: in
+    /// `@a @b x`, `a` is applied last (`a(b(x))`).
+    pub attrs: Vec<Attribute>,
 }
 
 impl Statement {
     #[must_use]
     pub fn new(kind: StatementKind, pos: Position) -> Self {
-        Self { kind, pos }
+        Self {
+            kind,
+            pos,
+            attrs: Vec::new(),
+        }
     }
 }
 
@@ -204,6 +224,8 @@ pub struct FunctionProto {
     /// foreign code and therefore collectable when unreachable. `public` is
     /// only for symbols something outside Aspect must find.
     pub vis: crate::symbol::module::Visibility,
+    /// Leading attributes in source order (outside-in, leftmost applied last).
+    pub attrs: Vec<Attribute>,
     pub pos: Position,
 }
 
@@ -284,6 +306,8 @@ pub struct GlobalVar {
     pub name: String,
     pub initializer: Option<Expression>,
     pub vis: Visibility,
+    /// Leading attributes in source order (outside-in, leftmost applied last).
+    pub attrs: Vec<Attribute>,
     pub pos: Position,
 }
 

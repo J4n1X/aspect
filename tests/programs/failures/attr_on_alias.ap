@@ -1,0 +1,10 @@
+# expected: "attributes cannot be applied to an alias"
+# An alias is a pure compile-time name binding — it produces no AST node,
+# so there is nothing for an attribute to ride on.
+
+@fast alias MyInt i32
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    MyInt x = 0
+    return x
+}

@@ -60,6 +60,9 @@ impl Parser {
         skip_nl!();
 
         while !self.is_at_end() {
+            // Item attributes come first (`@attr public fn ...`) and attach to
+            // whichever item follows.
+            let attrs = self.parse_leading_attrs()?;
             let vis_pos = pos!();
             let vis = if kw_if!(Public) {
                 Visibility::Public
@@ -96,19 +99,22 @@ impl Parser {
             }
 
             if let Some((Keyword::Asm, asm_pos)) = &kind {
-                let func = self.parse_asm_function(*asm_pos, vis)?;
+                let func = self.parse_asm_function(*asm_pos, vis, attrs)?;
                 functions.push(func);
             } else if let Some((Keyword::Naked, naked_pos)) = &kind {
-                let func = self.parse_naked_function(*naked_pos, vis)?;
+                let func = self.parse_naked_function(*naked_pos, vis, attrs)?;
                 functions.push(func);
             }
             // `fn ident(...)` is a function definition; `fn(...)` (no name
             // between `fn` and `(`) is a function-pointer-typed global. The
             // statement-table dispatch handles the local-decl variant.
             else if self.check_keyword(&Keyword::Fn) && !self.starts_fnptr_var_decl() {
-                let func = self.parse_function(is_extern, vis)?;
+                let func = self.parse_function(is_extern, vis, attrs)?;
                 functions.push(func);
             } else if self.check_keyword(&Keyword::Alias) {
+                // An alias is a pure compile-time name binding — there is no
+                // node for an attribute to ride on.
+                Self::reject_attrs(&attrs, "an alias declaration")?;
                 if is_extern {
                     return Err(ParserError::UnexpectedToken(
                         "extern can only be used with functions".to_string(),
@@ -123,7 +129,7 @@ impl Parser {
                         self.peek().pos,
                     ));
                 }
-                let methods = self.parse_struct_def()?;
+                let methods = self.parse_struct_def(attrs)?;
                 functions.extend(methods);
             } else if matches!(
                 self.peek().kind,
@@ -140,7 +146,7 @@ impl Parser {
                         self.peek().pos,
                     ));
                 }
-                let global = self.parse_global_var(vis)?;
+                let global = self.parse_global_var(vis, attrs)?;
                 global_vars.push(global);
             } else {
                 return Err(ParserError::UnexpectedToken(

@@ -1,0 +1,42 @@
+# expected: 42
+#-
+  Attributes: `@name` / `@name(args)` before an item, struct member, or
+  statement. They are inert metadata — the parser attaches them to the node
+  they precede and nothing interprets them — so this program must behave
+  exactly as if every attribute were deleted.
+
+  Exercised: attrs on a type-struct, field, method, global, function and
+  statements; stacking (`@a @b`, source order = outside-in); argument forms
+  (`@x`, `@x(1, "s")`); an attribute on its own line binding to the
+  following statement.
+-#
+
+@version(1)
+type Point {
+    @unit("cm") public i32 x
+    public i32 y
+
+    @inline
+    public fn sum(this) -> i32 {
+        return this.x + this.y
+    }
+}
+
+@zeroed
+i32 counter = 2
+
+@entry @traced(1, "s")
+public fn compute(i32 base) -> i32 {
+    @debug i32 doubled = base * 2
+    @log("loop")
+    for (i32 i = 0; i < 3; i += 1) {
+        @count doubled = doubled + counter
+    }
+    return doubled
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Point p = Point { x = 10, y = 7 }
+    # compute(17) = 17*2 + 3*2 = 40; + counter = 42
+    return compute(p.sum()) + counter
+}
