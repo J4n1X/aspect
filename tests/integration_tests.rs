@@ -61,11 +61,28 @@ fn parse_and_typecheck(
             .join("\n")
     })?;
 
-    let warnings = typechecker
+    // Governance rules (Phase 2a): fold Error judgments into the error string
+    // (failure fixtures assert on them); Report judgments join the warnings so
+    // `# expected_warning:` can assert on checker-only rules.
+    let mut rule_errors: Vec<String> = Vec::new();
+    let mut rule_reports: Vec<String> = Vec::new();
+    for judgment in aspect::meta::run_rules(&program) {
+        let line = aspect::meta::format_judgment(&judgment, &program.source_files);
+        match judgment.severity {
+            aspect::meta::Severity::Error => rule_errors.push(line),
+            aspect::meta::Severity::Report => rule_reports.push(line),
+        }
+    }
+    if !rule_errors.is_empty() {
+        return Err(rule_errors.join("\n"));
+    }
+
+    let mut warnings: Vec<String> = typechecker
         .warnings()
         .iter()
         .map(|w| typechecker.format_warning(w))
         .collect();
+    warnings.extend(rule_reports);
     Ok((program, warnings))
 }
 

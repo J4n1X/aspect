@@ -1,0 +1,17 @@
+# expected: "rule", "singleton"
+#-
+  A `singleton` type constructed twice: the second construction is a rule error
+  that fails the build. One error per construction beyond the first.
+-#
+
+type Config {
+    public i32 value
+}
+
+rule Config singleton
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Config a = Config { value = 1 }
+    Config b = Config { value = 2 }
+    return a.value + b.value
+}

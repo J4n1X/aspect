@@ -1,0 +1,18 @@
+# expected: 42
+#-
+  A `rule <Type> singleton` over a type constructed exactly once: the rule is
+  satisfied, so the program compiles and runs normally. Written as
+  `T v = T { ... }` to prove the single construction is counted once, not
+  double-counted as literal + declaration.
+-#
+
+type Config {
+    public i32 value
+}
+
+rule Config singleton
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Config c = Config { value = 42 }
+    return c.value
+}

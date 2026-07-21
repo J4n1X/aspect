@@ -331,6 +331,29 @@ pub struct GlobalVar {
     pub pos: Position,
 }
 
+/// The subject a `rule` binds to. An enum from day one (§7 of the metasystem
+/// plan) so new anchor kinds (`function`, `module`) can be added later without
+/// breaking existing rules.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RuleAnchor {
+    /// `rule Config singleton` — the name of a type-struct (aliases resolve).
+    Type(String),
+    /// `rule @nopanic ensure_nopanic` — an attribute name (`@nopanic` → `"nopanic"`).
+    Attribute(String),
+}
+
+/// A `rule <anchor> <checker_fn>` declaration: a post-typecheck judgment run
+/// over the whole typed program by [`crate::meta::run_rules`]. In Phase 2a
+/// `checker_fn` names a compiler **builtin** rule (there is no JIT yet); a
+/// later phase lets it name a user-authored Aspect function. Rules modify
+/// nothing — they only emit diagnostics — so the node carries no body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuleDecl {
+    pub anchor: RuleAnchor,
+    pub checker_fn: String,
+    pub pos: Position,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub functions: Vec<Function>,
@@ -343,4 +366,11 @@ pub struct Program {
     /// each `$import`-pulled file after that. Empty for synthetic programs
     /// (e.g. checker unit tests that don't go through the preprocessor).
     pub source_files: Vec<std::path::PathBuf>,
+    /// Governance rules (`rule <anchor> <fn>`), run post-typecheck by
+    /// [`crate::meta::run_rules`]. Empty for programs declaring no rules.
+    pub rules: Vec<RuleDecl>,
+    /// Module name of each file, parallel to `source_files` (indexed by
+    /// `Position::file_id`); empty ⇒ every file is the anonymous root module
+    /// `""`. Carried so `meta` queries can resolve a position to its module.
+    pub file_modules: Vec<String>,
 }

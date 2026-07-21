@@ -1,0 +1,16 @@
+# expected: 20
+# expected_warning: "audited"
+#-
+  `rule @debug audit` — a checker-only (report) rule anchored on an attribute.
+  It emits one Report per `@debug` carrier, which flows to the warning channel;
+  it never fails the build. Proves attribute-anchor resolution and the report
+  path.
+-#
+
+rule @debug audit
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    @debug i32 a = 8
+    @debug i32 b = 12
+    return a + b
+}

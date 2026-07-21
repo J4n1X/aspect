@@ -1,0 +1,14 @@
+# expected: "unknown rule", "did you mean", "singleton"
+#-
+  An unknown rule name close to a builtin gets a did-you-mean suggestion.
+-#
+
+type Config {
+    public i32 value
+}
+
+rule Config singletn
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

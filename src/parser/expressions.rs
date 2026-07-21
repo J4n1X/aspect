@@ -89,8 +89,9 @@ pub struct Parser {
     pub(crate) source_files: Vec<std::path::PathBuf>,
     /// Module of each file, indexed by `Position::file_id`. Files without an
     /// entry — including everything when no module info was threaded — belong
-    /// to the anonymous root module `""`.
-    file_modules: Vec<String>,
+    /// to the anonymous root module `""`. Moved into `Program::file_modules` so
+    /// the `meta` query layer can resolve a position to its module.
+    pub(crate) file_modules: Vec<String>,
     /// Module → its *direct* imports, driving the import-visibility check.
     module_imports: std::collections::HashMap<String, Vec<String>>,
     /// Global-variable name → module visibility: globals live in the outermost

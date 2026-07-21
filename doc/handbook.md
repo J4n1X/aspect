@@ -36,7 +36,8 @@ It is referenced throughout rather than duplicated.
 13. [Standard library tour](#13-standard-library-tour)
 14. [Idioms and patterns](#14-idioms-and-patterns)
 15. [Common pitfalls](#15-common-pitfalls)
-16. [Where to go next](#16-where-to-go-next)
+16. [Attributes and rules](#16-attributes-and-rules)
+17. [Where to go next](#17-where-to-go-next)
 
 ---
 
@@ -1560,7 +1561,74 @@ Aspect:
 
 ---
 
-## 16. Where to go next
+## 16. Attributes and rules
+
+Aspect has the first slice of a *metasystem* — machinery for a program to
+describe and constrain itself. Two pieces are usable today: **attributes**
+(inert markers) and **rules** (post-typecheck governance). Both are small and
+deliberately conservative; the fuller story (user-written transforms and
+expansions) is future work.
+
+### Attributes — `@name`
+
+An attribute is `@name` or `@name(args)`, written before an item, a struct
+member, or a statement. The parser attaches it as **inert metadata** and never
+interprets it — a program behaves exactly as if every attribute were deleted,
+*unless* a rule gives one meaning.
+
+```aspect
+@version(2)
+type Config {
+    @unit("ms") public i32 timeout
+}
+
+fn run() -> i32 {
+    @debug i32 total = compute()      # attribute on a statement
+    return total
+}
+```
+
+Attributes stack in source order (outside-in — in `@a @b x`, `a` wraps `b`
+wraps `x`). Arguments are ordinary expressions but are not type-checked. An
+`@` not followed by an identifier is a parse error.
+
+### Rules — `rule <anchor> <checker>`
+
+A **rule** is a whole-program judgment that runs *after* type checking and
+**only diagnoses** — it never changes your program. You declare one at the top
+level:
+
+```aspect
+rule Config singleton        # Config may be constructed at most once
+rule @debug   audit          # list every @debug site (a report, not an error)
+```
+
+- The **anchor** is a type-struct name or an `@attribute`.
+- The **checker** names a built-in rule. Two ship today:
+  - `singleton` — its anchored type may be *constructed* (a struct literal or
+    `alloc`) at most once in the whole program; each extra construction is a
+    build error. (Copies, uninitialized declarations, and arrays are not
+    counted in this first version.)
+  - `audit` — a report-only rule that lists every site of its anchor. It emits
+    notes (to stderr / the warning channel), never errors.
+- A rule whose anchor names an unknown type, or whose checker is unknown, is a
+  build error (with a did-you-mean for a near-miss checker name).
+
+Rules are **whole-program**: a rule sees every site regardless of module, and
+`$import`-ing a module imports its rules — importing a module means accepting
+its governance.
+
+`rule` is a *soft keyword*: a type, global, or local literally named `rule`
+still works (`rule r = rule { … }` is a variable of type `rule`). A rule
+declaration is recognised only in the `rule <anchor> <checker>` shape.
+
+> This is Phase 2a of the metasystem: rules are compiler built-ins. A later
+> phase lets you write rule (and transform) bodies in Aspect itself. The design
+> lives in [`doc/plans/Three-Hook-Metasystem.md`](../doc/plans/Three-Hook-Metasystem.md).
+
+---
+
+## 17. Where to go next
 
 - **Formal grammar, precedence, every edge case:**
   [`doc/compiler/09-syntax-reference.md`](compiler/09-syntax-reference.md)

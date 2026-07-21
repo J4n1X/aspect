@@ -48,6 +48,7 @@ impl Parser {
 
         let mut functions = Vec::new();
         let mut global_vars = Vec::new();
+        let mut rules = Vec::new();
 
         // Pre-register type/enum names and aliases so named types resolve
         // regardless of declaration order. Enums are interned before the alias
@@ -65,6 +66,31 @@ impl Parser {
             let (vis, export, vis_pos) = self.parse_vis_linkage_modifiers()?;
             let kind = self.parse_kind_modifier()?;
             let is_extern = matches!(&kind, Some((Keyword::Extern, _)));
+
+            // `rule <anchor> <fn>` — a soft keyword: a type or global literally
+            // named `rule` still parses (`rule x = …`), so a rule is detected by
+            // lookahead (`Self::is_rule_decl`), before the item gates below. A
+            // rule is always whole-program and carries no linkage — reject any
+            // modifiers that leaked onto it.
+            if self.is_rule_decl() {
+                Self::reject_attrs(&attrs, "a rule declaration")?;
+                if vis == Visibility::Public || export {
+                    return Err(ParserError::UnexpectedToken(
+                        "a rule cannot be public or export — rules are always whole-program"
+                            .to_string(),
+                        vis_pos,
+                    ));
+                }
+                if let Some((kw, kw_pos)) = &kind {
+                    return Err(ParserError::UnexpectedToken(
+                        format!("a rule cannot be {kw}"),
+                        *kw_pos,
+                    ));
+                }
+                rules.push(self.parse_rule_decl()?);
+                skip_nl!();
+                continue;
+            }
 
             // `extern` may be `public` (nameable from importers) but never
             // `export`: there is no local symbol here to give external linkage.
@@ -190,6 +216,8 @@ impl Parser {
             string_literals: self.string_literals.iter().cloned().collect(),
             symbols: std::mem::take(&mut self.module),
             source_files: self.source_files.clone(),
+            rules,
+            file_modules: self.file_modules.clone(),
         })
     }
 
@@ -253,6 +281,50 @@ impl Parser {
             kind = Some((next, next_pos));
             self.advance();
         }
+    }
+
+    /// Lookahead-only detector for the soft keyword `rule`. A rule is
+    /// `rule <Type|@attr> <fn>`; a value global is at most `Type name [= …]`
+    /// (two identifiers). So a leading `rule` begins a declaration iff the next
+    /// token is `@` (attribute anchor) or it is followed by *two* identifiers
+    /// (`rule T f`) — a type literally named `rule` in `rule x = …` stays a
+    /// global. Consumes nothing.
+    fn is_rule_decl(&self) -> bool {
+        let TokenKind::Identifier(name) = &self.peek().kind else {
+            return false;
+        };
+        if name != "rule" {
+            return false;
+        }
+        let kind_at = |n: usize| self.tokens.get(self.current + n).map(|t| &t.kind);
+        if matches!(kind_at(1), Some(TokenKind::At)) {
+            return true;
+        }
+        matches!(kind_at(1), Some(TokenKind::Identifier(_)))
+            && matches!(kind_at(2), Some(TokenKind::Identifier(_)))
+    }
+
+    /// Parse `rule <anchor> <checker_fn>` with the cursor on the `rule` soft
+    /// keyword (guaranteed by [`Self::is_rule_decl`]). The anchor is a
+    /// type-struct name or an `@attribute`; `checker_fn` names a builtin rule.
+    #[parse_rule]
+    fn parse_rule_decl(&mut self) -> Result<crate::parser::RuleDecl, ParserError> {
+        use crate::parser::{RuleAnchor, RuleDecl};
+        let pos = pos!();
+        self.advance(); // the `rule` soft keyword (not a real keyword)
+        let anchor = if self.check(&TokenKind::At) {
+            self.advance();
+            RuleAnchor::Attribute(ident!())
+        } else {
+            RuleAnchor::Type(ident!())
+        };
+        let checker_fn = ident!();
+        term!();
+        Ok(RuleDecl {
+            anchor,
+            checker_fn,
+            pos,
+        })
     }
 
     /// Reserves an id for every `type <Name>` before the main parse, so named
@@ -470,5 +542,53 @@ impl Parser {
         }
         term!();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::parser::{Parser, Program, RuleAnchor};
+
+    fn parse(source: &str) -> Program {
+        let tokens = crate::lexer::tokenize(source.to_string()).expect("lex");
+        Parser::new(tokens).parse_program().expect("parse")
+    }
+
+    /// `rule <Type> <fn>` — three identifiers — is a rule declaration.
+    #[test]
+    fn type_anchored_rule_parses() {
+        let program = parse("rule Config singleton\nfn f() -> i32 {\n    return 0\n}");
+        assert_eq!(program.rules.len(), 1);
+        assert!(matches!(&program.rules[0].anchor, RuleAnchor::Type(n) if n == "Config"));
+        assert_eq!(program.rules[0].checker_fn, "singleton");
+    }
+
+    /// `rule @attr <fn>` — the `@` after `rule` — is an attribute-anchored rule.
+    #[test]
+    fn attribute_anchored_rule_parses() {
+        let program = parse("rule @nopanic auditor\nfn f() -> i32 {\n    return 0\n}");
+        assert_eq!(program.rules.len(), 1);
+        assert!(matches!(&program.rules[0].anchor, RuleAnchor::Attribute(n) if n == "nopanic"));
+        assert_eq!(program.rules[0].checker_fn, "auditor");
+    }
+
+    /// The soft keyword: a type literally named `rule` used as a global
+    /// (`rule g = …`, two identifiers then `=`) is a global, not a rule.
+    #[test]
+    fn type_named_rule_stays_a_global() {
+        let program = parse(
+            "type rule {\n    public i32 v\n}\nrule g = rule { v = 5 }\nfn f() -> i32 {\n    return 0\n}",
+        );
+        assert!(program.rules.is_empty());
+        assert!(program.global_vars.iter().any(|g| g.name == "g"));
+    }
+
+    /// A rule may not carry `public` — rejected at parse time.
+    #[test]
+    fn public_rule_is_rejected() {
+        let tokens =
+            crate::lexer::tokenize("public rule Config singleton\nfn f() -> i32 {\n    return 0\n}".to_string())
+                .expect("lex");
+        assert!(Parser::new(tokens).parse_program().is_err());
     }
 }

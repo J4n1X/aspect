@@ -151,6 +151,13 @@ Type errors are **fatal** — any error aborts compilation. The checker validate
 
 See [05-typechecker.md](05-typechecker.md).
 
+### Stage 4b: Rules (`src/meta/`, optional)
+
+If the program declares any `rule`s, `meta::run_rules` runs after type checking
+and before codegen — a post-typecheck governance pass that only diagnoses
+(never rewrites). Error judgments abort compilation; reports are notes. Absent
+any `rule` declaration this is a no-op. See [11-rules.md](11-rules.md).
+
 ### Stage 5: Code Generation (`src/codegen/`)
 
 Emits LLVM IR via Inkwell (pinned to LLVM 19.1). Key design:

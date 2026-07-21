@@ -1,0 +1,18 @@
+# expected: 9
+#-
+  `rule` is a soft keyword: a type (or global/local) literally named `rule`
+  still parses. `rule g = rule { … }` is a global of type `rule` — two
+  identifiers after `rule` then `=`, not the `rule <anchor> <fn>` shape — so it
+  is never mistaken for a rule declaration.
+-#
+
+type rule {
+    public i32 v
+}
+
+rule g = rule { v = 5 }
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    rule r = rule { v = 4 }
+    return g.v + r.v
+}

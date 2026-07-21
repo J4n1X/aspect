@@ -322,6 +322,26 @@ fn build_program(path: &Path, preproc: &PreprocArgs) -> Result<Program> {
         eprintln!("{}", typechecker.format_warning(warning));
     }
 
+    // Governance rules (Phase 2a): judge the typed program. Error judgments
+    // fail the build; reports go to stderr like warnings.
+    let mut rule_errors = String::new();
+    for judgment in aspect::meta::run_rules(&program) {
+        let line = aspect::meta::format_judgment(&judgment, &program.source_files);
+        match judgment.severity {
+            aspect::meta::Severity::Error => {
+                let _ = writeln!(rule_errors, "{line}");
+            }
+            aspect::meta::Severity::Report => eprintln!("{line}"),
+        }
+    }
+    if !rule_errors.is_empty() {
+        anyhow::bail!(
+            "Rule checking failed for '{}':\n{}",
+            path.display(),
+            rule_errors.trim_end()
+        );
+    }
+
     Ok(program)
 }
 

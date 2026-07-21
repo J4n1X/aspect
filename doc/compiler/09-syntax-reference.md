@@ -394,7 +394,9 @@ they get their own chapter: [10-modules.md](10-modules.md).
 program ::= (newline* top-decl newline*)*
 
 vis-linkage ::= ('public' | 'export')*         # each at most once, either order
-top-decl ::= 'public'? extern-fn-decl
+top-decl ::= attr* item-decl
+           | rule-decl                          # governance rule; no attrs/vis/linkage
+item-decl ::= 'public'? extern-fn-decl
            | vis-linkage asm-fn-decl
            | vis-linkage fn-decl
            | vis-linkage global-var-decl
@@ -429,8 +431,8 @@ struct-decl ::= 'public'? 'type' ident '{'
                 '}'
 # `public type` exports the type-struct from its module; without it the type
 # is usable only inside the defining module — see "Visibility" below.
-struct-field  ::= 'public'? type ident                     # fields are private unless `public`
-struct-method ::= 'public'? 'const'? 'fn' ident '(' method-params ')' return-ann? newline* block
+struct-field  ::= attr* 'public'? type ident               # fields are private unless `public`
+struct-method ::= attr* 'public'? 'const'? 'fn' ident '(' method-params ')' return-ann? newline* block
 method-params ::= /* empty */
                 | 'this' (',' param-list)?                 # instance method
                 | param-list                               # static method (no `this`)
@@ -450,6 +452,20 @@ enum-variant ::= ident                     # value = declaration-order index (0,
 # both). At least one variant is required; there are no explicit `= N` values
 # and no payloads. Enum names may be referenced before their definition (a
 # name-collection prescan reserves them).
+
+rule-decl   ::= 'rule' rule-anchor ident term      # `rule <anchor> <checker-fn>`
+rule-anchor ::= ident | '@' ident                  # a type-struct name, or an attribute
+# `rule` is a *soft* keyword — a type or global literally named `rule` still
+# parses (`rule x = …`); a rule is detected by lookahead (`rule` followed by
+# `@`, or by two identifiers). A rule takes no `public`/`export`/attributes and
+# is always whole-program. `<checker-fn>` names a compiler builtin (Phase 2a:
+# `singleton`, `audit`); a later phase lets it name a user function. Rules are
+# post-typecheck judgments that only diagnose — see the metasystem design doc.
+
+attr ::= '@' ident ('(' (expr (',' expr)*)? ')')?  # inert metadata attached to the
+                                                   # following item, struct member, or
+                                                   # statement; never interpreted by the
+                                                   # parser — meaning is assigned by a rule
 
 param-list ::= /* empty */
              | param (',' param)*
