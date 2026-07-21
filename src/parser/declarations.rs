@@ -278,6 +278,7 @@ impl Parser {
             vis: Visibility::Private,
             export: false,
             attrs,
+            meta_kind: None,
             pos,
         };
 
@@ -405,6 +406,7 @@ impl Parser {
             vis,
             export,
             attrs,
+            meta_kind: None,
             pos,
         };
 

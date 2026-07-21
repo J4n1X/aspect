@@ -105,6 +105,7 @@ impl Parser {
                 vis,
                 export,
                 attrs,
+                meta_kind: None,
                 pos,
             },
             body: crate::parser::FunctionBody::Asm(AsmSpec {
@@ -179,6 +180,7 @@ impl Parser {
                 vis,
                 export,
                 attrs,
+                meta_kind: None,
                 pos,
             },
             body: crate::parser::FunctionBody::Naked(NakedSpec { lines, pos }),

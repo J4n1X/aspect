@@ -132,7 +132,7 @@ This is the **read/query/judgment** surface; construction is §8.
 | `meta_program_globals(H prog)` | `H` (`GlobalList`) | all global variables |
 | `meta_program_structs(H prog)` | `H` (`TypeList`) | all type-structs |
 | `meta_program_call_sites_of(H prog, u8* name)` | `H` (`ExprList`) | every direct call to `name` (mangled `Type$method` names literal) |
-| `meta_program_instantiations_of(H prog, H ty)` | `H` (`ExprList`) | struct-literal / alloc / value-decl sites of the struct type `ty` |
+| `meta_program_instantiations_of(H prog, u8* name)` | `H` (`ExprList`) | construction sites (struct-literal / `alloc`) of the named struct type — matches the Phase 2a `QueryIndex` "construction only" model (§10); the interface (`meta.ap`) takes the type **name**, not a `Type` handle |
 
 ### 6.2 Lists — one hand-monomorphized type per element (no generics)
 
@@ -310,3 +310,99 @@ append (never reorder).
 6. **Language-designer review.** This is a language-surface change; per repo rule
    it goes through the `language-designer` gate **before any compiler code is
    written** — i.e. once this interface + doc are approved by the owner.
+
+---
+
+## 10. Phase 2b — resolved execution model (2026-07-22)
+
+Owner design session + `language-designer` review (Approved with changes)
+resolved the open items for the first JIT'd-rules slice. This section is
+authoritative where it differs from §§1–9 above.
+
+### 10.1 Surface: the `rule fn` descriptor
+Rule checkers are ordinary Aspect functions marked with a **hook-specific,
+glanceable** descriptor: `rule fn <name>(...) -> ... { ... }`. The trio
+`rule fn` / `expansion fn` / `transform fn` (latter two later) each name their
+hook at a glance. `rule` is a **soft keyword**: `rule fn` is unambiguous because
+`fn` is a keyword (never a global of a type named `rule`); it is distinct from a
+`rule <anchor> <checker>` declaration and from `rule x = …`. A `rule fn` rejects
+`public`/`export`/`extern`/`asm`/`naked`/attributes. AST: `FunctionProto.meta_kind:
+Option<MetaKind>` (`MetaKind::Rule` today). *(Landed as sub-slice A.)*
+
+A metaprogramming function has three properties, all keyed on `meta_kind.is_some()`:
+`std/meta` is in scope in its body; it may **not** be called from ordinary code;
+it is codegen'd into the JIT-only **judge module**, never the artifact.
+
+### 10.2 Two LLVM modules (owner refinement — supersedes the §14.4 linkage knob)
+Meta functions and the injected `std/meta` wrappers + `extern fn meta_*`
+declarations are codegen'd into their **own** LLVM module — built for the **host**
+target, JIT-only, **never emitted**. The artifact module contains only ordinary
+code. Consequences: no linkage knob and no `globaldce` surgery (the judge module
+is ours; we simply don't strip its entry points); the `public` `meta.ap`
+forwarders can't leak into and break native links (they aren't in the artifact);
+and the "judge must be host-target" requirement is satisfied by construction (a
+program built with `--target i386-…` still JITs its rules for the host). Codegen
+partitions `program.functions` by `meta_kind` / defining module (`std/meta`):
+meta set → judge module, the rest → artifact.
+
+### 10.3 The gate (supersedes the §1.1/§5 "undefined type" language)
+Under conditional injection the special types are *present but tagged*, not
+absent, so the gate is: a reference to a `std/meta` symbol (a type/function whose
+defining module is `std/meta`) or a call to a meta function is legal **only inside
+a meta-function body** (and inside `std/meta` itself). Elsewhere it is a
+`"'Expr' is a meta-only type, usable only inside a rule fn"` error — a real
+diagnostic, not "undefined type". A helper that touches meta types must itself be
+a `rule fn` (meta fns may call meta fns); there is no other route to meta scope.
+
+### 10.4 Conditional injection
+`std/meta` is injected (its decls made available in the whole-program symbol
+table) **only when the program declares a meta function** — ordinary programs keep
+a clean namespace. Injection reuses the import machinery (a synthetic
+`std/meta` load via the `-I` roots). A user `type Program` / `type Fn` / … then
+collides with a reserved meta type → a clear `"'Fn' collides with a reserved
+std/meta type"` error, not a raw `DuplicateType`. Meta types are interned at the
+`prescan_type_names` stage so pass-2 `rule fn` bodies resolve them.
+
+### 10.5 Calling convention (BLOCKING fix from review)
+`rule fn f(Program, Type) -> Judgments` does **not** lower to `fn(u64,u64)->u64`:
+single-field `{u64}` structs pass `byval` with an `sret` return (`is_struct_value`,
+`src/codegen/functions.rs`). So the judge emits, per rule checker, a tiny
+**`u64`-ABI trampoline** — `<name>__entry(u64 prog, u64 anchor) -> u64` that builds
+the `{u64}` structs, calls the real meta fn via the true sret+byval ABI, and reads
+the returned handle field. `get_function_address` targets the trampoline, whose ABI
+genuinely is `fn(u64,u64)->u64`. Type-anchored checkers are exactly `(Program,
+Type) -> Judgments`; the second param's type is the anchor-kind encoding.
+Attribute-anchored checkers (`(Program, AttrList)`) are deferred — `rule @a <rulefn>`
+errors "attribute-anchored rule functions are not yet supported" for now.
+
+### 10.6 MetaCtx + arena
+One thread-local `MetaCtx` per rule invocation owns: a `u64`-handle arena over the
+live `&Program` and its `QueryIndex`, plus the source/string registries. `0` = null;
+every builtin bounds-checks its handle and, on a stale/foreign one, sets an error
+flag and returns `0`/null (**never** unwinds across the FFI boundary) — the judge
+checks the flag after the meta fn returns and raises a normal diagnostic. The arena
+is torn down when the invocation returns; storing a handle across invocations is UB,
+documented and unenforced (§3). `QueryIndex` must retain `&Expression` (not just
+`Position`) so `instantiations_of` can mint real `Expr` handles.
+
+### 10.7 Resolution order
+`rule <anchor> <name>` → builtin registry first (Phase 2a `singleton`/`audit`),
+else an in-scope `rule fn` named `<name>` with a matching signature, else an error.
+Specific diagnostics: an *ordinary* function used as a checker → "`<name>` is an
+ordinary function; a rule checker must be a `rule fn`"; a genuinely unknown name →
+did-you-mean over builtins **and** rule-fn names; a builtin-shadowed rule fn →
+documented (builtin wins).
+
+### 10.8 First-slice extern surface
+Only what a JIT'd `singleton` needs: `meta_program_instantiations_of`,
+`meta_exprlist_count`, `meta_exprlist_at`, `meta_expr_pos`, `meta_pos_line/column/file`,
+`meta_type_struct_name`, `meta_judgments_new`, `meta_judgment_error`,
+`meta_judgment_warn`. The remaining ~40 read-surface externs land incrementally.
+
+### 10.9 Build order
+- **A — `rule fn` descriptor** (parser/AST). *Landed 2026-07-22.*
+- **B — injection + gate**: conditional `std/meta` injection, the meta-only
+  reference/call gate, collision diagnostics.
+- **C — JIT vertical**: `MetaCtx`/arena + the §10.8 externs, the two-module split +
+  trampoline, `run_rules` dispatch to `rule fn` checkers. Proof: an end-to-end
+  JIT'd `singleton` written in Aspect.

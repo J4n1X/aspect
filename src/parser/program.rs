@@ -92,6 +92,35 @@ impl Parser {
                 continue;
             }
 
+            // `rule fn` — a rule-checker function (Phase 2b). `rule` is a soft
+            // keyword; `rule fn` is unambiguous because `fn` is a keyword (never
+            // a global of a type named `rule`). std/meta is in scope in its
+            // body, it may not be called from ordinary code, and it is codegen'd
+            // into the JIT-only judge module. (`expansion fn` / `transform fn`
+            // will join it as the other two hooks land.)
+            if self.is_rule_fn() {
+                Self::reject_attrs(&attrs, "a rule function")?;
+                if vis == Visibility::Public || export {
+                    return Err(ParserError::UnexpectedToken(
+                        "a rule function cannot be public or export".to_string(),
+                        vis_pos,
+                    ));
+                }
+                if let Some((kw, kw_pos)) = &kind {
+                    return Err(ParserError::UnexpectedToken(
+                        format!("a rule function cannot be {kw}"),
+                        *kw_pos,
+                    ));
+                }
+                self.advance(); // consume the `rule` soft keyword
+                let mut func =
+                    self.parse_function(false, Visibility::Private, false, Vec::new())?;
+                func.proto.meta_kind = Some(crate::parser::MetaKind::Rule);
+                functions.push(func);
+                skip_nl!();
+                continue;
+            }
+
             // `extern` may be `public` (nameable from importers) but never
             // `export`: there is no local symbol here to give external linkage.
             if is_extern && export {
@@ -302,6 +331,18 @@ impl Parser {
         }
         matches!(kind_at(1), Some(TokenKind::Identifier(_)))
             && matches!(kind_at(2), Some(TokenKind::Identifier(_)))
+    }
+
+    /// Lookahead-only detector for the `rule fn` soft keyword: the identifier
+    /// `rule` immediately before the `fn` keyword. Distinct from a `rule
+    /// <anchor> <checker>` declaration (`rule` before `@` or two identifiers)
+    /// and from a global of a type named `rule`. Consumes nothing.
+    fn is_rule_fn(&self) -> bool {
+        matches!(&self.peek().kind, TokenKind::Identifier(n) if n == "rule")
+            && matches!(
+                self.tokens.get(self.current + 1).map(|t| &t.kind),
+                Some(TokenKind::Keyword(Keyword::Fn))
+            )
     }
 
     /// Parse `rule <anchor> <checker_fn>` with the cursor on the `rule` soft
@@ -547,7 +588,7 @@ impl Parser {
 
 #[cfg(test)]
 mod tests {
-    use crate::parser::{Parser, Program, RuleAnchor};
+    use crate::parser::{MetaKind, Parser, Program, RuleAnchor};
 
     fn parse(source: &str) -> Program {
         let tokens = crate::lexer::tokenize(source.to_string()).expect("lex");
@@ -588,6 +629,33 @@ mod tests {
     fn public_rule_is_rejected() {
         let tokens =
             crate::lexer::tokenize("public rule Config singleton\nfn f() -> i32 {\n    return 0\n}".to_string())
+                .expect("lex");
+        assert!(Parser::new(tokens).parse_program().is_err());
+    }
+
+    /// `rule fn` marks a rule-checker function — and is a *function*, not a
+    /// `rule <anchor> <checker>` declaration (the `fn` disambiguates).
+    #[test]
+    fn rule_fn_is_marked() {
+        let program = parse("rule fn check(i32 x) -> i32 {\n    return x\n}");
+        assert_eq!(program.functions.len(), 1);
+        assert_eq!(program.functions[0].proto.meta_kind, Some(MetaKind::Rule));
+        assert_eq!(program.functions[0].proto.name, "check");
+        assert!(program.rules.is_empty());
+    }
+
+    /// An ordinary function has no meta kind.
+    #[test]
+    fn ordinary_fn_has_no_meta_kind() {
+        let program = parse("fn f() -> i32 {\n    return 0\n}");
+        assert_eq!(program.functions[0].proto.meta_kind, None);
+    }
+
+    /// A rule fn may not carry `public` — rejected at parse time.
+    #[test]
+    fn public_rule_fn_is_rejected() {
+        let tokens =
+            crate::lexer::tokenize("public rule fn f() -> i32 {\n    return 0\n}".to_string())
                 .expect("lex");
         assert!(Parser::new(tokens).parse_program().is_err());
     }

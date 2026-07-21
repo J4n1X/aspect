@@ -225,6 +225,15 @@ impl Statement {
     }
 }
 
+/// The metaprogramming hook a `<hook> fn` implements. The surface keyword is
+/// hook-specific and glanceable — `rule fn`, and later `expansion fn` /
+/// `transform fn` — while this enum is the shared category they all belong to.
+/// Only `Rule` exists today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetaKind {
+    Rule,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionProto {
     pub name: String,
@@ -241,6 +250,12 @@ pub struct FunctionProto {
     pub export: bool,
     /// Leading attributes in source order (outside-in, leftmost applied last).
     pub attrs: Vec<Attribute>,
+    /// Which metaprogramming hook this function implements, or `None` for an
+    /// ordinary function. A metaprogramming function (`rule fn` today) has
+    /// `std/meta` in scope, may not be called from ordinary code, and is
+    /// codegen'd into the JIT-only judge module — never the artifact. See
+    /// `doc/compiler/11-rules.md`.
+    pub meta_kind: Option<MetaKind>,
     pub pos: Position,
 }
 
