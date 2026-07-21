@@ -1,0 +1,284 @@
+# std/meta — the metaprogramming interface (INTERFACE ONLY; unimplemented).
+#
+# This is the Aspect-facing surface of the metasystem: opaque-handle wrappers
+# over the compiler's live AST, forwarding to `extern fn meta_*` builtins the
+# JIT side will implement later. See doc/plans/Meta-Module-JIT-Interface.md for
+# the contract each builtin must satisfy.
+#
+# Loading is IMPLICIT: `std/meta` is injected into the compilation of a
+# metaprogramming directive, never `$import`-ed. The `$module` line below only
+# gives it an identity so the interface parses/checks standalone.
+#
+# Scope: the READ / QUERY / JUDGMENT surface. Construction (`Ast.*` builders)
+# and `quote`/`$()` are deferred (their design is unsettled) — see the doc §8.
+#
+# Handle plumbing on every wrapper (classic OOP encapsulation — the raw arena
+# index is never a public field):
+#   - private `u64 handle`
+#   - `from_handle(u64) -> T`   wrap an extern's result       (static)
+#   - `raw(this) -> u64`        unwrap for a cross-type call   (instance)
+# Both are internal plumbing; a metaprogram uses the named methods below.
+$module std/meta
+
+# ── Kind tags (frozen contract; mirror the compiler enums) ───────────────────
+# `expr.kind()` / `stmt.kind()` / `ty.base()` return these. Append only.
+
+public const i32 EXPR_LITERAL       = 0
+public const i32 EXPR_VARIABLE      = 1
+public const i32 EXPR_BINARY        = 2
+public const i32 EXPR_COMPARISON    = 3
+public const i32 EXPR_REFERENCE     = 4
+public const i32 EXPR_DEREFERENCE   = 5
+public const i32 EXPR_UNARY_NOT     = 6
+public const i32 EXPR_BITWISE_NOT   = 7
+public const i32 EXPR_FUNCTION_CALL = 8
+public const i32 EXPR_CAST          = 9
+public const i32 EXPR_ALLOC         = 10
+public const i32 EXPR_LIST_INIT     = 11
+public const i32 EXPR_FIELD_ACCESS  = 12
+public const i32 EXPR_STRUCT_LITERAL = 13
+public const i32 EXPR_FUNCTION_REF  = 14
+public const i32 EXPR_INDIRECT_CALL = 15
+public const i32 EXPR_SIZEOF        = 16
+public const i32 EXPR_NULL          = 17
+public const i32 EXPR_VALUE_BLOCK   = 18
+public const i32 EXPR_METHOD_CALL   = 19
+
+public const i32 STMT_VAR_DECL      = 0
+public const i32 STMT_VAR_ASSIGN    = 1
+public const i32 STMT_DEREF_ASSIGN  = 2
+public const i32 STMT_FIELD_ASSIGN  = 3
+public const i32 STMT_RETURN        = 4
+public const i32 STMT_IF            = 5
+public const i32 STMT_WHILE         = 6
+public const i32 STMT_FOR           = 7
+public const i32 STMT_BLOCK         = 8
+public const i32 STMT_EXPRESSION    = 9
+public const i32 STMT_BREAK         = 10
+public const i32 STMT_CONTINUE      = 11
+
+public const i32 TYPE_SINT          = 0
+public const i32 TYPE_UINT          = 1
+public const i32 TYPE_SFLOAT        = 2
+public const i32 TYPE_VOID          = 3
+public const i32 TYPE_BOOL          = 4
+public const i32 TYPE_STRUCT        = 5
+public const i32 TYPE_FNPTR         = 6
+
+# ── Position ─────────────────────────────────────────────────────────────────
+public type Pos {
+    u64 handle
+    public fn from_handle(u64 h) -> Pos { return Pos { handle = h } }
+    public fn raw(this) -> u64 { return this.handle }
+
+    public fn line(this)   -> u64 { return meta_pos_line(this.handle) }
+    public fn column(this) -> u64 { return meta_pos_column(this.handle) }
+    public fn file(this)   -> u8* { return meta_pos_file(this.handle) }
+}
+
+# ── Type (resolved LangType) ─────────────────────────────────────────────────
+public type Type {
+    u64 handle
+    public fn from_handle(u64 h) -> Type { return Type { handle = h } }
+    public fn raw(this) -> u64 { return this.handle }
+
+    public fn base(this)          -> i32  { return meta_type_base(this.handle) }
+    public fn pointer_depth(this) -> u64  { return meta_type_pointer_depth(this.handle) }
+    public fn is_const(this)      -> bool { return meta_type_is_const(this.handle) }
+    public fn bits(this)          -> u64  { return meta_type_bits(this.handle) }
+    public fn struct_name(this)   -> u8*  { return meta_type_struct_name(this.handle) }
+}
+
+# ── Attribute ────────────────────────────────────────────────────────────────
+public type Attr {
+    u64 handle
+    public fn from_handle(u64 h) -> Attr { return Attr { handle = h } }
+    public fn raw(this) -> u64 { return this.handle }
+
+    public fn name(this)      -> u8* { return meta_attr_name(this.handle) }
+    public fn arg_count(this) -> u64 { return meta_attr_arg_count(this.handle) }
+    public fn arg_at(this, u64 i) -> Expr { return Expr.from_handle(meta_attr_arg_at(this.handle, i)) }
+}
+
+public type AttrList {
+    u64 handle
+    public fn from_handle(u64 h) -> AttrList { return AttrList { handle = h } }
+    public fn raw(this) -> u64 { return this.handle }
+
+    public fn count(this) -> u64 { return meta_attrlist_count(this.handle) }
+    public fn at(this, u64 i) -> Attr { return Attr.from_handle(meta_attrlist_at(this.handle, i)) }
+}
+
+# ── Expression ───────────────────────────────────────────────────────────────
+public type Expr {
+    u64 handle
+    public fn from_handle(u64 h) -> Expr { return Expr { handle = h } }
+    public fn raw(this) -> u64 { return this.handle }
+
+    public fn kind(this) -> i32  { return meta_expr_kind(this.handle) }
+    # `type` is a reserved keyword, so the resolved-type accessor is `type_of`.
+    public fn type_of(this) -> Type { return Type.from_handle(meta_expr_type(this.handle)) }
+    public fn pos(this)  -> Pos  { return Pos.from_handle(meta_expr_pos(this.handle)) }
+
+    # For a FUNCTION_CALL: the (mangled) callee name, and the argument list.
+    public fn callee_name(this) -> u8*      { return meta_expr_callee_name(this.handle) }
+    public fn args(this)        -> ExprList { return ExprList.from_handle(meta_expr_args(this.handle)) }
+
+    # Uniform sub-expression walk (operands / callee / base), kind-agnostic.
+    public fn child_count(this)      -> u64  { return meta_expr_child_count(this.handle) }
+    public fn child(this, u64 i)     -> Expr { return Expr.from_handle(meta_expr_child(this.handle, i)) }
+}
+
+public type ExprList {
+    u64 handle
+    public fn from_handle(u64 h) -> ExprList { return ExprList { handle = h } }
+    public fn raw(this) -> u64 { return this.handle }
+
+    public fn count(this) -> u64 { return meta_exprlist_count(this.handle) }
+    public fn at(this, u64 i) -> Expr { return Expr.from_handle(meta_exprlist_at(this.handle, i)) }
+}
+
+# ── Statement ────────────────────────────────────────────────────────────────
+public type Stmt {
+    u64 handle
+    public fn from_handle(u64 h) -> Stmt { return Stmt { handle = h } }
+    public fn raw(this) -> u64 { return this.handle }
+
+    public fn kind(this)  -> i32 { return meta_stmt_kind(this.handle) }
+    public fn pos(this)   -> Pos { return Pos.from_handle(meta_stmt_pos(this.handle)) }
+    public fn attrs(this) -> AttrList { return AttrList.from_handle(meta_stmt_attrs(this.handle)) }
+
+    # The expression of an EXPRESSION statement (null-handle otherwise).
+    public fn as_expr(this) -> Expr { return Expr.from_handle(meta_stmt_as_expr(this.handle)) }
+    # Nested statements (block / if / loop bodies), flattened one level.
+    public fn children(this) -> StmtList { return StmtList.from_handle(meta_stmt_children(this.handle)) }
+}
+
+public type StmtList {
+    u64 handle
+    public fn from_handle(u64 h) -> StmtList { return StmtList { handle = h } }
+    public fn raw(this) -> u64 { return this.handle }
+
+    public fn count(this) -> u64 { return meta_stmtlist_count(this.handle) }
+    public fn at(this, u64 i) -> Stmt { return Stmt.from_handle(meta_stmtlist_at(this.handle, i)) }
+}
+
+# ── Function ─────────────────────────────────────────────────────────────────
+public type Fn {
+    u64 handle
+    public fn from_handle(u64 h) -> Fn { return Fn { handle = h } }
+    public fn raw(this) -> u64 { return this.handle }
+
+    public fn name(this)      -> u8*  { return meta_fn_name(this.handle) }
+    public fn is_public(this) -> bool { return meta_fn_is_public(this.handle) }
+    public fn is_export(this) -> bool { return meta_fn_is_export(this.handle) }
+    public fn is_extern(this) -> bool { return meta_fn_is_extern(this.handle) }
+
+    public fn param_count(this)       -> u64  { return meta_fn_param_count(this.handle) }
+    public fn param_type(this, u64 i) -> Type { return Type.from_handle(meta_fn_param_type(this.handle, i)) }
+    public fn return_type(this)       -> Type { return Type.from_handle(meta_fn_return_type(this.handle)) }
+
+    public fn body(this)  -> StmtList { return StmtList.from_handle(meta_fn_body(this.handle)) }
+    public fn attrs(this) -> AttrList { return AttrList.from_handle(meta_fn_attrs(this.handle)) }
+    public fn pos(this)   -> Pos      { return Pos.from_handle(meta_fn_pos(this.handle)) }
+}
+
+public type FnList {
+    u64 handle
+    public fn from_handle(u64 h) -> FnList { return FnList { handle = h } }
+    public fn raw(this) -> u64 { return this.handle }
+
+    public fn count(this) -> u64 { return meta_fnlist_count(this.handle) }
+    public fn at(this, u64 i) -> Fn { return Fn.from_handle(meta_fnlist_at(this.handle, i)) }
+}
+
+# ── Program (the query root) ─────────────────────────────────────────────────
+public type Program {
+    u64 handle
+    public fn from_handle(u64 h) -> Program { return Program { handle = h } }
+    public fn raw(this) -> u64 { return this.handle }
+
+    public fn functions(this) -> FnList { return FnList.from_handle(meta_program_functions(this.handle)) }
+
+    # Every direct call to `name` (mangled `Type$method` names literal).
+    public fn call_sites_of(this, u8* name) -> ExprList {
+        return ExprList.from_handle(meta_program_call_sites_of(this.handle, name))
+    }
+    # Struct-literal / alloc / value-decl sites of a type, addressed by name.
+    public fn instantiations_of(this, u8* type_name) -> ExprList {
+        return ExprList.from_handle(meta_program_instantiations_of(this.handle, type_name))
+    }
+}
+
+# ── Judgments (the only "write" a rule may do) ───────────────────────────────
+public type Judgments {
+    u64 handle
+    public fn from_handle(u64 h) -> Judgments { return Judgments { handle = h } }
+    public fn raw(this) -> u64 { return this.handle }
+
+    public fn new() -> Judgments { return Judgments.from_handle(meta_judgments_new()) }
+
+    # An error fails the build; a warning goes to stderr and the build continues.
+    public fn error(this, Pos p, u8* msg) { meta_judgment_error(this.handle, p.raw(), msg) }
+    public fn warn(this, Pos p, u8* msg)  { meta_judgment_warn(this.handle, p.raw(), msg) }
+    public fn count(this) -> u64 { return meta_judgments_count(this.handle) }
+}
+
+# ── extern builtins (the JIT-side contract; implemented in Rust later) ────────
+# Handles cross as bare u64; strings as u8*; 0 is the null handle. See the doc.
+
+extern fn meta_pos_line(u64 h)   -> u64
+extern fn meta_pos_column(u64 h) -> u64
+extern fn meta_pos_file(u64 h)   -> u8*
+
+extern fn meta_type_base(u64 h)          -> i32
+extern fn meta_type_pointer_depth(u64 h) -> u64
+extern fn meta_type_is_const(u64 h)      -> bool
+extern fn meta_type_bits(u64 h)          -> u64
+extern fn meta_type_struct_name(u64 h)   -> u8*
+
+extern fn meta_attr_name(u64 h)          -> u8*
+extern fn meta_attr_arg_count(u64 h)     -> u64
+extern fn meta_attr_arg_at(u64 h, u64 i) -> u64
+extern fn meta_attrlist_count(u64 h)     -> u64
+extern fn meta_attrlist_at(u64 h, u64 i) -> u64
+
+extern fn meta_expr_kind(u64 h)          -> i32
+extern fn meta_expr_type(u64 h)          -> u64
+extern fn meta_expr_pos(u64 h)           -> u64
+extern fn meta_expr_callee_name(u64 h)   -> u8*
+extern fn meta_expr_args(u64 h)          -> u64
+extern fn meta_expr_child_count(u64 h)   -> u64
+extern fn meta_expr_child(u64 h, u64 i)  -> u64
+extern fn meta_exprlist_count(u64 h)     -> u64
+extern fn meta_exprlist_at(u64 h, u64 i) -> u64
+
+extern fn meta_stmt_kind(u64 h)          -> i32
+extern fn meta_stmt_pos(u64 h)           -> u64
+extern fn meta_stmt_attrs(u64 h)         -> u64
+extern fn meta_stmt_as_expr(u64 h)       -> u64
+extern fn meta_stmt_children(u64 h)      -> u64
+extern fn meta_stmtlist_count(u64 h)     -> u64
+extern fn meta_stmtlist_at(u64 h, u64 i) -> u64
+
+extern fn meta_fn_name(u64 h)            -> u8*
+extern fn meta_fn_is_public(u64 h)       -> bool
+extern fn meta_fn_is_export(u64 h)       -> bool
+extern fn meta_fn_is_extern(u64 h)       -> bool
+extern fn meta_fn_param_count(u64 h)     -> u64
+extern fn meta_fn_param_type(u64 h, u64 i) -> u64
+extern fn meta_fn_return_type(u64 h)     -> u64
+extern fn meta_fn_body(u64 h)            -> u64
+extern fn meta_fn_attrs(u64 h)           -> u64
+extern fn meta_fn_pos(u64 h)             -> u64
+extern fn meta_fnlist_count(u64 h)       -> u64
+extern fn meta_fnlist_at(u64 h, u64 i)   -> u64
+
+extern fn meta_program_functions(u64 h)                 -> u64
+extern fn meta_program_call_sites_of(u64 h, u8* name)   -> u64
+extern fn meta_program_instantiations_of(u64 h, u8* nm) -> u64
+
+extern fn meta_judgments_new()                        -> u64
+extern fn meta_judgment_error(u64 js, u64 pos, u8* m) -> u0
+extern fn meta_judgment_warn(u64 js, u64 pos, u8* m)  -> u0
+extern fn meta_judgments_count(u64 h)                 -> u64
