@@ -110,6 +110,50 @@ root module does not import
 Want it? Import it yourself. This is real encapsulation: a module's
 dependencies are its own business, and every file states what it uses.
 
+## Type-struct visibility: `public type`
+
+Importing a module is necessary but not sufficient to use its
+type-structs. A `type` is **private to its defining module** by default;
+`public type Name { ... }` exports it. The gate fires wherever the type
+is *used* from another module — naming it (declarations, casts, `sizeof`,
+struct literals, the `Type` in a static `Type.method` call) and calling
+its methods, including on an instance:
+
+```
+error: type-struct 'Secret' is private to module 'shapes' and cannot be
+used from the root module — declare it `public type` to export it
+```
+
+The rules that fall out:
+
+- A member's own `public` is capped by the type's: a `public fn` on a
+  private type is callable anywhere in the defining module, never
+  outside it.
+- **Values still flow.** Outside code may hold a foreign private type's
+  value — returned from and passed back into the defining module's
+  public functions — it just cannot name the type or call methods on it.
+  Since Aspect has no type inference, a by-value foreign private struct
+  cannot even be bound to a local outside its module; the practical
+  opaque-handle shape is a pointer, handed out as `T*` and held as `u0*`.
+- **v1 caveat — public fields are not yet gated.** A `public` *field* of
+  a foreign private type is currently readable **and writable** through
+  a legally obtained instance: field access is enforced by the
+  typechecker, which has no file-to-module map today, so only member
+  visibility applies. A private type that keeps its fields private is
+  fully opaque; one with public fields is methods-opaque but
+  fields-transparent. Pinned by
+  `tests/programs/module_private_field_access.ap`; the gate lands when
+  `Program::file_modules` does.
+- An alias does not launder privacy: a visible alias whose target is a
+  private type-struct fails the same check at the use site.
+- `public` does not bypass the import rule — an exported type is still
+  invisible to modules that don't import its module.
+
+Like `file_id`, the visibility is captured by the parser's type-name
+prescan (`public` token directly before `type`) so it is known before any
+body parses — under import cycles a module's uses can legally precede
+the definition in the inlined stream.
+
 ## v1 caveat: load units, not namespaces
 
 The symbol table stays **flat**. There is no `io.println` syntax; a

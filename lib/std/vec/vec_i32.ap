@@ -38,7 +38,7 @@ $else
 $import std/c/stdlib
 $endif
 
-type VecI32 {
+public type VecI32 {
     i32* data         # private - heap buffer (NULL when capacity == 0)
     u64 length        # private - element count
     u64 capacity      # private - allocated slots (in elements, not bytes)

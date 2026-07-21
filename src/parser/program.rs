@@ -82,18 +82,21 @@ impl Parser {
                 ));
             }
 
-            // `public` answers "does this symbol leave the object file", which
-            // only a function this module defines can.
+            // `public` answers "does this symbol leave the object file" for
+            // functions and globals, and "is this type nameable from other
+            // modules" for type-structs.
             let defines_a_fn = matches!(&kind, Some((Keyword::Asm, _) | (Keyword::Naked, _)))
                 || (self.check_keyword(&Keyword::Fn) && !self.starts_fnptr_var_decl());
+            let defines_a_type = self.check_keyword(&Keyword::Type);
             let defines_a_global = matches!(
                 self.peek().kind,
                 TokenKind::LangType(_) | TokenKind::Identifier(_)
             ) || self.starts_fnptr_var_decl() || self.starts_grouped_var_decl();
 
-            if vis == Visibility::Public && !defines_a_fn && !defines_a_global {
+            if vis == Visibility::Public && !defines_a_fn && !defines_a_type && !defines_a_global {
                 return Err(ParserError::UnexpectedToken(
-                    "public can only be used with functions or global variables".to_string(),
+                    "public can only be used with functions, global variables, or type definitions"
+                        .to_string(),
                     vis_pos,
                 ));
             }
@@ -212,21 +215,34 @@ impl Parser {
     /// Pre-register every `type <Name>` struct name with a reserved id before
     /// the main parse, so named types resolve regardless of declaration order
     /// (and self/mutually-referential structs work). Records each name's
-    /// declaring file (the `type` keyword's `pos.file_id`) for the
-    /// import-visibility check. Does not consume tokens.
+    /// declaring file (the `type` keyword's `pos.file_id`) and its module
+    /// visibility (a directly preceding `public` keyword) for the visibility
+    /// checks — both must be known at intern time, since import cycles can
+    /// legally place a module's *uses* of a struct before its definition in
+    /// the inlined token stream. Does not consume tokens.
     fn prescan_type_names(&mut self) {
-        let names: Vec<(String, u32)> = self
+        let names: Vec<(String, u32, Visibility)> = self
             .tokens
             .windows(2)
-            .filter_map(|w| match (&w[0].kind, &w[1].kind) {
+            .enumerate()
+            .filter_map(|(i, w)| match (&w[0].kind, &w[1].kind) {
                 (TokenKind::Keyword(Keyword::Type), TokenKind::Identifier(name)) => {
-                    Some((name.clone(), w[0].pos.file_id))
+                    let vis = if i > 0
+                        && matches!(
+                            self.tokens[i - 1].kind,
+                            TokenKind::Keyword(Keyword::Public)
+                        ) {
+                        Visibility::Public
+                    } else {
+                        Visibility::Private
+                    };
+                    Some((name.clone(), w[0].pos.file_id, vis))
                 }
                 _ => None,
             })
             .collect();
-        for (name, file_id) in names {
-            self.module.intern_struct(&name, file_id);
+        for (name, file_id, vis) in names {
+            self.module.intern_struct(&name, file_id, vis);
         }
     }
 

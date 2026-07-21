@@ -36,7 +36,7 @@ $import std/c/stdlib
 $import std/c/string
 $endif
 
-type String {
+public type String {
     u8* data        # private - null-terminated heap buffer
     u64 length      # private - byte count excluding the terminator
     u64 capacity    # private - allocation size (always >= length + 1)

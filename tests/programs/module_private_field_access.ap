@@ -1,0 +1,19 @@
+# expected: 9
+# compile_args: "-I", "tests/modules"
+#-
+  v1 caveat pin: `public` fields of a foreign *private* type are reachable
+  through a legally obtained instance — reads AND writes — because field
+  access is enforced by the typechecker, which has no file-to-module map
+  yet. Methods on the same instance ARE gated (see
+  failures/module_private_instance_method.ap). This test pins today's
+  permissive behavior so the eventual field gate is a conscious flip: when
+  it lands, this file should move to failures/ with the PrivateType
+  fragments.
+-#
+
+$import shapes
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    shared_handle.tag = 4          # write through the instance: ungated (v1)
+    return shared_handle.tag + 5   # read: ungated (v1) → 9
+}

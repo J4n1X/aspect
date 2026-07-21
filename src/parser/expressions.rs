@@ -192,25 +192,26 @@ impl Parser {
         ))
     }
 
-    /// Import-visibility check for a method call. A method's visibility
-    /// follows its mangled free function's defining file (the file of the
-    /// `type` body that declared it — necessarily the file that declared the
-    /// type-struct itself). A mangled name that resolves to nothing is left
-    /// for the regular unknown-method diagnostics downstream.
-    fn check_method_visibility(
-        &self,
-        type_name: &str,
-        method_name: &str,
-        mangled: &str,
-        use_pos: Position,
-    ) -> Result<(), ParserError> {
-        if let Some(func) = self.module.lookup_function(mangled) {
-            self.check_import_visibility(
-                "method",
-                &format!("{type_name}.{method_name}"),
-                func.pos.file_id,
-                use_pos,
-            )?;
+    /// Visibility check for *using* a type-struct: naming it (type
+    /// annotation, struct literal, the `Type` in a static `Type.method`
+    /// reference) or calling any of its methods, including on an instance.
+    /// Two gates, in order: the defining module must be the referring module
+    /// or one of its direct imports (the general import rule), and a
+    /// cross-module use additionally requires the struct to be declared
+    /// `public type` (module encapsulation). A member's own `public` is
+    /// capped by the type's: a public method of a private type is visible
+    /// module-wide but never outside it. Values of a foreign private type
+    /// may still *flow* through outside code (returned from and passed back
+    /// into the defining module's public functions).
+    fn check_struct_visibility(&self, id: u32, use_pos: Position) -> Result<(), ParserError> {
+        let info = self.module.struct_info(id);
+        self.check_import_visibility("type-struct", &info.name, info.file_id, use_pos)?;
+        let def_module = self.module_of_file(info.file_id);
+        let use_module = self.module_of_file(use_pos.file_id);
+        if info.vis == crate::symbol::module::Visibility::Private && def_module != use_module {
+            return Err(ParserError::private_type(
+                &info.name, def_module, use_module, use_pos,
+            ));
         }
         Ok(())
     }
@@ -758,8 +759,7 @@ impl Parser {
                 if let Some(id) = self.module.struct_id(&name)
                     && self.check(&TokenKind::OpenBrace)
                 {
-                    let def_file_id = self.module.struct_info(id).file_id;
-                    self.check_import_visibility("type-struct", &name, def_file_id, pos)?;
+                    self.check_struct_visibility(id, pos)?;
                     return self.parse_struct_literal(id, pos);
                 }
                 self.variable_reference(name, pos)
@@ -905,10 +905,15 @@ impl Parser {
                 self.advance();
                 let base = if let Some(info) = self.module.alias_info(&name) {
                     self.check_import_visibility("type alias", &name, info.file_id, pos)?;
+                    // An alias is a name binding, not an export: aliasing a
+                    // type-struct does not launder its module visibility, so
+                    // the underlying struct is checked as if named directly.
+                    if let TypeBase::Struct(id) = info.ty.base {
+                        self.check_struct_visibility(id, pos)?;
+                    }
                     info.ty
                 } else if let Some(id) = self.module.struct_id(&name) {
-                    let def_file_id = self.module.struct_info(id).file_id;
-                    self.check_import_visibility("type-struct", &name, def_file_id, pos)?;
+                    self.check_struct_visibility(id, pos)?;
                     LangType::struct_type(id)
                 } else {
                     return Err(ParserError::UndefinedType(name, pos));
@@ -1167,9 +1172,9 @@ impl Parser {
             && self.symbol_table.lookup_variable(var_name).is_none()
             && self.module.struct_info(id).methods.contains_key(&name)
         {
+            self.check_struct_visibility(id, pos)?;
             let type_name = self.module.struct_info(id).name.clone();
             let mangled = crate::symbol::module::mangle_method(&type_name, &name);
-            self.check_method_visibility(&type_name, &name, &mangled, pos)?;
             let (params, return_type) = self.module.lookup_function(&mangled).map_or_else(
                 || (Vec::new(), LangType::VOID),
                 |f| {
@@ -1219,6 +1224,7 @@ impl Parser {
             && let Some(id) = self.module.struct_id(var_name)
             && self.symbol_table.lookup_variable(var_name).is_none()
         {
+            self.check_struct_visibility(id, pos)?;
             let type_name = self.module.struct_info(id).name.clone();
             // Strict: the static-call form must resolve to a static method (one
             // declared without `this`). An instance method declared `fn m(this,
@@ -1236,7 +1242,6 @@ impl Parser {
                 ));
             }
             let mangled = crate::symbol::module::mangle_method(&type_name, method_name);
-            self.check_method_visibility(&type_name, method_name, &mangled, pos)?;
             let return_type = self.module.lookup_function(&mangled).map_or_else(
                 || LangType::VOID,
                 |f| f.return_type,
@@ -1263,6 +1268,10 @@ impl Parser {
                 ));
             }
         };
+        // A private type's methods are at most module-visible, however
+        // `public` the member itself is — so instance calls are gated on the
+        // type's module visibility exactly like naming it.
+        self.check_struct_visibility(id, pos)?;
         let type_name = self.module.struct_info(id).name.clone();
         // Strict: the instance-call form must resolve to an instance method.
         // A static method (no `this`) must be invoked as `Type.method(...)`,
@@ -1279,7 +1288,6 @@ impl Parser {
             ));
         }
         let mangled = crate::symbol::module::mangle_method(&type_name, method_name);
-        self.check_method_visibility(&type_name, method_name, &mangled, pos)?;
         let return_type = self.module.lookup_function(&mangled).map_or_else(
             || LangType::VOID,
             |f| f.return_type,
@@ -1452,5 +1460,33 @@ mod tests {
         assert!(p
             .check_import_visibility("function", "f", 4, site(9))
             .is_ok());
+    }
+
+    #[test]
+    fn private_type_is_module_visible_only() {
+        use crate::symbol::module::Visibility;
+        let mut p = parser_with_modules();
+        let id = p.module.intern_struct("Secret", 1, Visibility::Private);
+        // Inside its own module the type is freely usable.
+        assert!(p.check_struct_visibility(id, site(1)).is_ok());
+        // From an importing module, privacy blocks it.
+        let err = p.check_struct_visibility(id, site(0)).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "type-struct 'Secret' is private to module 'mid' and cannot be used from \
+             the root module — declare it `public type` to export it at 3:7"
+        );
+        assert_eq!(err.position(), Some(site(0)));
+    }
+
+    #[test]
+    fn public_type_is_visible_to_importers_only() {
+        use crate::symbol::module::Visibility;
+        let mut p = parser_with_modules();
+        let id = p.module.intern_struct("Pair", 1, Visibility::Public);
+        // The root imports `mid`, so the exported type is visible there.
+        assert!(p.check_struct_visibility(id, site(0)).is_ok());
+        // `public` does not bypass the import rule: `hidden` does not import `mid`.
+        assert!(p.check_struct_visibility(id, site(2)).is_err());
     }
 }

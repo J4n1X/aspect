@@ -1,4 +1,4 @@
-# expected: "public can only be used with functions"
+# expected: "public can only be used with functions, global variables, or type definitions"
 # `public` decides whether a symbol leaves the object file. An alias is a
 # compile-time typedef — it has no symbol to export.
 

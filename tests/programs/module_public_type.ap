@@ -1,0 +1,19 @@
+# expected: 17
+# compile_args: "-I", "tests/modules"
+#-
+  `public type` exports a type-struct across module boundaries: naming it
+  (declarations, struct literals) and calling its methods (static and
+  instance) all work from an importing module. Values of the module-private
+  `Secret` type may still flow through this file — returned from and passed
+  back into the defining module's public functions — as long as the type is
+  never named and no method is called on it here.
+-#
+
+$import shapes
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Pair p = Pair.make(3, 4)          # static factory on an exported type
+    Pair q = Pair { a = 2, b = 3 }    # struct literal
+    # Secret values pass through opaquely: 7 + 5 + secret_get(secret_make(5))
+    return p.sum() + q.sum() + secret_get(secret_make(5))
+}

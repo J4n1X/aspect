@@ -6,7 +6,7 @@ $module hidden
 
 alias HiddenInt i64
 
-type HiddenBox {
+public type HiddenBox {
     public i32 stored
 
     public fn make(i32 v) -> HiddenBox {

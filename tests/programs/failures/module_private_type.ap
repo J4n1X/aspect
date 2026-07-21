@@ -1,0 +1,11 @@
+# expected: "type-struct 'Secret' is private to module 'shapes'", "public type"
+# compile_args: "-I", "tests/modules"
+# Naming a module-private type from an importing module is an error, even
+# though the module itself is imported and values of the type flow freely.
+
+$import shapes
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Secret s = secret_make(1)
+    return secret_get(s)
+}

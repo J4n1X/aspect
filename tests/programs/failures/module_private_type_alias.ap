@@ -1,0 +1,12 @@
+# expected: "type-struct 'Secret' is private to module 'shapes'"
+# compile_args: "-I", "tests/modules"
+# An alias does not launder privacy: `SecretAlias` is visible under the
+# import rule, but resolving it to the module-private `Secret` fails the
+# type's own visibility check at this use site.
+
+$import shapes
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    SecretAlias s = secret_make(1)
+    return secret_get(s)
+}

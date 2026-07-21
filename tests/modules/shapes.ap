@@ -1,0 +1,55 @@
+#-
+  Fixture for type-struct module visibility. `Pair` is exported
+  (`public type`); `Secret` is module-private but hands values across the
+  boundary through public functions — outside code may pass them around,
+  yet cannot name the type or call its methods.
+-#
+$module shapes
+
+public type Pair {
+    public i32 a
+    public i32 b
+
+    public fn sum(this) -> i32 {
+        return this.a + this.b
+    }
+
+    public fn make(i32 a, i32 b) -> Pair {
+        return Pair { a = a, b = b }
+    }
+}
+
+type Secret {
+    i32 x
+
+    # Member `public` is capped by the type's visibility: usable anywhere in
+    # this module, invisible outside it.
+    public fn get(this) -> i32 {
+        return this.x
+    }
+
+    public fn make(i32 x) -> Secret {
+        return Secret { x = x }
+    }
+}
+
+public fn secret_make(i32 x) -> Secret {
+    return Secret.make(x)
+}
+
+public fn secret_get(Secret s) -> i32 {
+    return s.get()
+}
+
+# An alias does not launder privacy: importers can see the alias (import
+# rule), but resolving it to the private struct fails at their use site.
+alias SecretAlias Secret
+
+# v1 caveat surface: a private type with a public field, reachable through
+# a module global. Importers cannot name `Handle`, but field access on the
+# instance is not yet module-gated (see module_private_field_access.ap).
+type Handle {
+    public i32 tag
+}
+
+Handle shared_handle = Handle { tag = 1 }

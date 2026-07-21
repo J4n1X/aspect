@@ -47,6 +47,18 @@ pub enum ParserError {
         pos: Position,
     },
 
+    /// A cross-module use of a type-struct that is not `public` — naming it
+    /// or calling its methods: the defining module is imported, but the type
+    /// itself was not exported. `defining`/`referring` arrive pre-rendered
+    /// via [`ParserError::private_type`].
+    #[error("type-struct '{name}' is private to {defining} and cannot be used from {referring} — declare it `public type` to export it at {pos}")]
+    PrivateType {
+        name: String,
+        defining: String,
+        referring: String,
+        pos: Position,
+    },
+
     #[error("Function '{0}' expects {1} arguments but got {2} at {3}")]
     ArgumentCountMismatch(String, usize, usize, Position),
 
@@ -102,9 +114,19 @@ impl ParserError {
         }
     }
 
-    /// Build a [`ParserError::NotImported`], rendering each module path for
-    /// the message: the anonymous root module (the empty string) reads as
-    /// `the root module`, anything else as `module '<path>'`.
+    /// Render a module path for an error message: the anonymous root module
+    /// (the empty string) reads as `the root module`, anything else as
+    /// `module '<path>'`.
+    fn describe_module(module: &str) -> String {
+        if module.is_empty() {
+            "the root module".to_string()
+        } else {
+            format!("module '{module}'")
+        }
+    }
+
+    /// Build a [`ParserError::NotImported`], rendering each module path via
+    /// [`ParserError::describe_module`].
     #[must_use]
     pub(crate) fn not_imported(
         kind: &'static str,
@@ -113,18 +135,28 @@ impl ParserError {
         referring_module: &str,
         pos: Position,
     ) -> Self {
-        let describe = |module: &str| {
-            if module.is_empty() {
-                "the root module".to_string()
-            } else {
-                format!("module '{module}'")
-            }
-        };
         ParserError::NotImported {
             kind,
             name: name.into(),
-            defining: describe(defining_module),
-            referring: describe(referring_module),
+            defining: Self::describe_module(defining_module),
+            referring: Self::describe_module(referring_module),
+            pos,
+        }
+    }
+
+    /// Build a [`ParserError::PrivateType`], rendering each module path via
+    /// [`ParserError::describe_module`].
+    #[must_use]
+    pub(crate) fn private_type(
+        name: impl Into<String>,
+        defining_module: &str,
+        referring_module: &str,
+        pos: Position,
+    ) -> Self {
+        ParserError::PrivateType {
+            name: name.into(),
+            defining: Self::describe_module(defining_module),
+            referring: Self::describe_module(referring_module),
             pos,
         }
     }

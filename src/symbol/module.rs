@@ -79,6 +79,13 @@ pub struct StructInfo {
     /// struct — the provenance the import-visibility check resolves to a
     /// defining module.
     pub file_id: u32,
+    /// Module visibility of the type itself: `public type` opts the struct
+    /// into being nameable from other modules; the default is private to its
+    /// defining module. Like `file_id`, this is a declaration-site fact fixed
+    /// at intern (prescan) time — it must be known before the `type` body
+    /// parses, because under import cycles a module's uses can legally
+    /// precede the definition in the inlined token stream.
+    pub vis: Visibility,
     /// Fields in declaration/layout order. Empty until [`ModuleSymbols::set_fields`].
     pub fields: Vec<FieldInfo>,
     /// Field name -> index into `fields` (mirrors the LLVM struct element order).
@@ -175,14 +182,15 @@ impl ModuleSymbols {
 
     /// Reserve an id for a struct name, creating an empty (body-less) entry.
     /// `file_id` records the declaring file (from the `type` keyword token)
-    /// for the import-visibility check.
+    /// and `vis` the declared module visibility (`public type` vs `type`),
+    /// both consumed by the visibility checks.
     ///
     /// Called during the parser's name-collection prescan so that struct names
     /// resolve regardless of declaration order (including self/mutual reference).
     /// Returns the existing id if the name was already interned (the first
-    /// declaration's `file_id` wins; a second `type` body for the same name
-    /// is a duplicate-type error downstream).
-    pub fn intern_struct(&mut self, name: &str, file_id: u32) -> u32 {
+    /// declaration's `file_id`/`vis` win; a second `type` body for the same
+    /// name is a duplicate-type error downstream).
+    pub fn intern_struct(&mut self, name: &str, file_id: u32, vis: Visibility) -> u32 {
         if let Some(&id) = self.structs_by_name.get(name) {
             return id;
         }
@@ -192,6 +200,7 @@ impl ModuleSymbols {
             id,
             name: name.to_string(),
             file_id,
+            vis,
             fields: Vec::new(),
             field_index: HashMap::new(),
             methods: HashMap::new(),

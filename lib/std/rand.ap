@@ -19,7 +19,7 @@
 -#
 $module std/rand
 
-type Rng {
+public type Rng {
     u64 state       # private — never zero
 
     # The only constructor. A zero seed is remapped to a fixed odd

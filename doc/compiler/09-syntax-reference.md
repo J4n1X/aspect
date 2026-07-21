@@ -386,8 +386,9 @@ top-decl ::= extern-fn-decl
            | 'public'? global-var-decl
            | alias-decl
            | struct-decl
-# `public` marks a symbol this file defines as exported. `public extern` and
-# `public` on an alias/type are errors — see "Visibility" below.
+# On a fn/global, `public` marks the symbol as exported from the object file.
+# On a `type` (see struct-decl) it exports the type from its module instead.
+# `public extern` and `public` on an alias are errors — see "Visibility" below.
 
 extern-fn-decl ::= 'extern' 'fn' ident '(' param-list ')' return-ann term
 
@@ -406,10 +407,12 @@ global-var-decl ::= type ident ('=' expr)? term
 
 alias-decl ::= 'alias' ident type term    # compile-time typedef
 
-struct-decl ::= 'type' ident '{'
+struct-decl ::= 'public'? 'type' ident '{'
                   newline* (struct-field (term newline*)?)*
                   newline* (struct-method (term newline*)?)*
                 '}'
+# `public type` exports the type-struct from its module; without it the type
+# is usable only inside the defining module — see "Visibility" below.
 struct-field  ::= 'public'? type ident                     # fields are private unless `public`
 struct-method ::= 'public'? 'const'? 'fn' ident '(' method-params ')' return-ann? newline* block
 method-params ::= /* empty */
@@ -769,8 +772,17 @@ public would put the entire unused standard library in every binary.
 - `public` on a **global variable** works the same way: `public i32 counter = 0`
   gets external linkage, a private one gets `private` linkage and is collected
   when unused.
-- `public` on an alias or a type is an error — both are compile-time only and
-  have no symbol to export.
+- `public` on a **type-struct** is about *module visibility*, not linkage (a
+  type has no symbol): a plain `type` is usable only inside its defining
+  module, while `public type` may be named — and have its methods called —
+  from any module that imports the defining one. A member's own `public` is
+  capped by the type's: a `public fn` on a private type is callable anywhere
+  in the defining module, never outside it. Values of a foreign private type
+  still flow through outside code as opaque handles (returned from and passed
+  back into the module's public functions); an alias does not launder the
+  privacy of its target. See `10-modules.md` for the full rules.
+- `public` on an alias is an error — an alias is compile-time only and has
+  no symbol to export.
 - Inside a type-struct, `public` means something different — access through
   the type. See [Type-structs](#top-level).
 

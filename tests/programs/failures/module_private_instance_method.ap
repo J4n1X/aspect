@@ -1,0 +1,11 @@
+# expected: "type-struct 'Secret' is private to module 'shapes'"
+# compile_args: "-I", "tests/modules"
+# A private type's methods are at most module-visible: even a `public fn`
+# member cannot be called on an instance from outside the defining module.
+# (The value itself arrives legally through the module's public API.)
+
+$import shapes
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return secret_make(1).get()
+}

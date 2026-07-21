@@ -35,7 +35,7 @@ $import std/c/stdlib
 $import std/c/string
 $endif
 
-type MapStrI64 {
+public type MapStrI64 {
     u8** keys       # private — owned key copies; null = empty slot
     i64* vals       # private — value for the key in the same slot
     u64 count       # private — live entries

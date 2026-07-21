@@ -1,7 +1,8 @@
-# expected: "method 'HiddenBox.make' is defined in module 'hidden'", "the root module does not import"
+# expected: "type-struct 'HiddenBox' is defined in module 'hidden'", "the root module does not import"
 # compile_args: "-I", "tests/modules"
 # A method's visibility follows its type-struct's module: the entry
-# imports `middle` only, so calling a `hidden` type's method is an error.
+# imports `middle` only, so calling a `hidden` type's method fails the
+# type-struct import gate (method dispatch names the type).
 
 $import middle
 

@@ -1,0 +1,10 @@
+# expected: "type-struct 'Secret' is private to module 'shapes'"
+# compile_args: "-I", "tests/modules"
+# A static method call names the type, so it is gated on the type's module
+# visibility — the method's own `public` cannot override it.
+
+$import shapes
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return secret_get(Secret.make(1))
+}

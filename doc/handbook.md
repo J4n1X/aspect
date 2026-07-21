@@ -799,12 +799,15 @@ Globals take it too — `public i32 counter = 0` is exported, a plain one is
 private and collected when unused.
 
 `public extern fn` is an error — `extern` names a function defined elsewhere,
-so there is nothing to export. So is `public` on an alias or a type: both are
-compile-time only and have no symbol.
+so there is nothing to export. So is `public` on an alias: it is compile-time
+only and has no symbol.
 
-Note this is a different `public` from the one inside a type-struct, which
-governs access *through the type* ([§9](#9-type-structs)). Same keyword, two
-jobs: one is about the linker, the other about encapsulation.
+`public` on a `type` means something else entirely — not linkage (a type has
+no symbol) but *module visibility*: `public type` exports the type-struct to
+importing modules, a plain `type` stays usable only inside its own module
+([§12](#12-modules)). And the `public` inside a type-struct body governs
+access *through the type* ([§9](#9-type-structs)). Same keyword, three jobs:
+the linker, the module boundary, and encapsulation.
 
 ### Forward references and mutual recursion
 
@@ -1138,6 +1141,28 @@ Key rules to internalize:
   error: function 'hidden_value' is defined in module 'hidden', which the
   root module does not import
   ```
+
+- **Type-structs are module-private by default**: importing a module is
+  not enough to use its types. A plain `type` can only be named — and
+  have its methods called — inside its own module; `public type` exports
+  it:
+
+  ```aspect
+  public type Pair { ... }    # importers may use this
+  type Secret { ... }         # opaque outside this module
+  ```
+
+  A member's own `public` is capped by the type's — a `public fn` on a
+  private type is callable module-wide but never outside. Values of a
+  private type still *flow* through foreign code (returned from and
+  passed back into the module's public functions); outside code can't
+  name the type or call its methods. With no type inference, the
+  practical opaque-handle shape is a pointer — hand out `T*`, let the
+  caller hold it as `u0*`. Aliasing a private type doesn't launder it.
+  One v1 caveat: a `public` *field* of a private type is still readable
+  and writable through a legally obtained instance (field access isn't
+  module-gated yet) — keep fields private if you want the type fully
+  opaque.
 
 - **v1 caveat — flat namespace**: there's no `io.println` qualified
   syntax. Symbol names must be globally unique across everything loaded,
