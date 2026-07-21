@@ -20,68 +20,30 @@
 # Both are internal plumbing; a metaprogram uses the named methods below.
 $module std/meta
 
-# ── Kind tags (frozen contract; mirror the compiler enums) ───────────────────
-# `expr.kind()` / `stmt.kind()` / `ty.base()` return these. Append only.
+# ── Kind enums ───────────────────────────────────────────────────────────────
+# Variant order is the ABI: the JIT side maps the compiler's own enum to these
+# integer positions, so append only, never reorder.
 
-public const i32 EXPR_LITERAL       = 0
-public const i32 EXPR_VARIABLE      = 1
-public const i32 EXPR_BINARY        = 2
-public const i32 EXPR_COMPARISON    = 3
-public const i32 EXPR_REFERENCE     = 4
-public const i32 EXPR_DEREFERENCE   = 5
-public const i32 EXPR_UNARY_NOT     = 6
-public const i32 EXPR_BITWISE_NOT   = 7
-public const i32 EXPR_FUNCTION_CALL = 8
-public const i32 EXPR_CAST          = 9
-public const i32 EXPR_ALLOC         = 10
-public const i32 EXPR_LIST_INIT     = 11
-public const i32 EXPR_FIELD_ACCESS  = 12
-public const i32 EXPR_STRUCT_LITERAL = 13
-public const i32 EXPR_FUNCTION_REF  = 14
-public const i32 EXPR_INDIRECT_CALL = 15
-public const i32 EXPR_SIZEOF        = 16
-public const i32 EXPR_NULL          = 17
-public const i32 EXPR_VALUE_BLOCK   = 18
-public const i32 EXPR_METHOD_CALL   = 19
+public enum ExprKind {
+    Literal, Variable, Binary, Comparison, Reference, Dereference, UnaryNot,
+    BitwiseNot, FunctionCall, Cast, Alloc, ListInit, FieldAccess, StructLiteral,
+    FunctionRef, IndirectCall, SizeOf, Null, ValueBlock, MethodCall
+}
 
-public const i32 STMT_VAR_DECL      = 0
-public const i32 STMT_VAR_ASSIGN    = 1
-public const i32 STMT_DEREF_ASSIGN  = 2
-public const i32 STMT_FIELD_ASSIGN  = 3
-public const i32 STMT_RETURN        = 4
-public const i32 STMT_IF            = 5
-public const i32 STMT_WHILE         = 6
-public const i32 STMT_FOR           = 7
-public const i32 STMT_BLOCK         = 8
-public const i32 STMT_EXPRESSION    = 9
-public const i32 STMT_BREAK         = 10
-public const i32 STMT_CONTINUE      = 11
+public enum StmtKind {
+    VarDecl, VarAssign, DerefAssign, FieldAssign, Return, If, While, For, Block,
+    Expression, Break, Continue
+}
 
-public const i32 TYPE_SINT          = 0
-public const i32 TYPE_UINT          = 1
-public const i32 TYPE_SFLOAT        = 2
-public const i32 TYPE_VOID          = 3
-public const i32 TYPE_BOOL          = 4
-public const i32 TYPE_STRUCT        = 5
-public const i32 TYPE_FNPTR         = 6
+public enum TypeKind {
+    SInt, UInt, SFloat, Void, Bool, Struct, FnPtr
+}
 
-# `token.kind()` — a coarse grouping of the lexer's TokenKind. Punctuation and
-# operators share TOKEN_PUNCT; use `token.text()` for the exact lexeme.
-public const i32 TOKEN_IDENT        = 0
-public const i32 TOKEN_INTEGER      = 1
-public const i32 TOKEN_FLOAT        = 2
-public const i32 TOKEN_STRING       = 3
-public const i32 TOKEN_BOOL         = 4
-public const i32 TOKEN_KEYWORD      = 5
-public const i32 TOKEN_TYPE         = 6
-public const i32 TOKEN_PUNCT        = 7
-public const i32 TOKEN_NEWLINE      = 8
-public const i32 TOKEN_EOF          = 9
-
-# NOTE: every `*_KIND`/`TOKEN_*`/`TYPE_*` block above is a stand-in for a missing
-# language feature — enums. When Aspect gains an `enum` type these become type-
-# safe variants (an `ExprKind` can't be compared to a `StmtKind`) instead of
-# interchangeable `i32`s. Tracked as an open decision — see the interface doc.
+# Coarse grouping of the lexer's TokenKind; operators and punctuation collapse
+# to `Punct` (read `token.text()` for the exact lexeme).
+public enum TokenKind {
+    Ident, Integer, Float, String, Bool, Keyword, LangType, Punct, Newline, Eof
+}
 
 # ── Raw tokens (expansion input; pre-parse, no types) ────────────────────────
 # An expansion (hook #1) captures the `TokenTree` inside its braces and reads
@@ -92,8 +54,8 @@ public type Token {
     public fn from_handle(u64 h) -> Token { return Token { handle = h } }
     public fn raw(this) -> u64 { return this.handle }
 
-    public fn kind(this) -> i32 { return meta_token_kind(this.handle) }  # TOKEN_*
-    public fn text(this) -> u8* { return meta_token_text(this.handle) }  # lexeme
+    public fn kind(this) -> TokenKind { return meta_token_kind(this.handle) as TokenKind }
+    public fn text(this) -> u8* { return meta_token_text(this.handle) }
     public fn pos(this)  -> Pos { return Pos.from_handle(meta_token_pos(this.handle)) }
 }
 
@@ -147,7 +109,7 @@ public type Type {
     public fn from_handle(u64 h) -> Type { return Type { handle = h } }
     public fn raw(this) -> u64 { return this.handle }
 
-    public fn base(this)          -> i32  { return meta_type_base(this.handle) }
+    public fn base(this)          -> TypeKind { return meta_type_base(this.handle) as TypeKind }
     public fn pointer_depth(this) -> u64  { return meta_type_pointer_depth(this.handle) }
     public fn is_const(this)      -> bool { return meta_type_is_const(this.handle) }
     public fn bits(this)          -> u64  { return meta_type_bits(this.handle) }
@@ -180,7 +142,7 @@ public type Expr {
     public fn from_handle(u64 h) -> Expr { return Expr { handle = h } }
     public fn raw(this) -> u64 { return this.handle }
 
-    public fn kind(this) -> i32  { return meta_expr_kind(this.handle) }
+    public fn kind(this) -> ExprKind { return meta_expr_kind(this.handle) as ExprKind }
     # `type` is a reserved keyword, so the resolved-type accessor is `type_of`.
     public fn type_of(this) -> Type { return Type.from_handle(meta_expr_type(this.handle)) }
     public fn pos(this)  -> Pos  { return Pos.from_handle(meta_expr_pos(this.handle)) }
@@ -209,7 +171,7 @@ public type Stmt {
     public fn from_handle(u64 h) -> Stmt { return Stmt { handle = h } }
     public fn raw(this) -> u64 { return this.handle }
 
-    public fn kind(this)  -> i32 { return meta_stmt_kind(this.handle) }
+    public fn kind(this)  -> StmtKind { return meta_stmt_kind(this.handle) as StmtKind }
     public fn pos(this)   -> Pos { return Pos.from_handle(meta_stmt_pos(this.handle)) }
     public fn attrs(this) -> AttrList { return AttrList.from_handle(meta_stmt_attrs(this.handle)) }
 

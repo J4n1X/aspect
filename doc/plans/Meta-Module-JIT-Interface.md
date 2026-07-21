@@ -14,8 +14,8 @@ Enough to *inspect* a program (typed) or a captured token tree (untyped) and
 *emit diagnostics*. The **write** surfaces are **deferred**: AST **construction**
 (`Ast.*` builders) and **`quote { … }` / `$(…)`** — the output of expansions and
 transforms — are not settled (§8), and in-place **rewrite** (transforms) is out
-of scope. **Enums** — which the kind-tags below really want — are a missing
-*language* feature flagged as an open decision (§7, §9), not built here.
+of scope. The kind-tags are real **enums** (§7) — the `enum` language feature was
+added first so they could be type-safe from the start.
 
 ---
 
@@ -248,34 +248,29 @@ this pass exposes an expansion's *read* side but not (yet) its *write* side.
 
 ---
 
-## 7. Kind-tag constants — a workaround for missing enums (frozen contract)
+## 7. Kind enums (frozen contract)
 
-**These constants exist only because Aspect has no `enum` type.** As `const i32`
-they are interchangeable — `expr.kind() == STMT_RETURN` type-checks and is
-meaningless — and the "append-only, never renumber" rule is enforced by
-convention, not the type system. When Aspect gains enums, each block below
-becomes a distinct enum type (an `ExprKind` value cannot be compared to a
-`StmtKind` or a raw `i32`), which is both safer and self-documenting. This is a
-tracked **open decision** (§9) — the tags are frozen contract *whatever* the
-representation, but the representation itself should change.
+The kind accessors return real Aspect **enums** (added 2026-07-21), so
+`expr.kind() == StmtKind.Return` is a compile error, not a silent nonsense — the
+whole reason enums went in first. The `extern fn meta_*_kind` builtins still hand
+back the raw `i32` position; the Aspect wrapper casts it to the enum
+(`meta_expr_kind(h) as ExprKind`). **Variant order is the ABI** — the Rust side
+maps its internal enum onto these positions, so the JIT implementation must emit
+these integers, and the contract may only *append*, never reorder:
 
-The Aspect interface exposes these as `const` globals so metaprograms compare
-against names, never magic integers. The Rust side maps its internal enums to
-these fixed values (order below is the contract):
-
-- **`EXPR_*`** (mirrors `ExprKind`): `LITERAL, VARIABLE, BINARY, COMPARISON,
-  REFERENCE, DEREFERENCE, UNARY_NOT, BITWISE_NOT, FUNCTION_CALL, CAST, ALLOC,
-  LIST_INIT, FIELD_ACCESS, STRUCT_LITERAL, FUNCTION_REF, INDIRECT_CALL, SIZEOF,
-  NULL, VALUE_BLOCK, METHOD_CALL`.
-- **`STMT_*`** (mirrors `StatementKind`): `VAR_DECL, VAR_ASSIGN, DEREF_ASSIGN,
-  FIELD_ASSIGN, RETURN, IF, WHILE, FOR, BLOCK, EXPRESSION, BREAK, CONTINUE`.
-- **`TYPE_*`** (mirrors `TypeBase`): `SINT, UINT, SFLOAT, VOID, BOOL, STRUCT, FNPTR`.
-- **`TOKEN_*`** (coarse grouping of the lexer's `TokenKind`): `IDENT, INTEGER,
-  FLOAT, STRING, BOOL, KEYWORD, TYPE, PUNCT, NEWLINE, EOF`. Punctuation and
-  operators collapse to `PUNCT`; use `token.text()` for the exact lexeme.
+- **`ExprKind`** (mirrors `ExprKind`): `Literal, Variable, Binary, Comparison,
+  Reference, Dereference, UnaryNot, BitwiseNot, FunctionCall, Cast, Alloc,
+  ListInit, FieldAccess, StructLiteral, FunctionRef, IndirectCall, SizeOf, Null,
+  ValueBlock, MethodCall`.
+- **`StmtKind`** (mirrors `StatementKind`): `VarDecl, VarAssign, DerefAssign,
+  FieldAssign, Return, If, While, For, Block, Expression, Break, Continue`.
+- **`TypeKind`** (mirrors `TypeBase`): `SInt, UInt, SFloat, Void, Bool, Struct, FnPtr`.
+- **`TokenKind`** (coarse grouping of the lexer's `TokenKind`): `Ident, Integer,
+  Float, String, Bool, Keyword, LangType, Punct, Newline, Eof`. Operators and
+  punctuation collapse to `Punct`; read `token.text()` for the exact lexeme.
 
 Adding a compiler AST variant is a breaking change to this contract and must
-append (never renumber).
+append (never reorder).
 
 ---
 
@@ -304,13 +299,11 @@ append (never renumber).
    construction contexts. On the *read* side we expose concrete `Expr`/`Stmt`;
    whether a unifying `Ast` handle is worth it here (vs. only for construction)
    is deferred with §8.
-4. **Enums (a missing *language* feature).** The `*_KIND` / `TOKEN_*` / `TYPE_*`
-   tags want to be enums, not `const i32` (§7). Sequencing decision: design and
-   add an `enum` type to Aspect *first* — so the meta kind-tags are type-safe
-   from the moment the ABI is frozen — or ship the ABI with `const i32` tags now
-   and convert once enums land? Adding enums is its own parser/typechecker/
-   codegen change (and its own `language-designer` gate). Owner's call; leaning
-   "design enums before freezing the tag contract."
+4. **Enums — resolved (2026-07-21).** Minimal C-style `enum` was added to the
+   language first, and the kind-tags are now real enums (§7). Open sub-question
+   only: whether `enum` should later gain explicit `= N` variant values (it ships
+   auto-numbered `0,1,2,…`); the meta tags don't need it (variant order already
+   matches the ABI).
 5. **`segments()` home.** Core `std/meta` (as written) or `std/fmt` (closer to
    `interp`)? It is a string-interpolation convenience, not general token
    reading.
