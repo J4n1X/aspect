@@ -63,35 +63,39 @@ impl Parser {
             // Item attributes come first (`@attr public fn ...`) and attach to
             // whichever item follows.
             let attrs = self.parse_leading_attrs()?;
-            let vis_pos = pos!();
-            let vis = if kw_if!(Public) {
-                Visibility::Public
-            } else {
-                Visibility::Private
-            };
+            let (vis, export, vis_pos) = self.parse_vis_linkage_modifiers()?;
             let kind = self.parse_kind_modifier()?;
             let is_extern = matches!(&kind, Some((Keyword::Extern, _)));
 
-            // `extern` already names a symbol defined elsewhere; marking it
-            // `public` would claim to export something this module never
-            // defines.
-            if is_extern && vis == Visibility::Public {
+            // `extern` names a symbol defined in another object file. It may be
+            // `public` — that just makes the *declaration* nameable from other
+            // Aspect modules (`public extern fn malloc` lets importers call it)
+            // — but it can never be `export`: `export` gives *this* build's
+            // symbol external linkage, and an extern declaration has no body
+            // here to link out.
+            if is_extern && export {
                 return Err(ParserError::UnexpectedToken(
-                    "extern functions cannot be public — they are defined elsewhere".to_string(),
+                    "extern functions cannot be exported — they are defined elsewhere, so there is no local symbol to give external linkage".to_string(),
                     vis_pos,
                 ));
             }
 
-            // `public` answers "does this symbol leave the object file" for
-            // functions and globals, and "is this type nameable from other
-            // modules" for type-structs.
+            // `public` = module visibility (nameable via `$import`) for
+            // functions, globals and type-structs. `export` = external linkage,
+            // which only symbols that *have* a linked object-file symbol can
+            // carry — functions and globals, never a type or alias.
             let defines_a_fn = matches!(&kind, Some((Keyword::Asm, _) | (Keyword::Naked, _)))
                 || (self.check_keyword(&Keyword::Fn) && !self.starts_fnptr_var_decl());
             let defines_a_type = self.check_keyword(&Keyword::Type);
             let defines_a_global = matches!(
                 self.peek().kind,
                 TokenKind::LangType(_) | TokenKind::Identifier(_)
-            ) || self.starts_fnptr_var_decl() || self.starts_grouped_var_decl();
+            ) || self.starts_fnptr_var_decl()
+                || self.starts_grouped_var_decl()
+                // `const <named-type>` global (`const Point* g`): a bare `const`
+                // keyword survives the scanner only for non-scalar bases, and at
+                // top level (after any `public`/`export`) it begins a global.
+                || self.check_keyword(&Keyword::Const);
 
             if vis == Visibility::Public && !defines_a_fn && !defines_a_type && !defines_a_global {
                 return Err(ParserError::UnexpectedToken(
@@ -100,19 +104,26 @@ impl Parser {
                     vis_pos,
                 ));
             }
+            if export && !defines_a_fn && !defines_a_global {
+                return Err(ParserError::UnexpectedToken(
+                    "export can only be used with functions or global variables — a type or alias has no linked symbol"
+                        .to_string(),
+                    vis_pos,
+                ));
+            }
 
             if let Some((Keyword::Asm, asm_pos)) = &kind {
-                let func = self.parse_asm_function(*asm_pos, vis, attrs)?;
+                let func = self.parse_asm_function(*asm_pos, vis, export, attrs)?;
                 functions.push(func);
             } else if let Some((Keyword::Naked, naked_pos)) = &kind {
-                let func = self.parse_naked_function(*naked_pos, vis, attrs)?;
+                let func = self.parse_naked_function(*naked_pos, vis, export, attrs)?;
                 functions.push(func);
             }
             // `fn ident(...)` is a function definition; `fn(...)` (no name
             // between `fn` and `(`) is a function-pointer-typed global. The
             // statement-table dispatch handles the local-decl variant.
             else if self.check_keyword(&Keyword::Fn) && !self.starts_fnptr_var_decl() {
-                let func = self.parse_function(is_extern, vis, attrs)?;
+                let func = self.parse_function(is_extern, vis, export, attrs)?;
                 functions.push(func);
             } else if self.check_keyword(&Keyword::Alias) {
                 // An alias is a pure compile-time name binding — there is no
@@ -139,17 +150,18 @@ impl Parser {
                 TokenKind::LangType(_) | TokenKind::Identifier(_)
             ) || self.starts_fnptr_var_decl()
                 || self.starts_grouped_var_decl()
+                || self.check_keyword(&Keyword::Const)
             {
                 // A leading built-in type, named type (alias / type-struct),
-                // function-pointer type, or parenthesised group begins a
-                // global variable declaration.
+                // function-pointer type, parenthesised group, or `const`
+                // (over a named base) begins a global variable declaration.
                 if is_extern {
                     return Err(ParserError::UnexpectedToken(
                         "extern can only be used with functions".to_string(),
                         self.peek().pos,
                     ));
                 }
-                let global = self.parse_global_var(vis, attrs)?;
+                let global = self.parse_global_var(vis, export, attrs)?;
                 global_vars.push(global);
             } else {
                 return Err(ParserError::UnexpectedToken(
@@ -177,6 +189,41 @@ impl Parser {
             symbols: std::mem::take(&mut self.module),
             source_files: self.source_files.clone(),
         })
+    }
+
+    /// Consume the leading module-visibility (`public`) and linkage (`export`)
+    /// modifiers of a top-level declaration, in either order. Returns the
+    /// resolved visibility, whether `export` was given, and the position of the
+    /// first modifier (or the current token when none) for diagnostics. These
+    /// are two orthogonal axes — `public export` is the fully-open form — so
+    /// they are scanned together, and a repeat of either is the error.
+    fn parse_vis_linkage_modifiers(
+        &mut self,
+    ) -> Result<(Visibility, bool, Position), ParserError> {
+        let start_pos = self.peek().pos;
+        let mut vis = Visibility::Private;
+        let mut export = false;
+        let mut saw_public = false;
+        loop {
+            if self.check_keyword(&Keyword::Public) {
+                let p = self.peek().pos;
+                if saw_public {
+                    return Err(ParserError::UnexpectedToken("duplicate `public`".to_string(), p));
+                }
+                saw_public = true;
+                vis = Visibility::Public;
+                self.advance();
+            } else if self.check_keyword(&Keyword::Export) {
+                let p = self.peek().pos;
+                if export {
+                    return Err(ParserError::UnexpectedToken("duplicate `export`".to_string(), p));
+                }
+                export = true;
+                self.advance();
+            } else {
+                return Ok((vis, export, start_pos));
+            }
+        }
     }
 
     /// Consume the leading kind-modifiers of a top-level declaration, yielding

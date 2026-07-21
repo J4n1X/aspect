@@ -358,7 +358,7 @@ fn main(u32 argc, u8 **argv) -> i32 {
     b -= 2
     b *= 3
     b /= 3
-    check_i64("compound ops (all)", 8, b)
+    check_i64("compound ops (all)", 8, b as i64)
 
     # -- Section 3: math functions --------------------------------------
     puts("")
@@ -389,9 +389,9 @@ fn main(u32 argc, u8 **argv) -> i32 {
     check_u64("popcount(0)=0",          0, popcount32(0))
 
     # bit_reverse8 returns u8; u8 -> i64 implicit widening when passed to check_i64
-    check_i64("bit_rev8(0x01)=0x80", 0x80, bit_reverse8(1))
-    check_i64("bit_rev8(0xF0)=0x0F", 0x0F, bit_reverse8(0xF0))
-    check_i64("bit_rev8(0xAA)=0x55", 0x55, bit_reverse8(0xAA))
+    check_i64("bit_rev8(0x01)=0x80", 0x80, bit_reverse8(1) as i64)
+    check_i64("bit_rev8(0xF0)=0x0F", 0x0F, bit_reverse8(0xF0) as i64)
+    check_i64("bit_rev8(0xAA)=0x55", 0x55, bit_reverse8(0xAA) as i64)
 
     check_u64("ctz32(8)=3",   3, ctz32(8))
     check_u64("ctz32(12)=2",  2, ctz32(12))
@@ -399,9 +399,9 @@ fn main(u32 argc, u8 **argv) -> i32 {
 
     # bitwise operators: ~, &, |, ^, <<, >>
     const u64 flags = 0b11001010
-    check_i64("flags & 0xF0 = 0xC0", 0xC0, flags & 0xF0)
-    check_i64("flags | 0x0F = 0xCF", 0xCF, flags | 0x0F)
-    check_i64("flags ^ 0xFF = 0x35", 0x35, flags ^ 0xFF)
+    check_i64("flags & 0xF0 = 0xC0", 0xC0, (flags & 0xF0) as i64)
+    check_i64("flags | 0x0F = 0xCF", 0xCF, (flags | 0x0F) as i64)
+    check_i64("flags ^ 0xFF = 0x35", 0x35, (flags ^ 0xFF) as i64)
     check_i64("1 << 7 = 128",        128,  1 << 7)
     check_i64("200 >> 3 = 25",       25,   200 >> 3)
 
@@ -432,7 +432,7 @@ fn main(u32 argc, u8 **argv) -> i32 {
     check_i64("PRIMES[7]=19", 19, PRIMES[7])
 
     # Global HEX_CHARS lookup
-    check_i64("HEX_CHARS[10]='A'=65", 65, HEX_CHARS[10])
+    check_i64("HEX_CHARS[10]='A'=65", 65, HEX_CHARS[10] as i64)
 
     # Dynamic allocation (stack alloca via type[count]).
     const i32 dyn_n = 6
@@ -488,7 +488,7 @@ fn main(u32 argc, u8 **argv) -> i32 {
     # u8 -> u32: same-family widening (8 <= 32); const propagates through the chain
     const u32 n32 = n8
     # u32 -> i64: cross-family widening (32 <= 64)
-    const i64 n64 = n32
+    const i64 n64 = n32 as i64
     check_i64("u8(200)->u32->i64", 200, n64)
 
     # Negative i32 widens to i64 preserving sign
@@ -498,7 +498,7 @@ fn main(u32 argc, u8 **argv) -> i32 {
 
     # i32 literal passed to u64 param -- same width, cross-family allowed
     const i32 small = 12
-    check_u64("i32 arg->u64 param gcd", 3, gcd(small, 9))
+    check_u64("i32 arg->u64 param gcd", 3, gcd(small as u64, 9))
 
     # i32 result of is_prime widens to i64 for check_i64
     check_i64("i32 result->i64 param", 1, is_prime(7))

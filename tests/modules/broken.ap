@@ -3,6 +3,6 @@
 # inside an imported file attribute to *that* file, not the importer.
 $module broken
 
-fn buggy(i32 x) -> i32 {
+public fn buggy(i32 x) -> i32 {
     return x + this_var_does_not_exist
 }

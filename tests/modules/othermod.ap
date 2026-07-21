@@ -5,6 +5,6 @@ $module othermod
 
 $define MD_MACRO 5
 
-fn om_val() -> i32 {
+public fn om_val() -> i32 {
     return MD_MACRO
 }

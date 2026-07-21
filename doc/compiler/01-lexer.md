@@ -87,8 +87,10 @@ explicitly for imported files.
 | `const` | Const modifier (also part of `const <type>` LangType) |
 | `type` | Type-struct / alias definition — struct definitions are spelled `type Name { ... }` |
 | `struct` | Reserved, but unused — see `type` |
+| `naked` | Naked function declaration (`naked fn`) — no prologue/epilogue |
 | `alias` | Type alias (`alias myint i32`) |
-| `public` | External linkage on a function or global; also opts a field/method out of the private default (see [06-codegen](06-codegen.md#function-linkage-functionsrs)) |
+| `public` | Module visibility — makes a function/global/type nameable from importing modules (private by default); also opts a field/method out of the private default |
+| `export` | External linkage on a function or global — the object-file symbol is visible to foreign code (see [06-codegen](06-codegen.md#function-linkage-functionsrs)) |
 | `sizeof` | Compile-time size of a type; yields `u64` |
 | `null` | The null pointer constant |
 | `true` / `false` | Boolean literals |

@@ -95,6 +95,11 @@ pub struct Parser {
     /// Module → its *direct* imports, from the preprocessor. Drives the
     /// import-visibility check ([`Parser::check_import_visibility`]).
     module_imports: std::collections::HashMap<String, Vec<String>>,
+    /// Global-variable name → its module visibility. Globals live in the
+    /// parser's outermost variable scope, whose `Symbol` carries no
+    /// visibility, so the reference-site public/private gate reads it here.
+    /// Names are program-unique (the outer scope rejects duplicates).
+    pub(crate) global_vis: std::collections::HashMap<String, crate::symbol::module::Visibility>,
 }
 
 impl Parser {
@@ -113,6 +118,7 @@ impl Parser {
             source_files: Vec::new(),
             file_modules: Vec::new(),
             module_imports: std::collections::HashMap::new(),
+            global_vis: std::collections::HashMap::new(),
         }
     }
 
@@ -211,6 +217,40 @@ impl Parser {
         if info.vis == crate::symbol::module::Visibility::Private && def_module != use_module {
             return Err(ParserError::private_type(
                 &info.name, def_module, use_module, use_pos,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Visibility check for *using* a free function or global variable: the
+    /// function/global analogue of [`Self::check_struct_visibility`]. Two gates:
+    /// the defining module must be the referring module or one of its direct
+    /// imports, and a cross-module use additionally requires the symbol to be
+    /// declared `public` (the default is module-private). `def_file_id` is the
+    /// symbol's defining file and `vis` its declared module visibility.
+    ///
+    /// Mangled method names (containing `$`) are exempt from the `public` gate:
+    /// a method's cross-module reach is governed by its type's visibility
+    /// ([`Self::check_struct_visibility`]) and its own `MethodSig.vis`, checked
+    /// in the type checker — not by the mangled free-function name, which is
+    /// always private.
+    fn check_name_visibility(
+        &self,
+        kind: &'static str,
+        name: &str,
+        def_file_id: u32,
+        vis: crate::symbol::module::Visibility,
+        use_pos: Position,
+    ) -> Result<(), ParserError> {
+        self.check_import_visibility(kind, name, def_file_id, use_pos)?;
+        if name.contains('$') {
+            return Ok(());
+        }
+        let def_module = self.module_of_file(def_file_id);
+        let use_module = self.module_of_file(use_pos.file_id);
+        if vis == crate::symbol::module::Visibility::Private && def_module != use_module {
+            return Err(ParserError::private_symbol(
+                kind, name, def_module, use_module, use_pos,
             ));
         }
         Ok(())
@@ -650,10 +690,12 @@ impl Parser {
                 .lookup_function(&func_name)
                 .ok_or_else(|| ParserError::UndefinedFunction(func_name.clone(), pos))?;
             let return_type = func_symbol.return_type;
+            let def_file_id = func_symbol.pos.file_id;
+            let def_vis = func_symbol.vis;
             // `variable_reference` already vetted the ref, but keep the call
             // site guarded in its own right (defense in depth — the check is
             // one hash lookup).
-            self.check_import_visibility("function", &func_name, func_symbol.pos.file_id, pos)?;
+            self.check_name_visibility("function", &func_name, def_file_id, def_vis, pos)?;
 
             let args = self.parse_comma_separated(&TokenKind::CloseParen, Self::parse_expression)?;
 
@@ -848,12 +890,13 @@ impl Parser {
                 var_symbol.symbol_type
             };
             if is_global {
-                self.check_import_visibility(
-                    "global variable",
-                    &name,
-                    var_symbol.pos.file_id,
-                    pos,
-                )?;
+                let def_file_id = var_symbol.pos.file_id;
+                let gvis = self
+                    .global_vis
+                    .get(&name)
+                    .copied()
+                    .unwrap_or(crate::symbol::module::Visibility::Private);
+                self.check_name_visibility("global variable", &name, def_file_id, gvis, pos)?;
             }
             return Ok(Expression::new(ExprKind::Variable(name), expr_type, pos));
         }
@@ -865,10 +908,11 @@ impl Parser {
                 f.params.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
                 f.return_type,
                 f.pos.file_id,
+                f.vis,
             )
         });
-        if let Some((params, return_type, def_file_id)) = func_sig {
-            self.check_import_visibility("function", &name, def_file_id, pos)?;
+        if let Some((params, return_type, def_file_id, def_vis)) = func_sig {
+            self.check_name_visibility("function", &name, def_file_id, def_vis, pos)?;
             let id = self.module.intern_fnptr(params, return_type);
             let ty = LangType::fnptr_type(id);
             return Ok(Expression::new(ExprKind::FunctionRef(name), ty, pos));
@@ -886,6 +930,17 @@ impl Parser {
         let pos = self.peek().pos;
         let kind = self.peek().kind.clone();
         match kind {
+            // `const <type>` for a *named* base (`const Point*`, `const MyAlias`)
+            // or a re-split builtin (`const u8[MAX]` after define substitution):
+            // the scanner only fuses `const` with a built-in scalar spelling, so
+            // anything else arrives as a bare `const` keyword here. Const applies
+            // to the whole resolved type — under "const is truly immutable" it is
+            // a single flag, so we simply parse the inner type and set it.
+            TokenKind::Keyword(Keyword::Const) => {
+                self.advance();
+                let inner = self.parse_type()?;
+                Ok(inner.with_const(true))
+            }
             // Built-in types usually arrive pre-folded from the lexer
             // (`u8[10]*` is one token), but the scanner only folds `[N]` for
             // literal N — `u8[MAX_SIZE]` reaches us as `u8` `[` `1024` `]`

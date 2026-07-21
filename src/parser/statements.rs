@@ -39,6 +39,14 @@ const STATEMENT_TABLE: &[(StatementPred, StatementHandler)] = &[
         |p| matches!(p.peek().kind, TokenKind::LangType(_)),
         Parser::parse_var_decl_or_assignment,
     ),
+    // `const <named-type>` locals (`const Point* p`): the scanner fuses `const`
+    // only with a built-in scalar (yielding a `LangType` token, matched above),
+    // so a bare `const` keyword at statement start begins a const declaration
+    // over a named/fn-ptr/grouped type.
+    (
+        |p| p.check_keyword(&Keyword::Const),
+        Parser::parse_var_decl_or_assignment,
+    ),
     // Named-type local declarations: `myint x`, `Point* p`, ...
     (
         Parser::starts_named_var_decl,

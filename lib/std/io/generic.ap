@@ -66,21 +66,21 @@ fn io_write_all(i32 fd, u8 *buf, u64 n) -> i64 {
 # (u64 is 20 digits, i64 is 19 plus a sign) and returns the new offset.
 
 # Write `s` with no terminator — useful for building up a line.
-fn print(u8 *s) -> u0 {
+public fn print(u8 *s) -> u0 {
     io_write_all(IO_STDOUT, s, cstring_len(s))
 }
 
 # One byte, no terminator. This is the whole reason libc's `putchar` must not
 # be mixed in: it buffers, this does not, and two buffers on one fd interleave
 # by flush order rather than call order.
-fn print_char(u8 c) -> u0 {
+public fn print_char(u8 c) -> u0 {
     u8[1] b
     b[0] = c
     io_write_all(IO_STDOUT, b, 1)
 }
 
 # Write `s` followed by a newline. Returns 0, or negative on error.
-fn println(u8 *s) -> i32 {
+public fn println(u8 *s) -> i32 {
     if io_write_all(IO_STDOUT, s, cstring_len(s)) < 0 { return 0 - 1 }
     u8[1] nl = {10}
     if io_write_all(IO_STDOUT, nl, 1) < 0 { return 0 - 1 }
@@ -88,32 +88,32 @@ fn println(u8 *s) -> i32 {
 }
 
 # Emit the decimal digits of `n` to stdout, no newline.
-fn print_digits_u64(u64 n) -> u0 {
+public fn print_digits_u64(u64 n) -> u0 {
     u8[24] buf
     u64 end = fmt_u64(buf, 0, n)
     io_write_all(IO_STDOUT, buf, end)
 }
 
-fn print_u64(u64 n) -> u0 { print_digits_u64(n) }
-fn println_u64(u64 n) -> u0 {
+public fn print_u64(u64 n) -> u0 { print_digits_u64(n) }
+public fn println_u64(u64 n) -> u0 {
     u8[24] buf
     u64 end = fmt_u64(buf, 0, n)
     buf[end] = 10                                  # '\n'
     io_write_all(IO_STDOUT, buf, end + 1)
 }
 
-fn print_u32(u32 n) -> u0 { print_digits_u64(n as u64) }
-fn println_u32(u32 n) -> u0 { println_u64(n as u64) }
+public fn print_u32(u32 n) -> u0 { print_digits_u64(n as u64) }
+public fn println_u32(u32 n) -> u0 { println_u64(n as u64) }
 
-fn print_i32(i32 n) -> u0 { print_i64(n as i64) }
-fn println_i32(i32 n) -> u0 { println_i64(n as i64) }
+public fn print_i32(i32 n) -> u0 { print_i64(n as i64) }
+public fn println_i32(i32 n) -> u0 { println_i64(n as i64) }
 
-fn print_i64(i64 n) -> u0 {
+public fn print_i64(i64 n) -> u0 {
     u8[24] buf
     u64 end = fmt_i64(buf, 0, n)
     io_write_all(IO_STDOUT, buf, end)
 }
-fn println_i64(i64 n) -> u0 {
+public fn println_i64(i64 n) -> u0 {
     u8[24] buf
     u64 end = fmt_i64(buf, 0, n)
     buf[end] = 10
@@ -121,18 +121,18 @@ fn println_i64(i64 n) -> u0 {
 }
 
 # Write `n` as exactly six ASCII decimal digits, zero-padded.
-fn print_u64_padded_6(u64 n) -> u0 {
+public fn print_u64_padded_6(u64 n) -> u0 {
     u8[8] buf
     u64 end = fmt_u64_pad6(buf, 0, n)
     io_write_all(IO_STDOUT, buf, end)
 }
 
-fn print_f64(f64 x) -> u0 {
+public fn print_f64(f64 x) -> u0 {
     u8[32] buf
     u64 end = fmt_f64(buf, 0, x)
     io_write_all(IO_STDOUT, buf, end)
 }
-fn println_f64(f64 x) -> u0 {
+public fn println_f64(f64 x) -> u0 {
     u8[32] buf
     u64 end = fmt_f64(buf, 0, x)
     buf[end] = 10

@@ -36,7 +36,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.module
                 .add_global(global_type, Some(AddressSpace::default()), &global.name);
 
-        if global.vis == crate::symbol::module::Visibility::Public {
+        // Linkage follows `export` (foreign-visible), not `public` (Aspect
+        // module visibility): a `public` global stays internally linked so
+        // `globaldce` can strip it when unused.
+        if global.export {
             global_var.set_linkage(Linkage::External);
         } else {
             global_var.set_linkage(Linkage::Private);

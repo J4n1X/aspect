@@ -181,17 +181,21 @@ Decided in `declare_function` via `linkage_for`:
 |---|---|---|
 | `extern fn` | external | a body-less declaration; internal linkage on one is invalid IR |
 | `main`, `_start` | external | the C runtime calls one, the linker enters at the other, and the JIT looks up `main` by name |
-| `public fn` / `public asm fn` | external | explicitly exported for foreign code |
-| everything else | **internal** | the default |
+| `export fn` / `export asm fn` | external | explicitly linked out for foreign code |
+| everything else | **internal** | the default (`public` alone does *not* change linkage) |
 
-Global variables follow the same rule in `globals.rs`: `public` → external,
-otherwise `private` linkage.
+Linkage tracks the **`export`** axis, not `public`. `public` is *module
+visibility* (a parse-time name-resolution rule — see
+[09-syntax-reference](09-syntax-reference.md#visibility-and-linkage)); a
+`public fn` stays internally linked so it can still be collected. Global
+variables follow the same rule in `globals.rs`: `export` → external, otherwise
+`private` linkage.
 
 A program and every module it imports become a *single* LLVM module, so
 internal linkage costs nothing at the call site — a private function is still
-callable from anywhere — and buys everything at the link: `globaldce` may
-delete an unreachable internal function, and may **never** delete an external
-one, since another object file might call in.
+callable from anywhere in the program — and buys everything at the link:
+`globaldce` may delete an unreachable internal function, and may **never**
+delete an external one, since another object file might call in.
 
 Defaulting to external is what put the whole unused standard library in every
 binary, at every `-O` level.

@@ -3,6 +3,6 @@ i32 blocked = 1
 $endif
 $module guarded
 
-fn guarded_value() -> i32 {
+public fn guarded_value() -> i32 {
     return 5
 }

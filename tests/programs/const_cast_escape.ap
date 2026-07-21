@@ -1,0 +1,10 @@
+# expected: 20
+# `const` is truly immutable, but an explicit `as` cast is the escape hatch:
+# cast the const pointer to a mutable one, then the write through it is allowed.
+fn main(u32 argc, u8 **argv) -> i32 {
+    i32 x = 5
+    const i32* p = &x
+    i32* q = p as i32*
+    *q = 20
+    return *q
+}

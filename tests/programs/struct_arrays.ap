@@ -27,7 +27,7 @@ type Pair {
 
 fn main(u32 argc, u8** argv) -> i32 {
     # ── heap array of structs ────────────────────────────────────────────
-    Pair* pairs = malloc(3 * sizeof(Pair))
+    Pair* pairs = malloc(3 * sizeof(Pair)) as Pair*
     pairs[0] = Pair { a = 1, b = 2 }
     pairs[1] = Pair { a = 3, b = 4 }
     pairs[2] = Pair { a = 5, b = 6 }
@@ -46,7 +46,7 @@ fn main(u32 argc, u8** argv) -> i32 {
     }
     total = total + pairs[2].b              # + 60 = 69
     total = total + copy.b                  # + 2  = 71
-    free(pairs)
+    free(pairs as u8*)
 
     # ── stack array of structs ───────────────────────────────────────────
     Pair[2] sp

@@ -16,7 +16,7 @@ source path as `argv[0]` and forwards any `# run_args:` entries as `argv[1..]`.
 Test functions are **generated at compile time** by the `generate_tests!()` proc macro defined in `aspect-macros/src/generate_tests.rs`. The macro:
 
 1. Scans `tests/programs/` recursively for `*.ap` files.
-2. Reads the first 10 lines of each file looking for `# expected:`, `# run_args:`, `# compile_args:`, and `# requires_arch:` annotations.
+2. Reads the first 10 lines of each file looking for `# expected:`, `# run_args:`, `# compile_args:`, `# requires_arch:`, and `# expected_warning:` annotations.
 3. Emits one `#[test]` function per annotated file.
 
 At runtime each generated test calls the appropriate helper:
@@ -32,7 +32,16 @@ At runtime each generated test calls the appropriate helper:
 # run_args: "arg1", "arg2"            # optional: forwarded as argv[1..] to main
 # compile_args: "-I", "lib"           # optional: compiler flags (-D/-I), mirroring the CLI
 # requires_arch: ARCH_X86_64          # optional: bare, unquoted; compile this test only on that host arch
+# expected_warning: "frag"            # optional: assert a non-fatal typecheck warning contains this fragment
 ```
+
+`# expected_warning:` rides on a **runtime** (`# expected: <code>`) test: the
+program must still compile, run, and return its code, and additionally emit a
+type-checker warning whose text contains the fragment (case-insensitive). It is
+checked against `TypeChecker::warnings()` — not stderr — via
+`assert_warning_contains`, so it does not depend on capturing the in-process
+JIT's output. A warning never fails the build on its own, which is why it is an
+add-on assertion rather than a separate test shape.
 
 `# requires_arch:` gates the generated test with `#[cfg(target_arch = ...)]`. It exists
 because an `$ifdef`-gated *failure* test compiles clean on the wrong arch, which then

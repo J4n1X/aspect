@@ -23,6 +23,7 @@ impl Parser {
         &mut self,
         pos: Position,
         vis: Visibility,
+        export: bool,
         attrs: Vec<crate::parser::Attribute>,
     ) -> Result<crate::parser::Function, ParserError> {
         use crate::parser::{AsmReg, AsmSpec, Function, FunctionProto};
@@ -100,6 +101,7 @@ impl Parser {
                 return_type,
                 is_extern: false,
                 has_body: true,
+                vis,
                 pos,
             })
             .map_err(|e| ParserError::from_symbol(e, pos))?;
@@ -110,6 +112,7 @@ impl Parser {
                 params,
                 return_type,
                 vis,
+                export,
                 attrs,
                 pos,
             },
@@ -135,6 +138,7 @@ impl Parser {
         &mut self,
         pos: Position,
         vis: Visibility,
+        export: bool,
         attrs: Vec<crate::parser::Attribute>,
     ) -> Result<crate::parser::Function, ParserError> {
         use crate::parser::{Function, FunctionProto, NakedSpec};
@@ -174,6 +178,7 @@ impl Parser {
                 return_type,
                 is_extern: false,
                 has_body: true,
+                vis,
                 pos,
             })
             .map_err(|e| ParserError::from_symbol(e, pos))?;
@@ -184,6 +189,7 @@ impl Parser {
                 params,
                 return_type,
                 vis,
+                export,
                 attrs,
                 pos,
             },

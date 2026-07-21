@@ -22,7 +22,7 @@ const f64 E   = 2.71828182845905
 
 # ── i64 ─────────────────────────────────────────────────────────────────
 
-fn min_i64(i64 a, i64 b) -> i64 {
+public fn min_i64(i64 a, i64 b) -> i64 {
     if a < b { return a }
     return b
 }
@@ -32,14 +32,14 @@ fn max_i64(i64 a, i64 b) -> i64 {
     return b
 }
 
-fn clamp_i64(i64 v, i64 lo, i64 hi) -> i64 {
+public fn clamp_i64(i64 v, i64 lo, i64 hi) -> i64 {
     if v < lo { return lo }
     if v > hi { return hi }
     return v
 }
 
 # |I64_MIN| is not representable; it comes back unchanged (same as C's llabs).
-fn abs_i64(i64 v) -> i64 {
+public fn abs_i64(i64 v) -> i64 {
     if v < 0 { return 0 - v }
     return v
 }
@@ -51,7 +51,7 @@ fn min_u64(u64 a, u64 b) -> u64 {
     return b
 }
 
-fn max_u64(u64 a, u64 b) -> u64 {
+public fn max_u64(u64 a, u64 b) -> u64 {
     if a > b { return a }
     return b
 }
@@ -68,20 +68,20 @@ $ifdef ARCH_X86_64
 # MINSD/MAXSD are defined as `(a < b) ? a : b` and `(a > b) ? a : b`, which is
 # exactly what the fallbacks below spell out — same NaN and ±0.0 behaviour,
 # one instruction.
-asm fn min_f64(f64 a: xmm0, f64 b: xmm1) -> f64: xmm0 {
+public asm fn min_f64(f64 a: xmm0, f64 b: xmm1) -> f64: xmm0 {
     "minsd xmm0, xmm1"
 }
 
-asm fn max_f64(f64 a: xmm0, f64 b: xmm1) -> f64: xmm0 {
+public asm fn max_f64(f64 a: xmm0, f64 b: xmm1) -> f64: xmm0 {
     "maxsd xmm0, xmm1"
 }
 $else
-fn min_f64(f64 a, f64 b) -> f64 {
+public fn min_f64(f64 a, f64 b) -> f64 {
     if a < b { return a }
     return b
 }
 
-fn max_f64(f64 a, f64 b) -> f64 {
+public fn max_f64(f64 a, f64 b) -> f64 {
     if a > b { return a }
     return b
 }
@@ -97,7 +97,7 @@ $ifdef ARCH_X86_64
 # Clear the sign bit outright. No single SSE2 instruction does this (ANDPD
 # would need a mask constant), so it detours through a GPR — hence the `rax`
 # clobber.
-asm fn fabs(f64 v: xmm0) -> f64: xmm0
+public asm fn fabs(f64 v: xmm0) -> f64: xmm0
     clobbers(rax)
 {
     "movq rax, xmm0"
@@ -108,7 +108,7 @@ $else
 # The `v == 0.0` arm is not redundant: it normalises -0.0 to +0.0, which the
 # `v < 0.0` test alone misses (-0.0 < 0.0 is false). Without it this would
 # return -0.0 and disagree with the sign-bit-clearing version above.
-fn fabs(f64 v) -> f64 {
+public fn fabs(f64 v) -> f64 {
     if v < 0.0 { return 0.0 - v }
     if v == 0.0 { return 0.0 }
     return v
@@ -117,7 +117,7 @@ $endif
 
 # ── integer number theory ───────────────────────────────────────────────
 
-fn gcd_u64(u64 a, u64 b) -> u64 {
+public fn gcd_u64(u64 a, u64 b) -> u64 {
     while b != 0 {
         u64 t = b
         b = a % b
@@ -127,13 +127,13 @@ fn gcd_u64(u64 a, u64 b) -> u64 {
 }
 
 # Divide before multiplying so lcm(a, b) only overflows when the result does.
-fn lcm_u64(u64 a, u64 b) -> u64 {
+public fn lcm_u64(u64 a, u64 b) -> u64 {
     if a == 0 || b == 0 { return 0 }
     return a / gcd_u64(a, b) * b
 }
 
 # base^e by squaring — O(log e) multiplies. Wraps on overflow (u64 semantics).
-fn ipow_u64(u64 base, u64 e) -> u64 {
+public fn ipow_u64(u64 base, u64 e) -> u64 {
     u64 result = 1
     while e > 0 {
         if (e & 1) == 1 { result = result * base }
@@ -143,7 +143,7 @@ fn ipow_u64(u64 base, u64 e) -> u64 {
     return result
 }
 
-fn ipow_i64(i64 base, u64 e) -> i64 {
+public fn ipow_i64(i64 base, u64 e) -> i64 {
     i64 result = 1
     while e > 0 {
         if (e & 1) == 1 { result = result * base }
@@ -155,7 +155,7 @@ fn ipow_i64(i64 base, u64 e) -> i64 {
 
 # floor(sqrt(n)), exact for every u64. Integer Newton: the iteration is
 # strictly decreasing once y < x, so it terminates without an epsilon.
-fn isqrt_u64(u64 n) -> u64 {
+public fn isqrt_u64(u64 n) -> u64 {
     if n < 2 { return n }
     u64 x = n
     u64 y = (x + 1) / 2
@@ -173,14 +173,14 @@ $ifdef ARCH_X86_64
 # Newton fallback on both accuracy and speed. It also handles the edge cases
 # the fallback special-cases by hand: sqrt(-x) is NaN, sqrt(-0.0) is -0.0,
 # sqrt(inf) is inf.
-asm fn sqrt_f64(f64 x: xmm0) -> f64: xmm0 {
+public asm fn sqrt_f64(f64 x: xmm0) -> f64: xmm0 {
     "sqrtsd xmm0, xmm0"
 }
 $else
 # Newton–Raphson. Converges quadratically; the fixed-point test (`next ==
 # guess`) ends the loop exactly, the iteration cap is a safety net for
 # denormal-edge oscillation. Negative input returns NaN, like libm.
-fn sqrt_f64(f64 x) -> f64 {
+public fn sqrt_f64(f64 x) -> f64 {
     if x < 0.0 {
         f64 zero = 0.0
         return zero / zero            # NaN
@@ -201,7 +201,7 @@ $endif
 
 # Valid for |x| < 2^63 (the i64 round-trip window); beyond that x is
 # returned unchanged, which is correct — such doubles are already integral.
-fn floor_f64(f64 x) -> f64 {
+public fn floor_f64(f64 x) -> f64 {
     if fabs(x) >= 9223372036854775000.0 { return x }
     i64 t = x as i64                  # truncates toward zero
     f64 ft = t as f64
@@ -209,7 +209,7 @@ fn floor_f64(f64 x) -> f64 {
     return ft
 }
 
-fn ceil_f64(f64 x) -> f64 {
+public fn ceil_f64(f64 x) -> f64 {
     if fabs(x) >= 9223372036854775000.0 { return x }
     i64 t = x as i64
     f64 ft = t as f64
@@ -218,7 +218,7 @@ fn ceil_f64(f64 x) -> f64 {
 }
 
 # Round half away from zero (like C's round()).
-fn round_f64(f64 x) -> f64 {
+public fn round_f64(f64 x) -> f64 {
     if x < 0.0 { return ceil_f64(x - 0.5) }
     return floor_f64(x + 0.5)
 }

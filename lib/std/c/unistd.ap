@@ -12,10 +12,10 @@
 -#
 $module std/c/unistd
 
-extern fn write(i32 fd, u0* buf, u64 count) -> i64    # bytes written, or -1
-extern fn read(i32 fd, u0* buf, u64 count) -> i64     # bytes read, 0 at EOF, -1 on error
+public extern fn write(i32 fd, u0* buf, u64 count) -> i64    # bytes written, or -1
+public extern fn read(i32 fd, u0* buf, u64 count) -> i64     # bytes read, 0 at EOF, -1 on error
 
 # Bytes per page. `sysconf(_SC_PAGESIZE)` is the POSIX spelling, but its
 # selector is a per-OS constant; this one takes no arguments and is in every
 # libc that matters.
-extern fn getpagesize() -> i32
+public extern fn getpagesize() -> i32

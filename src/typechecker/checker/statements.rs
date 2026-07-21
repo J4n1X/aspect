@@ -38,6 +38,15 @@ impl TypeChecker {
 
             StatementKind::DerefAssign { target, value } => {
                 let target_type = self.synth_expression(target);
+                // `*p = x` writes the pointee. Under "const is truly immutable",
+                // a const pointer's pointee cannot be written — and the
+                // `Dereference` synth arm propagates const downward, so
+                // `**pp = x` and `*this.next = n` (through a const chain) are
+                // caught here too.
+                if target_type.is_const {
+                    self.errors
+                        .push(TypeCheckError::WriteThroughConst { position: target.pos });
+                }
                 self.check_expression(value, &target_type);
             }
 

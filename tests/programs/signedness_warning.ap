@@ -1,0 +1,13 @@
+# expected: 7
+# expected_warning: "signedness"
+# An implicit conversion that changes signedness warns — both same-width
+# (`i32 -> u32`, case c) and widening (`i32 -> u64`, case b). The program still
+# compiles and runs (a warning is non-fatal); the harness asserts the warning
+# was emitted. Same-sign widening (`i32 -> i64`) does NOT warn.
+fn main(u32 argc, u8 **argv) -> i32 {
+    i32 a = 7
+    u32 b = a          # case (c): same width, sign change -> warns
+    u64 c = a          # case (b): widen + sign change -> warns
+    i64 d = a          # case (a): same-sign widen -> no warning
+    return (b as i32) + (c as i32) + (d as i32) - a - a   # 7+7+7-7-7 = 7
+}

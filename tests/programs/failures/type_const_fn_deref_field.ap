@@ -1,0 +1,16 @@
+# expected: "write through a const pointer"
+# The soundness co-requisite: inside a `const fn`, `this` is a pointer to a
+# const receiver, so `this.next` is a const pointer and `*this.next = *other`
+# must be rejected. This only works because the `Dereference` synth arm
+# recomputes from the checker's const-propagated field type, not the parser's
+# stale (non-const) stamp.
+type Node {
+    public i32 value
+    public Node* next
+
+    const fn overwrite_next(this, Node* other) {
+        *this.next = *other
+    }
+}
+
+fn main(u32 argc, u8 **argv) -> i32 { return 0 }

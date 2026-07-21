@@ -338,6 +338,11 @@ fn build_program(path: &Path, preproc: &PreprocArgs) -> Result<Program> {
         )
     })?;
 
+    // Non-fatal diagnostics: print to stderr, do not affect the exit code.
+    for warning in typechecker.warnings() {
+        eprintln!("{}", typechecker.format_warning(warning));
+    }
+
     Ok(program)
 }
 

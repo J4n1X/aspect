@@ -3,6 +3,16 @@ use crate::parser::LangType;
 use aspect_macros::ErrorPosition;
 use thiserror::Error;
 
+/// A non-fatal type-checker diagnostic. Unlike [`TypeCheckError`], a warning
+/// does **not** fail the build or change `aspc`'s exit code (v1 — a
+/// `-Werror`/suppression surface is deferred). It carries its own position so
+/// the driver can format it as `file:line:col: warning: <message>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeWarning {
+    pub message: String,
+    pub position: Position,
+}
+
 /// Type checker error types
 #[derive(Error, Debug, Clone, ErrorPosition)]
 pub enum TypeCheckError {
@@ -85,6 +95,9 @@ pub enum TypeCheckError {
 
     #[error("Cannot assign to const variable '{name}' at {position}")]
     AssignmentToConst { name: String, position: Position },
+
+    #[error("Cannot write through a const pointer — its pointee is immutable (cast away const with `as` if you must) — at {position}")]
+    WriteThroughConst { position: Position },
 
     #[error("List initializer has {found} element(s) but array only has room for {expected} at {position}")]
     ListInitLengthMismatch {

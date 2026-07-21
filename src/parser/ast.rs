@@ -218,12 +218,19 @@ pub struct FunctionProto {
     pub name: String,
     pub params: Vec<(LangType, String)>,
     pub return_type: LangType,
-    /// Whether the symbol leaves the object file. Private (the default) means
-    /// internal linkage — still callable from anywhere in the program, since a
-    /// program and everything it imports are one LLVM module, but invisible to
-    /// foreign code and therefore collectable when unreachable. `public` is
-    /// only for symbols something outside Aspect must find.
+    /// Module visibility: whether another Aspect module may name this function
+    /// through `$import`. `public` exports it across the module boundary;
+    /// private (the default) confines it to its defining module. This is a
+    /// *name-resolution* property enforced at parse time — it has nothing to
+    /// do with LLVM linkage (see `export`).
     pub vis: crate::symbol::module::Visibility,
+    /// Foreign linkage: whether the symbol leaves the object file with external
+    /// linkage, so non-Aspect code (C, a separate link step, a C runtime) can
+    /// reference it by name. `export` opts in; the default is internal linkage,
+    /// which lets `globaldce` strip the symbol when unreachable — the whole
+    /// reason an unused stdlib doesn't bloat every binary. Orthogonal to `vis`:
+    /// the two compose (`public export fn`).
+    pub export: bool,
     /// Leading attributes in source order (outside-in, leftmost applied last).
     pub attrs: Vec<Attribute>,
     pub pos: Position,
@@ -305,7 +312,12 @@ pub struct GlobalVar {
     pub var_type: LangType,
     pub name: String,
     pub initializer: Option<Expression>,
+    /// Module visibility (`public` exports the name across `$import`); see
+    /// [`FunctionProto::vis`]. Enforced at parse time, independent of linkage.
     pub vis: Visibility,
+    /// Foreign linkage (`export` gives external linkage); see
+    /// [`FunctionProto::export`]. Orthogonal to `vis`; the two compose.
+    pub export: bool,
     /// Leading attributes in source order (outside-in, leftmost applied last).
     pub attrs: Vec<Attribute>,
     pub pos: Position,

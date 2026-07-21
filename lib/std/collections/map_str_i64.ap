@@ -60,7 +60,7 @@ public type MapStrI64 {
         while cap * 7 < want * 10 {      # keep load below 70% for `want`
             cap = cap * 2
         }
-        u8** ks = calloc(cap, sizeof(u8*))
+        u8** ks = calloc(cap, sizeof(u8*)) as u8**
         i64* vs = malloc(cap * sizeof(i64))
         return MapStrI64 { keys = ks, vals = vs, count = 0, cap = cap }
     }
@@ -103,7 +103,7 @@ public type MapStrI64 {
         i64* old_vals = this.vals
 
         u64 new_cap = old_cap * 2
-        this.keys = calloc(new_cap, sizeof(u8*))
+        this.keys = calloc(new_cap, sizeof(u8*)) as u8**
         this.vals = malloc(new_cap * sizeof(i64))
         this.cap = new_cap
 
@@ -119,7 +119,7 @@ public type MapStrI64 {
                 this.vals[i] = old_vals[j]
             }
         }
-        free(old_keys)
+        free(old_keys as u0*)
         free(old_vals)
     }
 
@@ -157,7 +157,7 @@ public type MapStrI64 {
                 free(this.keys[i])
             }
         }
-        free(this.keys)
+        free(this.keys as u0*)
         free(this.vals)
         this.count = 0
         this.cap = 0

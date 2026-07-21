@@ -1,0 +1,11 @@
+# expected: "extern functions cannot be exported"
+# `export` gives *this* build's symbol external linkage, but an `extern` fn is
+# defined in another object file — there is no local symbol here to export.
+# (`public extern` IS allowed: it only makes the declaration nameable from
+# other Aspect modules.)
+
+export extern fn puts(u8 *s) -> i32
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

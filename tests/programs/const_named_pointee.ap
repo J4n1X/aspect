@@ -1,0 +1,11 @@
+# expected: 12
+# `const <NamedType>*` now parses (the scanner only fused `const` with built-in
+# scalars before). Reading through a const pointer is fine — const forbids
+# *writes*, not reads — so `cp.x + cp.y` yields 5 + 7.
+type Point { public i32 x  public i32 y }
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Point p = Point { x = 5, y = 7 }
+    const Point* cp = &p
+    return cp.x + cp.y
+}

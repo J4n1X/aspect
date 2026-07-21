@@ -1,0 +1,9 @@
+# expected: "i32*", "u8*"
+# Rule 1: two pointers of matching depth but different pointee type no longer
+# coerce implicitly — `i32* -> u8*` needs an explicit `as` cast.
+fn main(u32 argc, u8 **argv) -> i32 {
+    i32 x = 5
+    i32* p = &x
+    u8* q = p
+    return 0
+}

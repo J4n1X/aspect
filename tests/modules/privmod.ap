@@ -1,0 +1,7 @@
+$module privmod
+
+# A private helper — module-local, not nameable from importers.
+fn secret() -> i32 { return 7 }
+
+# The exported surface: callable across the module boundary.
+public fn shared() -> i32 { return secret() + 10 }

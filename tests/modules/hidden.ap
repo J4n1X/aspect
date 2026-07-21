@@ -17,8 +17,8 @@ public type HiddenBox {
     }
 }
 
-i32 hidden_global = 41
+public i32 hidden_global = 41
 
-fn hidden_value() -> i32 {
+public fn hidden_value() -> i32 {
     return 6
 }

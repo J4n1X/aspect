@@ -3,6 +3,6 @@
 # its files (see ./importer.ap).
 $module pair
 
-fn pair_value() -> i32 {
+public fn pair_value() -> i32 {
     return pair_base() + hidden_value() + hidden_global
 }

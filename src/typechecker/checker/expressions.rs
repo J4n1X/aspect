@@ -58,7 +58,7 @@ impl TypeChecker {
                 let left_type = self.synth_expression(left);
                 let right_type = self.synth_expression(right);
 
-                if !Self::binary_op_types_valid(&left_type, &right_type, &BinaryOp::Add) {
+                if !Self::comparison_operands_valid(&left_type, &right_type) {
                     self.errors.push(TypeCheckError::InvalidBinaryOperation {
                         operator: "comparison".to_string(),
                         left: left_type,
@@ -99,7 +99,22 @@ impl TypeChecker {
                 if inner_type.is_opaque_ptr() {
                     self.errors.push(TypeCheckError::OpaqueDereference(pos));
                 }
-                default_type
+                // Recompute the pointee from the just-synthesized inner type
+                // rather than trusting the parser's best-effort stamp: only the
+                // checker knows the base's const-ness (propagated through
+                // `resolve_field`), so a stale stamp would let `*const_ptr = x`
+                // and `*this.next = n` slip past the write-through-const check
+                // in `DerefAssign`. Const propagates downward — a const pointer
+                // yields a const pointee.
+                let result = if inner_type.is_array() {
+                    inner_type.element_type()
+                } else if inner_type.pointer_depth > 0 {
+                    inner_type.with_pointer_depth(inner_type.pointer_depth - 1)
+                } else {
+                    default_type
+                };
+                expr.expr_type = result;
+                result
             }
 
             ExprKind::FunctionCall { name, args } => {
@@ -596,12 +611,39 @@ impl TypeChecker {
         }
     }
 
-    /// Emit a `TypeMismatch` unless `found` is coercible to `target`.
+    /// Emit a `TypeMismatch` unless `found` is coercible to `target`; otherwise
+    /// warn if the (accepted) implicit conversion changes signedness.
     fn assert_coercible(&mut self, found: LangType, target: &LangType, pos: crate::lexer::Position) {
         if !types_coercible(&found, target) {
             self.errors.push(TypeCheckError::TypeMismatch {
                 expected: *target,
                 found,
+                position: pos,
+            });
+            return;
+        }
+        self.warn_signedness_change(found, target, pos);
+    }
+
+    /// Warn on an *implicit* integer conversion that changes signedness —
+    /// whether it widens (`i32 -> u64`, case b) or keeps the same width
+    /// (`i32 -> u32`, case c). Both silently reinterpret the sign bit of a
+    /// runtime value. This runs only on the implicit-coercion path
+    /// (`assert_coercible`); an explicit `as` cast does not pass through here,
+    /// so a cast is the way to silence the warning per-site. Same-sign widening
+    /// (`i32 -> i64`) is deliberately not flagged.
+    fn warn_signedness_change(
+        &mut self,
+        found: LangType,
+        target: &LangType,
+        pos: crate::lexer::Position,
+    ) {
+        if found.is_plain_int() && target.is_plain_int() && found.base != target.base {
+            self.warnings.push(crate::typechecker::errors::TypeWarning {
+                message: format!(
+                    "implicit conversion from '{found}' to '{target}' changes signedness \
+                     (cast with `as` to silence)"
+                ),
                 position: pos,
             });
         }
@@ -624,6 +666,26 @@ impl TypeChecker {
     }
 
     // ── Binary op helpers ────────────────────────────────────────────────────
+
+    /// Whether two operand types may be *compared* (`==`, `!=`, `<`, …).
+    ///
+    /// Pointer comparison keeps the permissive rule that assignment coercion
+    /// dropped in Proposal C: two pointers compare regardless of pointee type,
+    /// because comparing addresses is not aliasing. Kept decoupled from
+    /// [`types_coercible`] so tightening `T* -> U*` binding does not also reject
+    /// `Point* a == Node* b`. Same depth (after decay), or a `u0*` on either
+    /// side (which includes the `null` placeholder, a `u8*`); non-pointer
+    /// operands fall back to the ordinary arithmetic/coercion validity.
+    fn comparison_operands_valid(left: &LangType, right: &LangType) -> bool {
+        let l = if left.is_array() { left.decay_to_pointer() } else { *left };
+        let r = if right.is_array() { right.decay_to_pointer() } else { *right };
+        if l.is_pointer_like() && r.is_pointer_like() {
+            let l_opaque = l.base == TypeBase::Void && l.pointer_depth == 1;
+            let r_opaque = r.base == TypeBase::Void && r.pointer_depth == 1;
+            return l.pointer_depth == r.pointer_depth || l_opaque || r_opaque;
+        }
+        Self::binary_op_types_valid(left, right, &BinaryOp::Add)
+    }
 
     /// Check if two operand types are valid for the given binary operation.
     fn binary_op_types_valid(left: &LangType, right: &LangType, op: &BinaryOp) -> bool {

@@ -1,0 +1,26 @@
+# expected: 42
+# What Proposal C keeps implicit: `u0* -> T*` and `T* -> u0*` at depth 1 (the
+# malloc/free idiom), and `T* -> const T*` (adding const). And two
+# differently-typed pointers still *compare* (permissive comparison predicate).
+extern fn malloc(u64 n) -> u0*
+extern fn free(u0* p) -> u0
+
+type A { public i32 x }
+type B { public i32 y }
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    u0* raw = malloc(16)     # -
+    i32* xs = raw            # u0* -> i32*  : implicit (depth 1)
+    xs[0] = 41
+    const i32* cp = xs       # i32* -> const i32* : add const, implicit
+    i32 v = cp[0]            # read through const = 41
+
+    A* a = malloc(16)        # u0* -> A* : implicit (depth 1)
+    B* b = a as B*           # A* -> B* : different pointee, explicit cast required
+    i32 same = 0
+    if a == b { same = 1 }   # A* vs B* still compare (permissive) -> true
+
+    free(a)                  # A* -> u0* : implicit (depth 1)
+    free(raw)
+    return v + same          # 42
+}

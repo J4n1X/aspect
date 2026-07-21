@@ -2,6 +2,6 @@
 $module left
 $import base
 
-fn left_value() -> i32 {
+public fn left_value() -> i32 {
     return base_value() + 1
 }

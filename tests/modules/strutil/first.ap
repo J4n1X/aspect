@@ -2,6 +2,6 @@
 # directly inside `<root>/strutil/`, in sorted order — this file first.
 $module strutil
 
-fn su_first() -> i32 {
+public fn su_first() -> i32 {
     return 10
 }

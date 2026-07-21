@@ -111,7 +111,7 @@ digit      ::= [0-9]
 Reserved keywords (not usable as identifiers):
 
 ```
-fn  extern  asm  const  type  struct  alias  public  sizeof
+fn  extern  asm  naked  const  type  struct  alias  public  export  sizeof
 while  if  else  elif  for  switch
 break  continue  as  return
 true  false  null
@@ -172,19 +172,19 @@ the lexer, so `const u8*` and `const u8 *` are both valid.
 `u0` variable, parameter, or global is a type error — but `u0*` is the
 language's universal object pointer (C's `void*`):
 
-- Any pointer, of any depth, coerces to and from `u0*` implicitly:
+- Any **depth-1** pointer coerces to and from `u0*` implicitly:
   `free(xs)` works for `i32* xs`, and `i32* p = malloc(n)` needs no cast.
+  `T**` and deeper do **not** bridge — `u0* -> i32**` or `u8** -> u0*`
+  need an explicit `as` cast (Proposal C rule 2; see "Pointer coercion").
 - A `u0*` is *opaque*: dereferencing it, subscripting it, and pointer
   arithmetic on it are all rejected — cast to a sized pointer first
   (`p as i32*`, or `p as u8*` for byte offsets).
 - Null tests work directly: `p == null`, `if p { ... }`, `!p`.
-- `u0**` (depth 2) does not get `u0*`'s depth-crossing treatment, but it
-  is not itself opaque — it dereferences fine (yielding a `u0*`, which
-  then can't be dereferenced further without a cast), and it coerces
-  implicitly with any other depth-2 pointer under the ordinary
-  same-depth rule (see "Array-to-pointer decay" above), same as `u0*`
-  itself coerces with any depth-1 pointer even without invoking its
-  special depth-crossing rule.
+- `u0**` (depth 2) is not opaque — it dereferences fine (yielding a
+  `u0*`, which then can't be dereferenced further without a cast). But it
+  no longer coerces freely: a `u0**` coerces only with another `u0**` (or
+  a same-pointee depth-2 pointer under rule 1), and it does *not* bridge
+  to `u0*`.
 - `sizeof(u0*)` is the pointer width; `sizeof(u0)` is an error.
 
 Use `u0*` where no particular pointee is expected (allocators, callbacks
@@ -393,15 +393,17 @@ they get their own chapter: [10-modules.md](10-modules.md).
 ```
 program ::= (newline* top-decl newline*)*
 
-top-decl ::= extern-fn-decl
-           | 'public'? asm-fn-decl
-           | 'public'? fn-decl
-           | 'public'? global-var-decl
-           | alias-decl
-           | struct-decl
-# On a fn/global, `public` marks the symbol as exported from the object file.
-# On a `type` (see struct-decl) it exports the type from its module instead.
-# `public extern` and `public` on an alias are errors — see "Visibility" below.
+vis-linkage ::= ('public' | 'export')*         # each at most once, either order
+top-decl ::= 'public'? extern-fn-decl
+           | vis-linkage asm-fn-decl
+           | vis-linkage fn-decl
+           | vis-linkage global-var-decl
+           | 'public'? alias-decl               # 'public' on an alias is an error
+           | 'public'? struct-decl
+# `public` = module visibility (nameable via `$import`); `export` = external
+# linkage (foreign-visible object-file symbol). They are orthogonal and compose.
+# `export extern`, and `export` on a type/alias, are errors — see "Visibility
+# and linkage" below. `public extern` is allowed (module-visible declaration).
 
 extern-fn-decl ::= 'extern' 'fn' ident '(' param-list ')' return-ann term
 
@@ -756,48 +758,53 @@ fn main(u32 argc, u8 **argv) -> i32 {
 
 ## Notable constraints
 
-### Visibility
+### Visibility and linkage
 
-`public` on a top-level function or global decides one thing: whether its
-symbol leaves the object file.
+A top-level function or global has **two independent, opt-in axes**, spelled by
+two keywords that compose in either order:
 
 ```
-public fn exported(i32 x) -> i32 { return x }    # external linkage
-fn helper(i32 x) -> i32 { return x }             # internal linkage
-public i32 counter = 0                           # external linkage
-i32 scratch = 0                                  # private linkage
+fn helper(i32 x) -> i32 { return x }          # private + internal (the default)
+public fn api(i32 x) -> i32 { return x }       # module-visible; still internal linkage
+export fn abi() -> i32 { return 0 }            # external linkage; not module-visible
+public export i32 counter = 0                  # both: importable AND foreign-linkable
 ```
 
-It is **not** about who may call or read it. A program and every module it
-imports compile to a single LLVM module, so a private function or global is
-reachable from anywhere in the program regardless — `public` only matters to
-code outside Aspect that must find the symbol by name.
+- **`public` — module visibility** (a *name-resolution* rule, enforced at parse
+  time). Whether another module may name the symbol through `$import`. The
+  default is **private to the defining module**: a cross-module reference to a
+  bare `fn`/global is a compile error (`… is private to module '…' — declare it
+  `public``). This is the function/global analogue of the `public type` gate. It
+  says nothing about the object file.
+- **`export` — external linkage** (a *codegen* property). Whether the symbol
+  leaves the object file with external LLVM linkage for a foreign consumer. The
+  default is **internal linkage**, which is what makes dead code collectable:
+  `globaldce` may delete an unreachable internal symbol and may never delete an
+  external one. Marking everything `export` would pin the entire unused standard
+  library into every binary.
 
-Private is the default because it is what makes dead code collectable: LLVM
-may delete an unreachable private symbol, and may never delete an external
-one, since some other object file might reference it. Marking everything
-public would put the entire unused standard library in every binary.
+The two are orthogonal on purpose: a `public` symbol stays *internally linked*,
+so exporting the stdlib's API to other modules does not defeat dead-code
+elimination. Only `export` changes linkage.
 
-- `main` and `_start` are implicitly public — the C runtime calls one and the
-  linker enters at the other.
-- `public extern fn` is an error: `extern` names a symbol defined elsewhere,
-  so there is nothing here to export.
-- `public` on a **global variable** works the same way: `public i32 counter = 0`
-  gets external linkage, a private one gets `private` linkage and is collected
-  when unused.
-- `public` on a **type-struct** is about *module visibility*, not linkage (a
-  type has no symbol): a plain `type` is usable only inside its defining
+- `main` and `_start` are implicitly externally linked — the C runtime calls
+  one and the linker enters at the other.
+- `export extern fn` is an error: `extern` names a symbol defined in another
+  object file, so there is no local symbol here to give linkage to. `public
+  extern fn` **is** allowed — it makes the declaration nameable from importing
+  modules (`public extern fn malloc`).
+- `export` on a **type-struct** or **alias** is an error: neither has a linked
+  object-file symbol. `public` on a **type-struct** is the module-visibility
+  axis applied to a type: a plain `type` is usable only inside its defining
   module, while `public type` may be named — and have its methods called —
   from any module that imports the defining one. A member's own `public` is
   capped by the type's: a `public fn` on a private type is callable anywhere
   in the defining module, never outside it. Values of a foreign private type
-  still flow through outside code as opaque handles (returned from and passed
-  back into the module's public functions); an alias does not launder the
-  privacy of its target. See `10-modules.md` for the full rules.
-- `public` on an alias is an error — an alias is compile-time only and has
-  no symbol to export.
-- Inside a type-struct, `public` means something different — access through
-  the type. See [Type-structs](#top-level).
+  still flow through outside code as opaque handles; an alias does not launder
+  the privacy of its target. `public` on an alias is an error — an alias is
+  compile-time only and has no symbol. See `10-modules.md` for the full rules.
+- Inside a type-struct, `public` means access *through the type*. See
+  [Type-structs](#top-level).
 
 ### `asm fn`
 
@@ -926,37 +933,67 @@ without an explicit `as`.
 
 `types_coercible` (`src/typechecker/types.rs`) gates implicit integer
 coercion on width alone: `from.size_bits <= to.size_bits`, independent of
-`SInt`/`UInt`. This means cross-sign coercions are implicit whenever the
-target is at least as wide, including same-width sign reinterpretation
-(`i32` → `u32`) — and it happens silently; there is no compiler warning
-for this or any other implicit coercion (no `eprintln!`/warning
-mechanism exists in the codegen or typechecker).
+`SInt`/`UInt`. A cross-sign coercion is still *accepted* whenever the target is
+at least as wide, but it now emits a **warning** — both the widening case
+(`i32` → `u64`) and the same-width reinterpretation (`i32` → `u32`). The
+warning is raised in `assert_coercible` (only on the implicit path, so an
+explicit `as` cast silences it), accumulated on `TypeChecker::warnings`, and
+printed to stderr by the driver as `file:line:col: warning: …` after a
+successful check. It does **not** fail the build or change the exit code
+(v1 — `-Werror`/suppression is deferred). Same-sign widening (`i32` → `i64`)
+is not flagged.
 
 ```
 u64 n = 0
 n += 1        # i32 literal into u64 context — implicit, no cast needed
 i32 s = -1
-u32 u = s     # i32 -> u32, same width, opposite sign — also implicit
+u32 u = s     # i32 -> u32, same width, opposite sign — warns (cast to silence)
 ```
 
 Narrowing (e.g., `i64` to `i32`, or `i32` to `i8`) always requires `as`.
 Pointer-to-integer and integer-to-pointer conversions also require `as`.
 
-### String literals are `u8*`, and `const` is a binding qualifier
+### Pointer coercion
+
+Implicit pointer coercion (`types_coercible`, `src/typechecker/types.rs`) is
+tight — three rules:
+
+1. **Pointee type must match.** Two pointers of equal depth coerce only when
+   their pointee is the same type; `i32* -> u8*`, and even `i32* -> u32*`
+   (different signedness is a different pointee), need an explicit `as` cast.
+2. **The `u0*` bridge is depth-1 only.** `u0*` (depth exactly 1) coerces
+   implicitly to and from any *depth-1* pointer, both directions (`T* -> u0*`
+   erasure and `u0* -> T*`, the `malloc` idiom). `T**` and deeper do **not**
+   bridge — `u0* -> i32**` or `u8** -> u0*` need a cast.
+3. **Const may be added, never removed.** `T* -> const T*` is implicit;
+   `const T* -> T*` needs a cast (it would discard the immutability guarantee).
+
+Pointer **comparisons** keep a separate, permissive rule
+(`comparison_operands_valid`, `src/typechecker/checker/expressions.rs`): two
+pointers compare (`==`, `<`, …) regardless of pointee type — comparing
+addresses is not aliasing — so rule 1 does not spill into comparisons.
+
+### String literals are `u8*`, and `const` is truly immutable
 
 The lexer returns string literal tokens whose expression type is `u8*`
 (non-const, pointer depth 1).
 
-`const` is **ignored for coercion purposes** — `types_coercible`
-(`src/typechecker/types.rs`) opens with "Exact match (ignoring const)"
-and never consults `is_const` on any compatibility path. So `u8*` and
-`const u8*` are freely interchangeable in both directions, and string
-literals pass to `const u8*` parameters with no cast.
+`const` means **truly immutable** — a single `is_const` flag on `LangType`
+that forbids *every* mutation of the value: rebinding it (`VarAssign`), writing
+its fields (`FieldAssign`, via `resolve_field`'s const propagation), and
+writing through it (`DerefAssign`). The `Dereference` synth arm recomputes the
+pointee type from the operand, propagating const, so the guarantee reaches
+every level of indirection (`**pp = x` on a `const i32**` is rejected). The
+only way to write is to strip const with an explicit `as` cast (`cast_valid`
+permits any pointer-to-pointer cast).
 
-What `const` does do is prevent assignment *through the binding*:
-`const u8 *s` means `s` cannot be reassigned. It confers nothing on the
-pointed-to data — `*s = 90` is allowed and unchecked, the opposite of
-what a C reader expects from `const char *`.
+Const's effect on *coercion* is asymmetric — adding const is implicit, removing
+it needs a cast (see the pointer-coercion rules under
+[`as` is explicit](#as-is-explicit-and-always-required-for-narrowing)).
+`const` before a named type (`const Point*`) is accepted by `parse_type`; the
+scanner only fused
+`const` with built-in scalar spellings, so other bases arrive as a bare `const`
+keyword the parser folds in.
 
 ### Array-to-pointer decay
 

@@ -4,7 +4,7 @@
 $module middle
 $import hidden
 
-fn middle_value() -> i32 {
+public fn middle_value() -> i32 {
     HiddenBox b = HiddenBox.make(hidden_global)     # type + static method + global
     HiddenInt bonus = 1                             # alias
     return b.get() + hidden_value() + (bonus as i32) # instance method + function

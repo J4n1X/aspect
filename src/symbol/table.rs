@@ -39,6 +39,12 @@ pub struct FunctionSymbol {
     pub return_type: LangType,
     pub is_extern: bool,
     pub has_body: bool,
+    /// Module visibility — whether another module may call this function
+    /// through `$import`. Mirrors [`crate::parser::ast::FunctionProto::vis`];
+    /// stored here so the parser's call-resolution can enforce it (the
+    /// function/global analogue of the `public type` gate). Independent of
+    /// LLVM linkage.
+    pub vis: crate::symbol::module::Visibility,
     pub pos: Position,
 }
 

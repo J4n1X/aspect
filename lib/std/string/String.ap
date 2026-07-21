@@ -57,7 +57,7 @@ public type String {
     }
 
     public const fn len(this) -> u64 { return this.length }
-    public const fn c_str(this) -> u8* { return this.data }
+    public const fn c_str(this) -> u8* { return this.data as u8* }
 
     # Internal: ensure `data` has room for at least `need_total` bytes
     # (terminator included). Doubles, but jumps to the exact size if the

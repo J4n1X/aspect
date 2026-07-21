@@ -1,0 +1,12 @@
+# expected: "const"
+# Writing a field through a const pointer is rejected: the base's const-ness
+# propagates to the field type (`resolve_field`), so `cp.x = 9` is an
+# assignment to a const location.
+type Point { public i32 x  public i32 y }
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Point p = Point { x = 5, y = 7 }
+    const Point* cp = &p
+    cp.x = 9
+    return 0
+}

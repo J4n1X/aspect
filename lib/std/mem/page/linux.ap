@@ -22,39 +22,39 @@ $import std/linux/syscall
 # 4 KiB is architectural on x86-64: it is the granularity mmap and
 # mprotect work in regardless of transparent huge pages. Reading AT_PAGESZ
 # would mean walking the aux vector, which needs the raw stack on entry.
-fn page_size() -> u64 {
+public fn page_size() -> u64 {
     return 4096
 }
 
 # Linux places mappings at page granularity, so a reservation is no
 # coarser than a page. On Windows the two genuinely differ (64 KiB).
-fn page_granularity() -> u64 {
+public fn page_granularity() -> u64 {
     return page_size()
 }
 
-fn page_reserve(u64 n_bytes) -> u0* {
+public fn page_reserve(u64 n_bytes) -> u0* {
     i64 r = sys_mmap(null, n_bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, 0 - 1, 0)
     if failed(r) { return null }
     return r as u0*
 }
 
-fn page_commit(u0* p, u64 n_bytes) -> bool {
+public fn page_commit(u0* p, u64 n_bytes) -> bool {
     return sys_mprotect(p, n_bytes, PROT_READ | PROT_WRITE) == 0
 }
 
 # MAP_FIXED over the range, rather than mprotect(PROT_NONE): both revoke
 # access, but only remapping drops the backing pages, which is what
 # decommit means. The reservation survives — the address stays ours.
-fn page_decommit(u0* p, u64 n_bytes) -> bool {
+public fn page_decommit(u0* p, u64 n_bytes) -> bool {
     i64 r = sys_mmap(p, n_bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, 0 - 1, 0)
     return !failed(r)
 }
 
-fn page_release(u0* p, u64 n_bytes) -> bool {
+public fn page_release(u0* p, u64 n_bytes) -> bool {
     return sys_munmap(p, n_bytes) == 0
 }
 
-fn page_map(u64 n_bytes) -> u0* {
+public fn page_map(u64 n_bytes) -> u0* {
     i64 r = sys_mmap(null, n_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0 - 1, 0)
     if failed(r) { return null }
     return r as u0*

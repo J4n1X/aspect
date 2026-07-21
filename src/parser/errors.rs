@@ -59,6 +59,19 @@ pub enum ParserError {
         pos: Position,
     },
 
+    /// A cross-module use of a free function or global variable that is not
+    /// `public`: the defining module is imported, but the symbol itself was
+    /// not exported to the module namespace. `defining`/`referring` arrive
+    /// pre-rendered via [`ParserError::private_symbol`].
+    #[error("{kind} '{name}' is private to {defining} and cannot be used from {referring} — declare it `public` to export it at {pos}")]
+    PrivateSymbol {
+        kind: &'static str,
+        name: String,
+        defining: String,
+        referring: String,
+        pos: Position,
+    },
+
     #[error("Function '{0}' expects {1} arguments but got {2} at {3}")]
     ArgumentCountMismatch(String, usize, usize, Position),
 
@@ -154,6 +167,25 @@ impl ParserError {
         pos: Position,
     ) -> Self {
         ParserError::PrivateType {
+            name: name.into(),
+            defining: Self::describe_module(defining_module),
+            referring: Self::describe_module(referring_module),
+            pos,
+        }
+    }
+
+    /// Build a [`ParserError::PrivateSymbol`], rendering each module path via
+    /// [`ParserError::describe_module`].
+    #[must_use]
+    pub(crate) fn private_symbol(
+        kind: &'static str,
+        name: impl Into<String>,
+        defining_module: &str,
+        referring_module: &str,
+        pos: Position,
+    ) -> Self {
+        ParserError::PrivateSymbol {
+            kind,
             name: name.into(),
             defining: Self::describe_module(defining_module),
             referring: Self::describe_module(referring_module),

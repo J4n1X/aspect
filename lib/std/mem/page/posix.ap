@@ -22,40 +22,40 @@ $if defined(OS_MACOS) || (defined(OS_LINUX) && !defined(ARCH_X86_64))
 $import std/c/mman
 $import std/c/unistd
 
-fn page_size() -> u64 {
+public fn page_size() -> u64 {
     return getpagesize() as u64
 }
 
 # mmap places mappings at page granularity on every POSIX target, so a
 # reservation is no coarser than a page. On Windows the two genuinely
 # differ (64 KiB).
-fn page_granularity() -> u64 {
+public fn page_granularity() -> u64 {
     return page_size()
 }
 
-fn page_reserve(u64 n_bytes) -> u0* {
+public fn page_reserve(u64 n_bytes) -> u0* {
     u0* p = mmap(null, n_bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, 0 - 1, 0)
     if map_failed(p) { return null }
     return p
 }
 
-fn page_commit(u0* p, u64 n_bytes) -> bool {
+public fn page_commit(u0* p, u64 n_bytes) -> bool {
     return mprotect(p, n_bytes, PROT_READ | PROT_WRITE) == 0
 }
 
 # MAP_FIXED over the range, rather than mprotect(PROT_NONE): both revoke
 # access, but only remapping drops the backing pages, which is what
 # decommit means. The reservation survives — the address stays ours.
-fn page_decommit(u0* p, u64 n_bytes) -> bool {
+public fn page_decommit(u0* p, u64 n_bytes) -> bool {
     u0* r = mmap(p, n_bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, 0 - 1, 0)
     return !map_failed(r)
 }
 
-fn page_release(u0* p, u64 n_bytes) -> bool {
+public fn page_release(u0* p, u64 n_bytes) -> bool {
     return munmap(p, n_bytes) == 0
 }
 
-fn page_map(u64 n_bytes) -> u0* {
+public fn page_map(u64 n_bytes) -> u0* {
     u0* p = mmap(null, n_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0 - 1, 0)
     if map_failed(p) { return null }
     return p

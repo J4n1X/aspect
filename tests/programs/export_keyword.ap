@@ -1,0 +1,12 @@
+# expected: 42
+# `export` (external linkage) and the fully-open `public export` form parse,
+# compose, and compile. In a single-file program they change linkage only,
+# not runtime behavior — so this just proves the grammar and codegen accept
+# every combination end-to-end.
+export fn helper() -> i32 { return 2 }
+
+public export const i32 ANSWER = 40
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return helper() + ANSWER
+}

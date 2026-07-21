@@ -14,7 +14,7 @@
 -#
 $module std/io/internal
 
-fn fmt_u64(u8 *buf, u64 at, u64 n) -> u64 {
+public fn fmt_u64(u8 *buf, u64 at, u64 n) -> u64 {
     if n >= 10 { at = fmt_u64(buf, at, n / 10) }
     buf[at] = (n % 10 + 48) as u8                  # ASCII '0' = 48
     return at + 1
@@ -22,7 +22,7 @@ fn fmt_u64(u8 *buf, u64 at, u64 n) -> u64 {
 
 # Exactly six digits, zero-padded (C's `%06d`). Digits above the sixth are
 # dropped, as they always have been.
-fn fmt_u64_pad6(u8 *buf, u64 at, u64 n) -> u64 {
+public fn fmt_u64_pad6(u8 *buf, u64 at, u64 n) -> u64 {
     u64 div = 100000
     while div > 0 {
         buf[at] = ((n / div) % 10 + 48) as u8
@@ -32,7 +32,7 @@ fn fmt_u64_pad6(u8 *buf, u64 at, u64 n) -> u64 {
     return at
 }
 
-fn fmt_i64(u8 *buf, u64 at, i64 n) -> u64 {
+public fn fmt_i64(u8 *buf, u64 at, i64 n) -> u64 {
     if n >= 0 { return fmt_u64(buf, at, n as u64) }
     buf[at] = 45                                   # '-'
     # `n` could be I64_MIN; flip the bits then bump by one to land at the
@@ -47,7 +47,7 @@ fn fmt_i64(u8 *buf, u64 at, i64 n) -> u64 {
 #     Beyond that, `x as i64` is UB at the LLVM level.
 #   * NaN and infinities render as `nan` / `inf` / `-inf`. No scientific
 #     notation; very small numbers round to `0.000000`.
-fn fmt_f64(u8 *buf, u64 at, f64 x) -> u64 {
+public fn fmt_f64(u8 *buf, u64 at, f64 x) -> u64 {
     # NaN: a value not equal to itself.
     if x != x {
         buf[at] = 110 buf[at + 1] = 97 buf[at + 2] = 110      # "nan"
@@ -79,7 +79,7 @@ fn fmt_f64(u8 *buf, u64 at, f64 x) -> u64 {
     return fmt_u64_pad6(buf, at + 1, cents as u64)
 }
 
-fn cstring_len(u8 *s) -> u64 {
+public fn cstring_len(u8 *s) -> u64 {
     u64 n = 0
     while s[n] != 0 { n = n + 1 }
     return n

@@ -75,7 +75,7 @@ fn main(u32 argc, u8** argv) -> i32 {
     }
 
     # Drain the key set into a flat array, then sort it.
-    g_words = malloc(freq.len() * sizeof(u8*))
+    g_words = malloc(freq.len() * sizeof(u8*)) as u8**
     freq.for_each(&collect_word)
     sort_cstr(g_words, g_word_count)
 
@@ -105,7 +105,7 @@ fn main(u32 argc, u8** argv) -> i32 {
     pad_to(top_word, 12)
     println_i64(top_count)
 
-    free(g_words)
+    free(g_words as u0*)
     freq.destroy()
 
     # sanity for the curious: 4 lines, 29 words, "chuck" x5

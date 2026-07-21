@@ -7,6 +7,6 @@ $module macdefiner
 
 $define MD_MACRO 40
 
-fn md_add(i32 a) -> i32 {
+public fn md_add(i32 a) -> i32 {
     return a + MD_MACRO
 }

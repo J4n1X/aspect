@@ -293,7 +293,7 @@ fn heap_large_free(u64 tag) {
 }
 
 # ── Public API (matches libc malloc/free/calloc/realloc) ─────────────────
-fn malloc(u64 n) -> u0* {
+public fn malloc(u64 n) -> u0* {
     heap_init()
 
     u64 req = n
@@ -323,7 +323,7 @@ fn malloc(u64 n) -> u0* {
     return (h + 8) as u0*
 }
 
-fn free(u0* p) -> u0 {
+public fn free(u0* p) -> u0 {
     if p == null {
         return
     }
@@ -340,7 +340,7 @@ fn free(u0* p) -> u0 {
     heap_fl_insert(m)
 }
 
-fn calloc(u64 nmemb, u64 size) -> u0* {
+public fn calloc(u64 nmemb, u64 size) -> u0* {
     u64 total = nmemb * size
     u0* p = malloc(total)
     if p == null {
@@ -350,7 +350,7 @@ fn calloc(u64 nmemb, u64 size) -> u0* {
     return p
 }
 
-fn realloc(u0* p, u64 n) -> u0* {
+public fn realloc(u0* p, u64 n) -> u0* {
     if p == null {
         return malloc(n)
     }
@@ -435,16 +435,16 @@ $endif
 
 # ── Byte-count façade (both paths) ──────────────────────────────────────
 # Raw byte allocation — `n` uninitialised bytes.
-fn alloc_bytes(u64 n) -> u0* {
+public fn alloc_bytes(u64 n) -> u0* {
     return malloc(n)
 }
 
 # Zero-initialised byte allocation.
-fn zalloc_bytes(u64 n) -> u0* {
+public fn zalloc_bytes(u64 n) -> u0* {
     return calloc(n, 1)
 }
 
 # Release any pointer obtained from `alloc_bytes`/`malloc`/`realloc`/`calloc`.
-fn free_ptr(u0* p) -> u0 {
+public fn free_ptr(u0* p) -> u0 {
     free(p)
 }

@@ -33,7 +33,7 @@
 $module std/mem/bytes
 
 # Length of a null-terminated byte string, excluding the terminator.
-fn strlen(u8* s) -> u64 {
+public fn strlen(u8* s) -> u64 {
     u64 n = 0
     while s[n] != 0 {
         n = n + 1
@@ -44,7 +44,7 @@ fn strlen(u8* s) -> u64 {
 # Lexicographic compare of two C strings: <0 / 0 / >0. Bytes are unsigned;
 # the classic "advance while equal and not terminated, then subtract" — when
 # the loop stops, the first differing (or terminating) pair decides the sign.
-fn strcmp(u8* a, u8* b) -> i32 {
+public fn strcmp(u8* a, u8* b) -> i32 {
     u64 i = 0
     while a[i] != 0 && a[i] == b[i] {
         i = i + 1
@@ -54,7 +54,7 @@ fn strcmp(u8* a, u8* b) -> i32 {
 
 # Copy `n` bytes src -> dst (must not overlap, per the libc contract) and
 # return dst. Forward byte loop.
-fn memcpy(u0* dst, u0* src, u64 n) -> u0* {
+public fn memcpy(u0* dst, u0* src, u64 n) -> u0* {
     u8* d = dst as u8*
     u8* s = src as u8*
     for (u64 i = 0; i < n; i += 1) {
@@ -64,7 +64,7 @@ fn memcpy(u0* dst, u0* src, u64 n) -> u0* {
 }
 
 # Fill `n` bytes of dst with the low 8 bits of `byte`; return dst.
-fn memset(u0* dst, i32 byte, u64 n) -> u0* {
+public fn memset(u0* dst, i32 byte, u64 n) -> u0* {
     u8* d = dst as u8*
     u8 b = byte as u8
     for (u64 i = 0; i < n; i += 1) {
@@ -75,7 +75,7 @@ fn memset(u0* dst, i32 byte, u64 n) -> u0* {
 
 # Compare `n` bytes: <0 / 0 / >0 at the first differing (unsigned) byte, 0 if
 # all `n` match.
-fn memcmp(u0* a, u0* b, u64 n) -> i32 {
+public fn memcmp(u0* a, u0* b, u64 n) -> i32 {
     u8* pa = a as u8*
     u8* pb = b as u8*
     for (u64 i = 0; i < n; i += 1) {

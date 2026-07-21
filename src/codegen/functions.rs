@@ -9,7 +9,6 @@ use crate::codegen::structs::is_struct_value;
 use crate::codegen::{CodegenError, LangTypeExt};
 use crate::lexer::{Position, TypeBase};
 use crate::parser::{Expression, Function, FunctionBody, LangType, Statement};
-use crate::symbol::module::Visibility;
 
 /// Prepared LLVM call arguments plus the optional `sret` result slot
 /// (its pointer and struct type) that the caller must load after the call.
@@ -38,11 +37,16 @@ const IMPLICITLY_PUBLIC: [&str; 2] = ["main", "_start"];
 /// `extern fn` is the exception that must stay external: it is a declaration of
 /// something defined elsewhere, and internal linkage on a body-less declaration
 /// is invalid IR.
+///
+/// Linkage is the `export` axis, *not* `public`: `public` controls Aspect
+/// module visibility (parse-time name resolution) and leaves a symbol
+/// internally linked so `globaldce` can still strip it. Only `export fn`
+/// requests external linkage for a foreign consumer.
 fn linkage_for(func: &Function) -> Option<Linkage> {
     match func.body {
         FunctionBody::Extern => None,
         _ if IMPLICITLY_PUBLIC.contains(&func.proto.name.as_str()) => None,
-        _ if func.proto.vis == Visibility::Public => None,
+        _ if func.proto.export => None,
         _ => Some(Linkage::Internal),
     }
 }
@@ -484,10 +488,12 @@ extern fn puts(u8 *s) -> i32
 
 fn helper() -> i32 { return 1 }
 
-public fn exported() -> i32 { return 2 }
+public fn visible() -> i32 { return 2 }
+
+export fn exported() -> i32 { return 3 }
 
 fn main(u32 argc, u8 **argv) -> i32 {
-    return helper() + exported() + puts("x")
+    return helper() + visible() + exported() + puts("x")
 }
 "#;
 
@@ -507,8 +513,22 @@ fn main(u32 argc, u8 **argv) -> i32 {
         );
     }
 
+    /// `public` is module *visibility*, not linkage: a `public fn` that no
+    /// foreign consumer needs stays internally linked (and thus collectable),
+    /// exactly like a private one. Only `export` changes the linkage.
     #[test]
-    fn public_and_the_entry_point_stay_external() {
+    fn a_public_but_unexported_function_is_still_internal() {
+        let ctx = Context::create();
+        let ir = ir_for(SRC, &ctx);
+        assert!(
+            define_of(&ir, "visible").contains(" internal "),
+            "expected `public fn visible` to be internal, got: {}",
+            define_of(&ir, "visible")
+        );
+    }
+
+    #[test]
+    fn export_and_the_entry_point_stay_external() {
         let ctx = Context::create();
         let ir = ir_for(SRC, &ctx);
         for name in ["exported", "main"] {

@@ -1,0 +1,9 @@
+# expected: "write through a const pointer"
+# `const` protects the pointee, not just the binding: `*p = x` through a const
+# pointer is rejected (previously `DerefAssign` never checked const at all).
+fn main(u32 argc, u8 **argv) -> i32 {
+    i32 x = 5
+    const i32* p = &x
+    *p = 20
+    return 0
+}

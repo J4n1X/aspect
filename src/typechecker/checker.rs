@@ -47,6 +47,12 @@ pub struct TypeChecker {
     /// override with [`TypeChecker::with_target`].
     target: TargetSpec,
     errors: Vec<TypeCheckError>,
+    /// Non-fatal diagnostics accumulated during checking (e.g. an implicit
+    /// signedness-changing conversion). Read by the driver *after* a successful
+    /// `check_program` — they never appear in the `Err` path, and never change
+    /// the exit code (v1). Both `main.rs` and the test harness must read this,
+    /// since each builds its own `TypeChecker`.
+    warnings: Vec<super::errors::TypeWarning>,
 }
 
 impl TypeChecker {
@@ -61,6 +67,7 @@ impl TypeChecker {
             value_block_types: Vec::new(),
             target: TargetSpec::host(),
             errors: Vec::new(),
+            warnings: Vec::new(),
         }
     }
 
@@ -93,6 +100,31 @@ impl TypeChecker {
         match self.source_files.get(pos.file_id as usize) {
             Some(path) => format!("{}:{}:{}: {}", path.display(), pos.line, pos.column, err),
             None => format!("{err}"),
+        }
+    }
+
+    /// Warnings accumulated during the last `check_program`. Read after a
+    /// successful check — `main.rs` prints these to stderr, the test harness
+    /// asserts on them (`# expected_warning:`).
+    #[must_use]
+    pub fn warnings(&self) -> &[super::errors::TypeWarning] {
+        &self.warnings
+    }
+
+    /// Format one warning as `file:line:col: warning: <message>`, mirroring
+    /// [`Self::format_error`] and the `aspc: warning:` precedent in `main.rs`.
+    #[must_use]
+    pub fn format_warning(&self, warn: &super::errors::TypeWarning) -> String {
+        let pos = warn.position;
+        match self.source_files.get(pos.file_id as usize) {
+            Some(path) => format!(
+                "{}:{}:{}: warning: {}",
+                path.display(),
+                pos.line,
+                pos.column,
+                warn.message
+            ),
+            None => format!("warning: {}", warn.message),
         }
     }
 

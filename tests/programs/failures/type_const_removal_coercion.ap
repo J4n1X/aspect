@@ -1,0 +1,10 @@
+# expected: "const i32*", "i32*"
+# Rule 4: adding const is implicit, but *removing* it needs a cast. Binding a
+# `const i32*` to a plain `i32*` would silently discard the immutability
+# guarantee, so it is rejected — use `as i32*` to strip const on purpose.
+fn main(u32 argc, u8 **argv) -> i32 {
+    i32 x = 5
+    const i32* p = &x
+    i32* q = p
+    return 0
+}

@@ -16,6 +16,11 @@ struct Annotation {
     run_args: Vec<String>,
     compile_args: Vec<String>,
     requires_arch: Option<String>,
+    /// `# expected_warning: "frag"` — an optional fragment that must appear in
+    /// the type checker's non-fatal warnings (stderr). Only meaningful on a
+    /// runtime (`# expected: <code>`) test, since a warning does not fail the
+    /// build. `None` when absent.
+    expected_warning: Option<String>,
 }
 
 /// Map an `ARCH_*` name — the same spelling [`TargetSpec::arch_define`] seeds
@@ -72,10 +77,15 @@ fn parse_annotation(path: &Path) -> Option<Annotation> {
     let mut run_args: Vec<String> = Vec::new();
     let mut compile_args: Vec<String> = Vec::new();
     let mut requires_arch: Option<String> = None;
+    let mut expected_warning: Option<String> = None;
 
     for line in source.lines().take(10) {
         let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("# expected:") {
+        // `# expected_warning:` must be tested before `# expected:` — the
+        // latter is a prefix of the former, so the order matters.
+        if let Some(rest) = trimmed.strip_prefix("# expected_warning:") {
+            expected_warning = parse_string_list(rest.trim()).into_iter().next();
+        } else if let Some(rest) = trimmed.strip_prefix("# expected:") {
             let rest = rest.trim();
             if rest.starts_with('"') {
                 let frags = parse_string_list(rest);
@@ -99,6 +109,7 @@ fn parse_annotation(path: &Path) -> Option<Annotation> {
         run_args,
         compile_args,
         requires_arch,
+        expected_warning,
     })
 }
 
@@ -201,6 +212,20 @@ pub fn generate_tests_impl(_input: TokenStream) -> TokenStream {
                     quote! { #[cfg(target_arch = #arch)] }
                 });
 
+            // An optional `# expected_warning:` assertion, spliced into runtime
+            // tests after the exit-code check (a warning never fails the build,
+            // so it rides on a passing runtime test).
+            let warning_check: TokenStream2 = match ann.expected_warning.as_deref() {
+                Some(frag) => quote! {
+                    assert_warning_contains(
+                        #path_str,
+                        #frag,
+                        &[#(String::from(#compile_args)),*],
+                    );
+                },
+                None => TokenStream2::new(),
+            };
+
             let test_fn: TokenStream2 = match ann.expected {
             Expected::ExitCode(code) if ann.run_args.is_empty() && compile_args.is_empty() => quote! {
                 #arch_gate
@@ -209,6 +234,7 @@ pub fn generate_tests_impl(_input: TokenStream) -> TokenStream {
                     let result = compile_and_run(#path_str)
                         .expect(concat!("Failed to compile and run ", #path_str));
                     assert_eq!(result, #code, "Expected exit code {}, got {}", #code, result);
+                    #warning_check
                 }
             },
             Expected::ExitCode(code) => {
@@ -223,6 +249,7 @@ pub fn generate_tests_impl(_input: TokenStream) -> TokenStream {
                             &[#(String::from(#compile_args)),*],
                         ).expect(concat!("Failed to compile and run ", #path_str));
                         assert_eq!(result, #code, "Expected exit code {}, got {}", #code, result);
+                        #warning_check
                     }
                 }
             }

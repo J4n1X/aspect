@@ -52,4 +52,4 @@ type Handle {
     public i32 tag
 }
 
-Handle shared_handle = Handle { tag = 1 }
+public Handle shared_handle = Handle { tag = 1 }

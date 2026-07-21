@@ -211,8 +211,10 @@ aspc compile program.ap --target i686-unknown-linux-gnu --emit obj -o program.o
 ld -m elf_i386 -o program program.o                       # if freestanding (_start)
 ```
 
-`_start` (like `main`) is implicitly public and survives dead-code elimination,
-so a freestanding entry point is preserved. `--emit exe` (invoking a linker for
+`_start` (like `main`) is implicitly externally linked and survives dead-code
+elimination, so a freestanding entry point is preserved. (Other symbols you
+need a foreign linker to see are marked `export`; `public` is Aspect-module
+visibility and stays internally linked.) `--emit exe` (invoking a linker for
 you) is not yet implemented — link the emitted object yourself, as above.
 
 ## Environment Variables

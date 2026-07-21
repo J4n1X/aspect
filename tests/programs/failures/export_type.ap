@@ -1,0 +1,9 @@
+# expected: "export can only be used with functions or global variables"
+# `export` is a linkage marker — it gives a symbol external LLVM linkage. A
+# type-struct has no linked object-file symbol, so it cannot be exported.
+# (`public type` — module visibility — is the correct way to share a type.)
+export type Foo {
+    i32 x
+}
+
+fn main(u32 argc, u8 **argv) -> i32 { return 0 }

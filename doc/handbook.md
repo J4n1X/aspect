@@ -354,23 +354,28 @@ zero-fills. Pick the unsigned width when you're doing bit manipulation
 that shouldn't care about sign (see `demos/types.ap` for a worked
 example with packed RGBA colour channels).
 
-Implicit integer coercion is gated on **width alone, not signedness** —
-if the target type is at least as wide as the source, no cast is needed,
-whether or not the two sides agree on sign:
+Implicit integer coercion is still gated on **width** — the target must be at
+least as wide as the source — but a coercion that also **changes signedness**
+now emits a **warning** (it still compiles; the warning is non-fatal and does
+not change the exit code):
 
 ```aspect
 i32 a = 5
-i64 b = a         # i32 -> i64: wider, same sign — implicit
-u64 c = a         # i32 -> u64: wider, DIFFERENT sign — also implicit
-u32 d = a         # i32 -> u32: SAME width, different sign — implicit too
+i64 b = a         # i32 -> i64: wider, same sign — silent, fine
+u64 c = a         # i32 -> u64: wider + sign change — WARNS
+u32 d = a         # i32 -> u32: same width, sign change — WARNS
 ```
 
-That last line silently reinterprets the bit pattern (a negative `i32`
-assigned to a same-width `u32` comes out as the huge unsigned value you'd
-expect from two's-complement, with no diagnostic at all — there is
-currently no compiler warning for any of this, implicit or not).
-Narrowing — a strictly smaller target width — is the one case that's
-always a hard type error without an explicit cast:
+A sign-changing coercion silently reinterprets the bit pattern (a negative
+`i32` assigned to a same-width `u32` comes out as the huge two's-complement
+value), so the compiler flags it. To say you meant it — and silence the
+warning — use an explicit `as` cast: `u32 d = a as u32`. Same-sign widening
+(`i32 -> i64`) is never flagged. The warning goes to stderr as
+`file:line:col: warning: …`; there is no `-Werror` or per-file suppression yet
+(a cast is the only silencer for now).
+
+Narrowing — a strictly smaller target width — is the one case that's always a
+hard type error without an explicit cast:
 
 ```aspect
 i64 big = 300
@@ -407,12 +412,35 @@ but plain `i32* p = raw` already works without it (see
 
 ### `const`
 
-`const` marks a value (or the pointee of a pointer) as read-only. It
-must immediately precede the base type:
+`const` means **truly immutable**: a `const` value cannot be mutated in any
+way — you cannot rebind it, write its fields, or write through it — and the
+constraint reaches all the way down. It must immediately precede the base type,
+which may be a built-in *or a named type*:
 
 ```aspect
 const i32 LIMIT = 100
 const u8 *label = "readonly bytes"
+const Point *origin = &p          # const before a type-struct works too
+```
+
+`const` protects the **pointee**, not merely the binding. Writing *through* a
+const pointer is rejected, at every level of indirection:
+
+```aspect
+const i32 *p = &x
+*p = 20            # error: cannot write through a const pointer
+p.field = 3        # error (for a const struct pointer): same reason
+
+const i32 **pp = &q
+**pp = 5           # error too — const propagates downward
+```
+
+Reading through a const pointer is always fine — only writes are blocked. The
+one escape hatch is an explicit `as` cast, which strips const deliberately:
+
+```aspect
+i32 *w = p as i32*    # opt out of the guarantee, on purpose
+*w = 20               # now allowed
 ```
 
 ### Pointers
@@ -426,19 +454,28 @@ i32 *p = &x
 *p = 20          # x is now 20
 ```
 
-Two pointers of the **same depth** coerce into one another implicitly
-regardless of pointee type — the type checker only compares pointer
-depth here, not what's on the other side of it. This isn't limited to
-`u0*`; it's true of any two sized pointers:
+Two pointers coerce implicitly only when their **pointee types match**.
+Assigning between different pointee types needs an explicit `as` cast — the
+compiler no longer waves through `i32* -> u8*` (or `i32* -> u32*`: different
+signedness is a different pointee):
 
 ```aspect
 i32 *p = &x
-u8 *q = p        # i32* -> u8*, no cast — same depth, any pointee type
+u8 *q = p            # error: different pointee type
+u8 *q = p as u8*     # ok — you asked for the reinterpretation
 ```
 
-In practice this means the compiler won't stop you from assigning the
-"wrong" pointer type as long as the depth matches — worth remembering
-when a pointer holds a surprising value; see [§15](#15-common-pitfalls).
+Adding `const` to the pointee is free; *removing* it needs a cast (§[`const`](#const)):
+
+```aspect
+i32 *w = &x
+const i32 *r = w     # ok — adding const is implicit
+i32 *back = r        # error — removing const; write `r as i32*`
+```
+
+Pointer *comparisons* stay permissive, though — two pointers may be compared
+(`a == b`, `a < b`) regardless of pointee type, since comparing addresses is
+not aliasing.
 
 ### The opaque pointer `u0*`
 
@@ -446,11 +483,15 @@ when a pointer holds a surprising value; see [§15](#15-common-pitfalls).
 throughout the standard library for allocators and type-erased APIs
 (`malloc`, `sort_bytes`'s comparator arguments, and so on).
 
-- Beyond the general same-depth coercion above, `u0*` (depth exactly 1)
-  additionally bridges **any** pointer depth — a `Point*`, `Point**`, or
-  deeper all coerce to and from `u0*` directly, no cast needed. That's
-  the one thing genuinely unique to `u0*`; nothing else crosses depths
-  implicitly.
+- `u0*` (depth exactly 1) coerces implicitly to and from any **depth-1**
+  pointer, both directions: `T* -> u0*` (type erasure) and `u0* -> T*`
+  (the allocation idiom). This is what lets `malloc`'s `u0*` land in a
+  typed variable with no cast. It is the *only* pointer coercion that
+  ignores pointee type.
+- The bridge is **depth-1 only**. `T**` and deeper no longer convert to or
+  from `u0*` implicitly — `u0* -> i32**`, or handing a `u8**` to a `u0*`
+  parameter, needs an explicit cast (`… as i32**`, `… as u0*`). This keeps
+  the untyped bridge from silently crossing arbitrary indirection.
 - It is *opaque*: you cannot dereference it, subscript it, or do pointer
   arithmetic on it. Cast to a sized pointer first (`p as Point*`, or
   `p as u8*` to treat it as raw bytes).
@@ -459,18 +500,12 @@ throughout the standard library for allocators and type-erased APIs
   currently fails with an internal codegen error rather than working or
   erroring cleanly; this is a compiler bug, not a rule. Write
   `if p != null { ... }` until it is fixed.
-- `u0**` (depth 2) does *not* get the depth-crossing treatment `u0*`
-  gets — but it's an ordinary pointer otherwise, so it coerces with any
-  other depth-2 pointer (`Point**`, `i32**`, …) under the general
-  same-depth rule above. What actually makes `u0*` special is only its
-  *own* opacity — `u0**` can be dereferenced fine; you just get a `u0*`
-  back, which then can't be dereferenced further without a cast.
 
 ```aspect
 u0 *raw = malloc(sizeof(i32) * 10)   # untyped allocation
-i32 *xs = raw                        # implicit, depth-crossing coercion
+i32 *xs = raw                        # u0* -> i32*, depth-1 bridge, implicit
 xs[0] = 42                           # fine now that it's a sized pointer
-free(xs)                             # any pointer coerces back into free's u0*
+free(xs)                             # i32* -> u0*, depth-1 bridge, back into free
 ```
 
 ### Arrays
@@ -792,38 +827,51 @@ Worth knowing:
 - **You own the calling convention.** Nothing is generated around your
   instructions — load parameters and return entirely by hand.
 
-### `public` — exporting a symbol
+### `public` and `export` — visibility and linkage
 
-By default a function's symbol does not leave the object file. That costs you
-nothing — your program and everything it imports are compiled together, so any
-function can call any other regardless — and it buys a lot: the compiler can
-delete functions nothing reaches, so importing `std/linux/syscall` for one
-call does not carry its other 34 wrappers into your binary.
+A top-level function or global has two independent, opt-in properties:
 
-`public` opts out, for the rare case where something *outside* Aspect has to
-find the symbol by name:
+- **`public` — module visibility.** Can another Aspect module name this symbol
+  through `$import`? By default **no**: a bare `fn`/global is private to its
+  defining module, and a cross-module reference to it is a compile error.
+  `public` opts it into the module namespace. This is a *name-resolution* rule,
+  checked at parse time — it has nothing to do with the object file.
+- **`export` — external linkage.** Does the symbol leave the object file with
+  external linkage, so *non-Aspect* code (C, a separate link step, a C runtime)
+  can find it by name? By default **no**: symbols get internal linkage, which
+  lets the compiler delete the ones nothing reaches — so importing
+  `std/linux/syscall` for one call does not carry its hundreds of other
+  wrappers into your binary. `export` opts in.
+
+They compose, in either order:
 
 ```aspect
-public fn callable_from_c(i32 x) -> i32 {
-    return x * 2
-}
+fn helper() -> i32 { return 1 }              # private, internal (the default)
+public fn api() -> i32 { return 2 }          # other modules may call it; still internal
+export fn callable_from_c() -> i32 { ... }   # C can link to it; not module-visible
+public export const u32 VALUE = 0            # both: importable AND foreign-linkable
 ```
 
-You almost never need it. `main` and `_start` are already implicitly public.
+You rarely need `export`: it is only for the Aspect↔foreign boundary. `main`
+and `_start` are already externally linked implicitly.
 
-Globals take it too — `public i32 counter = 0` is exported, a plain one is
-private and collected when unused.
+Why keep them separate? Because a `public` symbol stays *internally linked* —
+that is what lets an unused `public` stdlib function still be stripped. If
+`public` implied external linkage, exporting the standard library's API would
+pin all of it into every binary. Module visibility and linkage are genuinely
+different concerns, so they are two keywords.
 
-`public extern fn` is an error — `extern` names a function defined elsewhere,
-so there is nothing to export. So is `public` on an alias: it is compile-time
-only and has no symbol.
+`export extern fn` is an error: `extern` names a symbol defined in another
+object file, so there is no local symbol here to give linkage to. `public
+extern fn` *is* allowed, though — it just makes the declaration nameable from
+importing modules (`public extern fn malloc` lets them call it). `export` on a
+`type` or `alias` is also an error: neither has a linked symbol.
 
-`public` on a `type` means something else entirely — not linkage (a type has
-no symbol) but *module visibility*: `public type` exports the type-struct to
-importing modules, a plain `type` stays usable only inside its own module
-([§12](#12-modules)). And the `public` inside a type-struct body governs
-access *through the type* ([§9](#9-type-structs)). Same keyword, three jobs:
-the linker, the module boundary, and encapsulation.
+`public` on a `type` is the same *module-visibility* idea applied to a
+type-struct: `public type` exports it to importing modules, a plain `type`
+stays usable only inside its own module ([§12](#12-modules)). And `public`
+inside a type-struct body governs access *through the type*
+([§9](#9-type-structs)).
 
 ### Forward references and mutual recursion
 
@@ -1421,28 +1469,29 @@ Aspect:
   body. There is no single-statement-without-braces shorthand.
 - **Narrowing always needs `as`.** `i64` → `i32`, `i32` → `i8`,
   pointer ↔ integer — all explicit, no exceptions.
-- **Implicit coercion is looser than you'd expect, and silent.**
-  Integer coercion is gated on width alone, so `i32 → u32` (same width,
-  opposite sign) needs no cast and reinterprets the bit pattern; sized
-  pointers of matching depth coerce into each other regardless of
-  pointee type (`i32* → u8*` needs no cast either). Neither case
-  produces a warning — there is currently no warning mechanism in the
-  compiler at all. See [§4](#signedness-and-widening) and
+- **Sign-changing coercions warn; pointer coercions are stricter.** An
+  implicit integer coercion that changes signedness (`i32 → u32`, or
+  `i32 → u64`) still compiles but emits a non-fatal warning — cast with
+  `as` to silence it. Pointers go further and *reject*: two pointers
+  coerce implicitly only when their pointee types match, so `i32* → u8*`
+  — and *removing* `const` — needs an explicit `as` cast. Pointer
+  *comparisons* stay permissive. See [§4](#signedness-and-widening) and
   [§4](#pointers).
 - **Compound assignment (`+=` and friends) only targets a plain
   variable** — not a field (`this.x += 1`) and not a subscript
   (`xs[i] += 1`). Both are parse errors ("compound assignment requires a
   variable"); spell it out instead: `this.x = this.x + 1`,
   `xs[i] = xs[i] + 1`.
-- **`const` qualifies the binding, not the pointee.** This is the
-  opposite of what a C reader expects. `const u8* s` means *`s` cannot be
-  reassigned* — it says nothing about the bytes `s` points at, and
-  `*s = 90` is allowed and unchecked:
+- **`const` is truly immutable — binding *and* pointee, all the way down.**
+  Stronger than C's `const T*`. `const u8* s` means neither `s` nor the bytes
+  it points at may be written; writing through it at any depth is an error.
+  The only way out is an explicit `as` cast.
 
   ```aspect
   const u8* s = buf
   s = other      # error: Cannot assign to const variable 's'
-  *s = 90        # allowed — const gives the pointed-to data no protection
+  *s = 90        # error: cannot write through a const pointer
+  (s as u8*)[0] = 90   # ok — you cast the const away on purpose
   ```
 
   `const` is ignored entirely for coercion, so `u8*` and `const u8*` are

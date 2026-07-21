@@ -1,0 +1,10 @@
+# expected: "u0*", "i32**"
+# Rule 2: the `u0*` bridge is depth-1 only. A depth-2 pointer no longer
+# converts to/from `u0*` implicitly — `u0* -> i32**` needs an explicit cast.
+extern fn malloc(u64 n) -> u0*
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    u0* raw = malloc(16)
+    i32** pp = raw
+    return 0
+}

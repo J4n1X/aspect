@@ -1,0 +1,11 @@
+# expected: "write through a const pointer"
+# Const propagates downward: for `const i32** pp`, dereferencing yields a const
+# pointer, whose dereference yields a const int — so `**pp = 9` is rejected
+# (the `Dereference` synth arm recomputes the pointee const-ness at each level).
+fn main(u32 argc, u8 **argv) -> i32 {
+    i32 x = 5
+    i32* q = &x
+    const i32** pp = &q
+    **pp = 9
+    return 0
+}

@@ -86,7 +86,7 @@ fn quicksort_range(u8* base, u64 lo, u64 hi, u64 size, Comparator cmp) {
 # ── entry point ─────────────────────────────────────────────────────────
 
 # Sort `n` elements of `size` bytes starting at `base`, ordered by `cmp`.
-fn sort_bytes(u0* base, u64 n, u64 size, Comparator cmp) {
+public fn sort_bytes(u0* base, u64 n, u64 size, Comparator cmp) {
     if n < 2 { return; }
     quicksort_range(base as u8*, 0, n - 1, size, cmp)
 }
@@ -101,7 +101,7 @@ fn cmp_i32_asc(u0* a, u0* b) -> i32 {
     return 0
 }
 
-fn cmp_i32_desc(u0* a, u0* b) -> i32 {
+public fn cmp_i32_desc(u0* a, u0* b) -> i32 {
     return cmp_i32_asc(b, a)
 }
 
@@ -136,11 +136,11 @@ fn cmp_cstr_asc(u0* a, u0* b) -> i32 {
 
 # ── typed conveniences ──────────────────────────────────────────────────
 
-fn sort_i32(i32* xs, u64 n) {
+public fn sort_i32(i32* xs, u64 n) {
     sort_bytes(xs, n, sizeof(i32), &cmp_i32_asc)
 }
 
-fn sort_i64(i64* xs, u64 n) {
+public fn sort_i64(i64* xs, u64 n) {
     sort_bytes(xs, n, sizeof(i64), &cmp_i64_asc)
 }
 
@@ -149,6 +149,6 @@ fn sort_f64(f64* xs, u64 n) {
 }
 
 # Sort an array of C strings in strcmp order.
-fn sort_cstr(u8** xs, u64 n) {
-    sort_bytes(xs, n, sizeof(u8*), &cmp_cstr_asc)
+public fn sort_cstr(u8** xs, u64 n) {
+    sort_bytes(xs as u0*, n, sizeof(u8*), &cmp_cstr_asc)
 }

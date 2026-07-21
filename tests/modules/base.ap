@@ -2,6 +2,6 @@
 # must load it exactly once.
 $module base
 
-fn base_value() -> i32 {
+public fn base_value() -> i32 {
     return 7
 }

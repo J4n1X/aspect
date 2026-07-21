@@ -39,13 +39,15 @@ pub fn types_coercible(from: &LangType, to: &LangType) -> bool {
         return from_void_value && to_void_value;
     }
 
-    // `u0*` (exactly depth 1) is the universal object pointer: any pointer of
-    // any depth converts to and from it implicitly — C's void* rule. Deeper
-    // void pointers (`u0**`, ...) are NOT special; they follow the ordinary
-    // same-depth rules below, as do depth mismatches among sized pointers.
+    // `u0*` (exactly depth 1) is the universal object pointer, but it bridges
+    // implicitly only at **depth 1**, in both directions: `T* -> u0*` (type
+    // erasure) and `u0* -> T*` (the `malloc` idiom). `T**` and deeper no longer
+    // bridge — they need an explicit `as` cast (Proposal C rule 2). This closes
+    // the unbounded-depth `u0*` hole while keeping the stdlib's depth-1 idiom.
     let from_opaque = from.base == TypeBase::Void && decayed_from.pointer_depth == 1;
     let to_opaque = to.base == TypeBase::Void && decayed_to.pointer_depth == 1;
-    if (to_opaque && decayed_from.pointer_depth >= 1) || (from_opaque && decayed_to.pointer_depth >= 1)
+    if (to_opaque && decayed_from.pointer_depth == 1)
+        || (from_opaque && decayed_to.pointer_depth == 1)
     {
         return true;
     }
@@ -55,9 +57,19 @@ pub fn types_coercible(from: &LangType, to: &LangType) -> bool {
         return false;
     }
 
-    // Pointer-to-pointer with matching depth: always compatible
+    // Pointer-to-pointer of matching depth is no longer a free pass. The pointee
+    // type must match exactly (rule 1 — a different pointee, including a
+    // different signedness like `i32* -> u32*`, needs an explicit `as` cast),
+    // and const may be *added* implicitly but never *removed* (rule 4 —
+    // dropping const needs a cast). Pointer *comparisons* keep the old
+    // permissive rule via `comparison_operands_valid`, not this path.
     if decayed_from.pointer_depth > 0 {
-        return true;
+        if decayed_from.base != decayed_to.base
+            || decayed_from.size_bits != decayed_to.size_bits
+        {
+            return false;
+        }
+        return !(decayed_from.is_const && !decayed_to.is_const);
     }
 
     // Non-pointer numeric types: widening (or equal) within same family only

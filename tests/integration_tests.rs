@@ -36,8 +36,12 @@ fn preprocess_with_args(
 }
 
 /// Read, tokenize, parse, and type-check the source file. Returns the typed
-/// AST ready for codegen, or a stage-tagged error string.
-fn parse_and_typecheck(source_path: &str, compile_args: &[String]) -> Result<Program, String> {
+/// AST plus any non-fatal type-checker warnings (formatted), or a stage-tagged
+/// error string.
+fn parse_and_typecheck(
+    source_path: &str,
+    compile_args: &[String],
+) -> Result<(Program, Vec<String>), String> {
     let pp = preprocess_with_args(source_path, compile_args)?;
 
     let mut parser = Parser::new(pp.tokens)
@@ -60,7 +64,24 @@ fn parse_and_typecheck(source_path: &str, compile_args: &[String]) -> Result<Pro
             .join("\n")
     })?;
 
-    Ok(program)
+    let warnings = typechecker
+        .warnings()
+        .iter()
+        .map(|w| typechecker.format_warning(w))
+        .collect();
+    Ok((program, warnings))
+}
+
+/// Assert that type-checking `source_path` emits at least one warning whose
+/// text contains `fragment` (case-insensitive). Drives `# expected_warning:`.
+fn assert_warning_contains(source_path: &str, fragment: &str, compile_args: &[String]) {
+    let (_program, warnings) = parse_and_typecheck(source_path, compile_args)
+        .expect("expected the program to type-check so its warnings could be inspected");
+    let needle = fragment.to_lowercase();
+    assert!(
+        warnings.iter().any(|w| w.to_lowercase().contains(&needle)),
+        "Expected a warning containing '{fragment}' for {source_path}, got: {warnings:?}"
+    );
 }
 
 fn module_name_for(source_path: &str) -> &str {
@@ -73,7 +94,7 @@ fn module_name_for(source_path: &str) -> &str {
 /// Compile through codegen without executing — used by failure tests to assert
 /// that compilation reports the expected error.
 fn compile_only(source_path: &str, compile_args: &[String]) -> Result<(), String> {
-    let program = parse_and_typecheck(source_path, compile_args)?;
+    let (program, _warnings) = parse_and_typecheck(source_path, compile_args)?;
     let context = Context::create();
     let mut codegen =
         CodeGenerator::new(&context, module_name_for(source_path), &TargetSpec::host())
@@ -112,7 +133,7 @@ fn run_at_opt(
     compile_args: &[String],
     opt_level: u8,
 ) -> Result<i32, String> {
-    let program = parse_and_typecheck(source_path, compile_args)?;
+    let (program, _warnings) = parse_and_typecheck(source_path, compile_args)?;
     let context = Context::create();
     let mut codegen =
         CodeGenerator::new(&context, module_name_for(source_path), &TargetSpec::host())

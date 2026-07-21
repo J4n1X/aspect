@@ -1,0 +1,5 @@
+# expected: "duplicate", "export"
+# Each of `public` / `export` may appear at most once on a declaration.
+export export fn foo() -> i32 { return 0 }
+
+fn main(u32 argc, u8 **argv) -> i32 { return 0 }

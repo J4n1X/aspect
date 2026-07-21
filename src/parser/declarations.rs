@@ -230,9 +230,12 @@ impl Parser {
             name: mangled.clone(),
             params: params.clone(),
             return_type,
-            // A method's `public` governs access through its type, not object
-            // -file export; nothing outside Aspect calls a mangled method.
+            // A method's `public` governs access through its type (the
+            // `MethodSig.vis` gate), not the module namespace or object-file
+            // linkage — nothing outside Aspect calls a mangled method, and the
+            // type's own visibility already gates cross-module reach.
             vis: Visibility::Private,
+            export: false,
             attrs,
             pos,
         };
@@ -245,6 +248,7 @@ impl Parser {
                 return_type,
                 is_extern: false,
                 has_body: true,
+                vis: Visibility::Private,
                 pos,
             })
             .map_err(|e| ParserError::from_symbol(e, pos))?;
@@ -334,6 +338,7 @@ impl Parser {
         &mut self,
         is_extern: bool,
         vis: Visibility,
+        export: bool,
         attrs: Vec<Attribute>,
     ) -> Result<crate::parser::Function, ParserError> {
         use crate::parser::{Function, FunctionProto};
@@ -362,6 +367,7 @@ impl Parser {
             params: params.clone(),
             return_type,
             vis,
+            export,
             attrs,
             pos,
         };
@@ -373,6 +379,7 @@ impl Parser {
                 return_type,
                 is_extern,
                 has_body: !is_extern,
+                vis,
                 pos,
             })
             .map_err(|e| ParserError::from_symbol(e, pos))?;
@@ -396,6 +403,7 @@ impl Parser {
     pub(crate) fn parse_global_var(
         &mut self,
         vis: Visibility,
+        export: bool,
         attrs: Vec<Attribute>,
     ) -> Result<crate::parser::GlobalVar, ParserError> {
         use crate::parser::GlobalVar;
@@ -413,6 +421,10 @@ impl Parser {
         self.symbol_table_mut()
             .add_variable(name.clone(), var_type, pos)
             .map_err(|e| ParserError::from_symbol(e, pos))?;
+        // Record the global's module visibility for the reference-site gate
+        // (globals live in the parser's outermost variable scope, whose
+        // `Symbol` carries no visibility of its own).
+        self.global_vis.insert(name.clone(), vis);
 
         term!();
 
@@ -422,6 +434,7 @@ impl Parser {
             initializer,
             pos,
             vis,
+            export,
             attrs,
         })
     }

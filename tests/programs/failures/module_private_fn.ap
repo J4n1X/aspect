@@ -1,0 +1,10 @@
+# expected: "secret", "private", "public"
+# compile_args: "-I", "tests/modules"
+# A bare (private-by-default) function is not visible across the module
+# boundary; only `public` exports it into the module namespace. Calling
+# `secret` from the root module is rejected, pointing at `public`.
+$import privmod
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return secret()
+}

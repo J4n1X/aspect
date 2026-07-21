@@ -1,0 +1,11 @@
+# expected: 17
+# compile_args: "-I", "tests/modules"
+# `public fn` is callable across the module boundary; the private helper it
+# wraps (`secret`) stays module-local. Proves the function/global visibility
+# gate lets `public` through — the same gate the failure fixture
+# `module_private_fn` shows rejecting the private one.
+$import privmod
+
+fn main(u32 argc, u8** argv) -> i32 {
+    return shared()
+}
