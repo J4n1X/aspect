@@ -1,0 +1,21 @@
+# expected: 0
+# compile_args: "-I", "lib"
+#-
+  A `rule fn` typechecks against the implicitly-injected std/meta (no $import).
+  It is unreachable from main, so globaldce strips it and the meta builtins from
+  the artifact; main runs clean. (JIT execution of the rule fn is exercised
+  separately once a `rule <T> <fn>` binds it.)
+-#
+
+rule fn probe(Program p, Type anchor) -> Judgments {
+    Judgments js = Judgments.new()
+    ExprList sites = p.instantiations_of(anchor.struct_name())
+    if sites.count() > 1 as u64 {
+        js.error(sites.at(0 as u64).pos(), "seen")
+    }
+    return js
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

@@ -201,6 +201,14 @@ impl Preprocessor {
     /// Any [`PreprocessError`] from lexing, directive handling, or IO.
     pub fn preprocess(&mut self, entry: &Path) -> Result<PreprocessedSource, PreprocessError> {
         self.process_file(entry)?;
+        // Implicit `std/meta` injection: a program that declares a metaprogramming
+        // function (`rule fn`, later `expansion fn` / `transform fn`) gets the
+        // std/meta interface — its special types + `extern fn meta_*` — injected
+        // rather than `$import`-ed (locked design decision). Conditional, so an
+        // ordinary program keeps a clean namespace and pays nothing.
+        if self.declares_a_meta_fn() {
+            self.inject_std_meta()?;
+        }
         // The closing EOF inherits the last real token's position: it is what
         // the parser reports when input runs out mid-construct ("Expected '}'
         // but found 'EOF'"), and line 0:0 of no file is a location no editor
@@ -233,6 +241,57 @@ impl Preprocessor {
             imports: self.module_imports.clone(),
             search_roots: self.include_dirs.clone(),
         }
+    }
+
+    /// Whether the assembled token stream declares a metaprogramming function —
+    /// the identifier `rule` immediately before the `fn` keyword. Precise: `rule`
+    /// is only ever adjacent to `fn` in the `rule fn` descriptor (a type named
+    /// `rule` is always followed by `{`, a global by a name or `=`).
+    fn declares_a_meta_fn(&self) -> bool {
+        self.tokens.windows(2).any(|w| {
+            matches!(&w[0].kind, TokenKind::Identifier(n) if n == "rule")
+                && matches!(w[1].kind, TokenKind::Keyword(crate::lexer::Keyword::Fn))
+        })
+    }
+
+    /// Process the `std/meta` module files (tokens inlined, module registered)
+    /// and make the module visible to every module in the program. This is the
+    /// injection, *not* an `$import`: the meta-only *gate* (checker) is what
+    /// restricts ordinary code from actually using the injected symbols.
+    fn inject_std_meta(&mut self) -> Result<(), PreprocessError> {
+        const META_MODULE: &str = "std/meta";
+        // If the program somehow already pulled it in, do not double-process.
+        if !self.imported.insert(META_MODULE.to_string()) {
+            return Ok(());
+        }
+        let pos = Position::with_file(1, 1, 0);
+        let files = modules::resolve_module_files(&self.include_dirs, META_MODULE, pos)?;
+        for file in files {
+            let file_id = self.process_file(&file)?;
+            let declared = self.file_modules[file_id as usize].clone();
+            if declared.as_deref() != Some(META_MODULE) {
+                return Err(PreprocessError::ModuleDeclarationMismatch {
+                    module: META_MODULE.to_string(),
+                    file: self.files[file_id as usize].clone(),
+                    declared,
+                    pos,
+                });
+            }
+        }
+        // Visible to every module (including the anonymous root `""`) so a meta
+        // function anywhere can name std/meta's types.
+        let modules: Vec<String> = self
+            .file_modules
+            .iter()
+            .map(|m| m.clone().unwrap_or_default())
+            .collect();
+        for module in modules {
+            let edges = self.module_imports.entry(module).or_default();
+            if !edges.iter().any(|m| m == META_MODULE) {
+                edges.push(META_MODULE.to_string());
+            }
+        }
+        Ok(())
     }
 
     /// Prefixes the error with `file:line:column` (resolved via `pos.file_id`
