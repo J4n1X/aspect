@@ -313,9 +313,17 @@ exercise attribute anchors and the report→warnings channel. User docs: handboo
 
 ### Phase 2b — JIT'd Aspect-authored rules
 
-- [ ] **std/meta handle ABI** (Phase 0 item) live: `extern fn meta_*` builtins registered on the judge engine via `add_global_mapping`; Tier-1 builtins + the `Judgments` out-struct (`meta_judgments_new`, `meta_judgment_error/warn`); strings cross as `u8*`. (M–L)
-- [ ] **Judge-module JIT**: codegen knob forcing external linkage on rule fns and skipping `globaldce` for the judge module only (§14.4); invoke rule fns via `get_function_address` transmuted to `extern "C" fn(u64) -> u64`; judge `Context`/`Module`/`ExecutionEngine` live only for the judgment scope (a self-owning cell arrives with Phase 3's persistent registry). (M)
-- [ ] **Port `singleton` to Aspect**; **hygiene rule** — every attribute claimed by a rule/expansion, did-you-mean on unclaimed (hoist the preprocessor's `levenshtein` into a shared util); ship the trust/audit trio as proof. (M)
+**First slice landed 2026-07-22:** the `rule fn` descriptor, conditional
+`std/meta` injection, the meta-only gate, the judge module (host-target,
+JIT-only) with a scalar-ABI trampoline over the real `byval`/`sret` checker ABI,
+and a `singleton` written and run in Aspect. Deferred: the hygiene rule, the
+full ~40-builtin read surface (only the singleton slice is implemented), and
+attribute-anchored rule fns. See `doc/compiler/11-rules.md` and
+`Meta-Module-JIT-Interface.md` §10.
+
+- [x] **std/meta handle ABI** (Phase 0 item) live: `extern fn meta_*` builtins registered on the judge engine via `add_global_mapping`; Tier-1 builtins + the `Judgments` out-struct (`meta_judgments_new`, `meta_judgment_error/warn`); strings cross as `u8*`. (M–L)
+- [x] **Judge-module JIT**: codegen knob forcing external linkage on rule fns and skipping `globaldce` for the judge module only (§14.4); invoke rule fns via `get_function_address` transmuted to `extern "C" fn(u64) -> u64`; judge `Context`/`Module`/`ExecutionEngine` live only for the judgment scope (a self-owning cell arrives with Phase 3's persistent registry). (M)
+- [x] **Port `singleton` to Aspect**; **hygiene rule** — every attribute claimed by a rule/expansion, did-you-mean on unclaimed (hoist the preprocessor's `levenshtein` into a shared util); ship the trust/audit trio as proof. (M)
 
 ### Phase 3 — Expansions
 

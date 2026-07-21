@@ -396,6 +396,7 @@ program ::= (newline* top-decl newline*)*
 vis-linkage ::= ('public' | 'export')*         # each at most once, either order
 top-decl ::= attr* item-decl
            | rule-decl                          # governance rule; no attrs/vis/linkage
+           | rule-fn-decl                        # a rule-checker function (metaprogramming)
 item-decl ::= 'public'? extern-fn-decl
            | vis-linkage asm-fn-decl
            | vis-linkage fn-decl
@@ -455,6 +456,12 @@ enum-variant ::= ident                     # value = declaration-order index (0,
 
 rule-decl   ::= 'rule' rule-anchor ident term      # `rule <anchor> <checker-fn>`
 rule-anchor ::= ident | '@' ident                  # a type-struct name, or an attribute
+rule-fn-decl ::= 'rule' 'fn' ident '(' param-list ')' return-ann? newline* block
+# `rule fn` — a metaprogramming rule-checker function. `rule` is a soft keyword;
+# `rule fn` is unambiguous because `fn` is a keyword. std/meta is in scope in its
+# body, it cannot be called from ordinary code, and it is JIT-compiled and run
+# after type checking — never emitted into the artifact. A checker used by a
+# `rule <T> <fn>` declaration must be `(Program, Type) -> Judgments`.
 # `rule` is a *soft* keyword — a type or global literally named `rule` still
 # parses (`rule x = …`); a rule is detected by lookahead (`rule` followed by
 # `@`, or by two identifiers). A rule takes no `public`/`export`/attributes and

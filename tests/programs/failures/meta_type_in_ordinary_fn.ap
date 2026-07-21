@@ -1,0 +1,12 @@
+# expected: "std/meta type", "rule fn"
+# compile_args: "-I", "lib"
+#-
+  std/meta types are usable only inside a `rule fn`; naming one in an ordinary
+  function's signature is a meta-scope error.
+-#
+
+rule fn r(Program p, Type a) -> Judgments { return Judgments.new() }
+
+fn sneaky(Program p) -> i32 { return 0 }
+
+fn main(u32 argc, u8 **argv) -> i32 { return 0 }

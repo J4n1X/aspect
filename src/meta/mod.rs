@@ -19,9 +19,162 @@ pub mod query;
 
 use std::path::PathBuf;
 
-use crate::lexer::{Position, TypeBase};
+use crate::lexer::{LangType, Position, TypeBase};
+use crate::parser::ast::{ExprKind, Expression, FunctionBody, Statement, StatementKind};
 use crate::parser::{MetaKind, Program, RuleAnchor};
 use query::QueryIndex;
+
+/// The meta-only gate: `std/meta` types and meta functions (`rule fn`) may be
+/// used only inside a meta function's body — never ordinary code. Injection
+/// makes std/meta *present*, so this is the check that keeps it *gated* (§10.3).
+/// Returns one `Error` judgment per violation; run before rules so a misuse is
+/// a clean diagnostic rather than a cryptic undefined-`meta_*` codegen failure.
+#[must_use]
+pub fn check_meta_gate(program: &Program) -> Vec<Judgment> {
+    let module_of = |file_id: u32| {
+        program
+            .file_modules
+            .get(file_id as usize)
+            .map_or("", String::as_str)
+    };
+    let meta_structs: std::collections::HashSet<u32> = program
+        .symbols
+        .structs()
+        .filter(|s| module_of(s.file_id) == "std/meta")
+        .map(|s| s.id)
+        .collect();
+    let meta_fns: std::collections::HashSet<&str> = program
+        .functions
+        .iter()
+        .filter(|f| f.proto.meta_kind.is_some() || module_of(f.proto.pos.file_id) == "std/meta")
+        .map(|f| f.proto.name.as_str())
+        .collect();
+    let is_meta_ty = |t: &LangType| matches!(t.base, TypeBase::Struct(id) if meta_structs.contains(&id));
+
+    let mut out = Vec::new();
+    for func in &program.functions {
+        // Meta functions and the injected std/meta library are the legitimate
+        // users of the meta surface.
+        if func.proto.meta_kind.is_some() || module_of(func.proto.pos.file_id) == "std/meta" {
+            continue;
+        }
+        let name = &func.proto.name;
+        if func.proto.params.iter().any(|(t, _)| is_meta_ty(t)) || is_meta_ty(&func.proto.return_type)
+        {
+            out.push(Judgment {
+                severity: Severity::Error,
+                pos: func.proto.pos,
+                rule: "meta-scope".to_string(),
+                message: format!(
+                    "ordinary function '{name}' uses a std/meta type in its signature; \
+                     std/meta types are usable only inside a `rule fn`"
+                ),
+            });
+        }
+        if let FunctionBody::Aspect(body) = &func.body {
+            let mut calls = Vec::new();
+            for stmt in body {
+                collect_meta_calls(stmt, &meta_fns, &mut calls);
+            }
+            for (callee, pos) in calls {
+                out.push(Judgment {
+                    severity: Severity::Error,
+                    pos,
+                    rule: "meta-scope".to_string(),
+                    message: format!(
+                        "ordinary function '{name}' calls the meta function '{callee}'; \
+                         meta functions run only inside the rule engine"
+                    ),
+                });
+            }
+        }
+    }
+    out
+}
+
+type Calls = Vec<(String, Position)>;
+
+fn collect_meta_calls(stmt: &Statement, meta_fns: &std::collections::HashSet<&str>, out: &mut Calls) {
+    let expr = |e, out: &mut Calls| walk_expr_calls(e, meta_fns, out);
+    match &stmt.kind {
+        StatementKind::Expression(e) | StatementKind::Return(Some(e)) => expr(e, out),
+        StatementKind::Return(None) | StatementKind::Break | StatementKind::Continue => {}
+        StatementKind::Block(b) => b.iter().for_each(|s| collect_meta_calls(s, meta_fns, out)),
+        StatementKind::If { condition, then_block, else_block } => {
+            expr(condition, out);
+            then_block.iter().for_each(|s| collect_meta_calls(s, meta_fns, out));
+            if let Some(eb) = else_block {
+                eb.iter().for_each(|s| collect_meta_calls(s, meta_fns, out));
+            }
+        }
+        StatementKind::While { condition, body } => {
+            expr(condition, out);
+            body.iter().for_each(|s| collect_meta_calls(s, meta_fns, out));
+        }
+        StatementKind::For { init, condition, increment, body } => {
+            if let Some(s) = init {
+                collect_meta_calls(s, meta_fns, out);
+            }
+            if let Some(c) = condition {
+                expr(c, out);
+            }
+            if let Some(s) = increment {
+                collect_meta_calls(s, meta_fns, out);
+            }
+            body.iter().for_each(|s| collect_meta_calls(s, meta_fns, out));
+        }
+        StatementKind::VarDecl { initializer, .. } => {
+            if let Some(e) = initializer {
+                expr(e, out);
+            }
+        }
+        StatementKind::VarAssign { value, .. } => expr(value, out),
+        StatementKind::DerefAssign { target, value } | StatementKind::FieldAssign { target, value } => {
+            expr(target, out);
+            expr(value, out);
+        }
+    }
+}
+
+fn walk_expr_calls(e: &Expression, meta_fns: &std::collections::HashSet<&str>, out: &mut Calls) {
+    let go = |e, out: &mut Calls| walk_expr_calls(e, meta_fns, out);
+    match &e.kind {
+        ExprKind::FunctionCall { name, args } => {
+            if meta_fns.contains(name.as_str()) {
+                out.push((name.clone(), e.pos));
+            }
+            args.iter().for_each(|a| go(a, out));
+        }
+        ExprKind::Binary { left, right, .. } | ExprKind::Comparison { left, right, .. } => {
+            go(left, out);
+            go(right, out);
+        }
+        ExprKind::Reference(x)
+        | ExprKind::Dereference(x)
+        | ExprKind::UnaryNot(x)
+        | ExprKind::BitwiseNot(x)
+        | ExprKind::Cast { expr: x, .. }
+        | ExprKind::FieldAccess { base: x, .. } => go(x, out),
+        ExprKind::IndirectCall { callee, args } => {
+            go(callee, out);
+            args.iter().for_each(|a| go(a, out));
+        }
+        ExprKind::MethodCall { base, args, .. } => {
+            go(base, out);
+            args.iter().for_each(|a| go(a, out));
+        }
+        ExprKind::StructLiteral { fields, .. } => fields.iter().for_each(|(_, fe)| go(fe, out)),
+        ExprKind::Alloc { count, .. } => go(count, out),
+        ExprKind::ListInitializer(items) => items.iter().for_each(|x| go(x, out)),
+        ExprKind::ValueBlock(stmts) => stmts.iter().for_each(|s| collect_meta_calls(s, meta_fns, out)),
+        ExprKind::Literal(_)
+        | ExprKind::Variable(_)
+        | ExprKind::EnumValue { .. }
+        | ExprKind::FunctionRef(_)
+        | ExprKind::SizeOf(_)
+        | ExprKind::Null => {}
+    }
+}
 
 /// Severity of a rule [`Judgment`]. `Error` fails the build; `Report` is a
 /// non-fatal note (checker-only/audit rules) — it flows to stderr / the test
@@ -92,6 +245,13 @@ pub type RuleFn = fn(&QueryIndex<'_>, &ResolvedAnchor, Position) -> Vec<RawJudgm
 /// repeated rule does not double every judgment.
 #[must_use]
 pub fn run_rules(program: &Program) -> Vec<Judgment> {
+    // The meta-only gate runs first: on a misuse (std/meta in ordinary code),
+    // report it and do not run rules over a program that shouldn't compile.
+    let gate = check_meta_gate(program);
+    if gate.iter().any(|j| j.severity == Severity::Error) {
+        return gate;
+    }
+
     let query = QueryIndex::build(program);
     let mut out = Vec::new();
     let mut seen: Vec<(&RuleAnchor, &str)> = Vec::new();

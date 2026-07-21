@@ -65,8 +65,68 @@ anchor) so the same builtins port unchanged to the Phase 2b JIT'd
 `meta::format_judgment` renders `file:line:col: rule <name>: <msg>`, resolving
 the file via `pos.file_id` — mirroring `TypeChecker::format_error`.
 
-## Explicitly deferred (Phase 2b and later)
+## Explicitly deferred (beyond the 2b first slice)
 
-JIT'd Aspect-authored rule bodies, the `std/meta` handle ABI, the hygiene rule
-(every attribute claimed by some rule), and the Tier-2 flow-sensitive query
-layer (reachability/escape/dominance — warning-only linters).
+The hygiene rule (every attribute claimed by some rule), the Tier-2
+flow-sensitive query layer (reachability/escape/dominance — warning-only
+linters), the full ~40-builtin read surface (only the singleton slice is
+implemented), attribute-anchored rule functions, and the write surface
+(`quote` / construction) for expansions and transforms.
+
+## Phase 2b — JIT'd Aspect rule functions (`src/meta/jit.rs`)
+
+A rule checker can now be written **in Aspect** as a `rule fn` and is JIT-compiled
+and executed over the program via the `std/meta` opaque-handle ABI. See
+`doc/plans/Meta-Module-JIT-Interface.md` §10 for the resolved design.
+
+### The `rule fn` descriptor
+
+`rule fn <name>(...) -> ... { ... }` — a soft keyword (`rule` before `fn`, so it
+never clashes with a type named `rule`). A metaprogramming function has three
+properties, keyed on `FunctionProto.meta_kind`: `std/meta` is in scope in its
+body; it may not be called from ordinary code (the **gate**); and it is
+codegen'd only into the JIT-only judge module. `rule <T> <name>` resolves
+`<name>` to a builtin first, then a `rule fn` checker `(Program, Type) ->
+Judgments`, else an error.
+
+### Injection + gate
+
+`std/meta`'s types + `extern fn meta_*` are injected (never `$import`-ed) into
+any compile that declares a `rule fn` — a cheap `rule`+`fn` token scan gates it,
+so ordinary programs are untouched (`src/preprocessor/mod.rs`). Injection makes
+std/meta *present*; `meta::check_meta_gate` keeps it *gated*: an ordinary
+function that names a std/meta type or calls a meta function is a `meta-scope`
+error, run before rules so misuse is a clean diagnostic instead of a cryptic
+undefined-`meta_*` codegen failure.
+
+### The judge (`src/meta/jit.rs`)
+
+For a `rule <T> <checker>`, `run_rule_fn` builds a **judge module** — a filtered
+clone of the program (meta functions + injected std/meta only), codegen'd for
+the **host** target with **no `globaldce`** so the meta set survives. The
+first-slice read-surface `meta_*` builtins are implemented in Rust over a
+per-invocation thread-local `MetaCtx` (an owned handle arena + query snapshot +
+judgment accumulator) and bound via `add_global_mapping`; every *other* declared
+`meta_*` is bound to a null stub so MCJIT can finalize the never-called wrappers.
+
+### Calling convention (the trampoline)
+
+`(Program, Type) -> Judgments` lowers to `void(ptr sret, ptr byval, ptr byval)`,
+passing its `{u64}` structs **on the stack** — which a plain `extern "C"` call
+cannot match. So the preprocessor injects, per checker, a **scalar-ABI
+trampoline** `__rt_<checker>(u64, u64) -> u64` (Aspect source, reusing codegen's
+byval handling) that wraps the two handles, calls the real checker, and returns
+the result handle. The judge calls the trampoline via `get_function_address`.
+
+### Artifact stays clean automatically
+
+No artifact partition is needed: after the linkage revision `public` is
+module-visibility with *internal* linkage, so the meta code — unreachable from
+`main` — is stripped from the artifact by `globaldce`. Only the judge keeps it.
+
+### Known limitations (first slice)
+
+`Expr` handles are position-only (`QueryIndex` stores positions); attribute-
+anchored rule fns are unsupported; a user `type` whose name collides with a
+reserved std/meta type (e.g. `type Program`) reports a `Duplicate type` error
+pointing at `meta.ap` rather than a tailored message.

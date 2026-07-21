@@ -1622,9 +1622,35 @@ its governance.
 still works (`rule r = rule { … }` is a variable of type `rule`). A rule
 declaration is recognised only in the `rule <anchor> <checker>` shape.
 
-> This is Phase 2a of the metasystem: rules are compiler built-ins. A later
-> phase lets you write rule (and transform) bodies in Aspect itself. The design
-> lives in [`doc/plans/Three-Hook-Metasystem.md`](../doc/plans/Three-Hook-Metasystem.md).
+### Writing a rule in Aspect — `rule fn`
+
+You can also write a rule checker yourself, as a `rule fn`:
+
+```aspect
+rule fn only_one(Program p, Type anchor) -> Judgments {
+    Judgments js = Judgments.new()
+    ExprList sites = p.instantiations_of(anchor.struct_name())
+    if sites.count() > 1 as u64 {
+        js.error(sites.at(1 as u64).pos(), "constructed more than once")
+    }
+    return js
+}
+
+rule Config only_one
+```
+
+A `rule fn` inspects the typed program through `std/meta` — a compiler-provided
+interface of opaque handles (`Program`, `Type`, `Expr`, `Judgments`, …) that is
+in scope **only inside a rule fn** (naming those types in ordinary code, or
+calling a rule fn from it, is an error). It runs after type checking,
+JIT-compiled, and emits judgments — `error` fails the build, `warn` is a note.
+`std/meta` is injected automatically — no `$import` — whenever a `rule fn` is
+present; build with `-I lib` so the compiler can find it.
+
+> This is an early slice of the metasystem. The other two hooks — `expansion fn`
+> (pre-parse syntax) and `transform fn` (typed-AST rewriting) — and the AST
+> *construction* surface (`quote`) are future work. The design lives in
+> [`doc/plans/Three-Hook-Metasystem.md`](../doc/plans/Three-Hook-Metasystem.md).
 
 ---
 

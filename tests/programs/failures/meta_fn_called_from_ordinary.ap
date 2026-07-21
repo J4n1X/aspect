@@ -1,0 +1,13 @@
+# expected: "meta function", "rule engine"
+# compile_args: "-I", "lib"
+#-
+  A meta function may not be called from ordinary code — only the rule engine
+  invokes it.
+-#
+
+rule fn helper(Program p, Type a) -> Judgments { return Judgments.new() }
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Judgments j = helper(Program.from_handle(0 as u64), Type.from_handle(0 as u64))
+    return 0
+}
