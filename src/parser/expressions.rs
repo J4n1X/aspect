@@ -464,7 +464,13 @@ impl Parser {
 
             left = match op {
                 OpKind::Binary(bop) => {
-                    let result_type = if left.expr_type.pointer_depth == 0
+                    // Naive result type: logical `&&`/`||` are a boolean
+                    // regardless of operand type; otherwise the pointer operand
+                    // wins (pointer arithmetic), falling back to the left
+                    // operand's type. The checker recomputes via `wider_type`.
+                    let result_type = if matches!(bop, BinaryOp::LogicalAnd | BinaryOp::LogicalOr) {
+                        LangType::BOOL
+                    } else if left.expr_type.pointer_depth == 0
                         && right.expr_type.pointer_depth > 0
                     {
                         right.expr_type
@@ -482,14 +488,14 @@ impl Parser {
                     )
                 }
                 OpKind::Comparison(cop) => {
-                    let result_type = LangType::I32;
+                    // A comparison locally yields a boolean.
                     Expression::new(
                         ExprKind::Comparison {
                             left: Box::new(left),
                             op: cop,
                             right: Box::new(right),
                         },
-                        result_type,
+                        LangType::BOOL,
                         pos,
                     )
                 }
@@ -627,8 +633,8 @@ impl Parser {
                 self.advance();
                 let expr = self.parse_unary()?;
 
-                // Logical not returns i32 (boolean as integer)
-                let result_type = LangType::I32;
+                // Logical not locally yields a boolean.
+                let result_type = LangType::BOOL;
 
                 Ok(Expression::new(
                     ExprKind::UnaryNot(Box::new(expr)),
