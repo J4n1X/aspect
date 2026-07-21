@@ -145,6 +145,31 @@ Because literals are stamped at their final width during checking, a constant
 like `u8 x = 1 + 2` arrives at codegen already typed `u8` — codegen emits `i8`
 arithmetic directly instead of computing in `i32` and truncating.
 
+### Checker-resolved `MethodCall`
+
+`ExprKind::MethodCall { base, name, args }` is the one node the checker
+**resolves and rewrites in place** (every other arm only stamps `expr_type` and
+recurses). The parser normally lowers method calls at parse time
+(`build_method_call` → `FunctionCall`/`IndirectCall`), so it never emits this
+node; it exists for metaprogram-generated AST (Three-Hook-Metasystem Phases
+3/4), which has no parse-time receiver types. `resolve_method_call`
+(`checker/expressions.rs`) reproduces the parser's dispatch against
+`self.symbols`/`self.scopes`: static-`Type.m(..)` vs instance-`obj.m(..)`,
+`Type$method` mangling, value-receiver autoref (`&base`; deeper-than-one-level
+pointers rejected), and method-vs-fn-pointer-field disambiguation — then
+replaces the node with a `FunctionCall` (method) or `IndirectCall` (fn-ptr
+field) and re-checks it. Because the result is a plain call node, re-checking
+is stable (the lowering is one-shot and idempotent).
+
+The per-method privacy gate (`MethodSig.vis`) is enforced for free once the
+rewritten `FunctionCall` flows through `check_call` → `check_method_access`. The
+`public type` **cross-module** gate is *not* reproduced — the checker has no
+`file_id → module` map — matching the metasystem's accepted carve-out that
+transform-generated code bypasses import visibility. Real user code is
+unaffected: the parser still emits pre-resolved calls and keeps that gate. This
+path has no user-facing syntax, so it is covered by Rust unit tests
+(`checker/tests.rs`, the `mcall_*` cases), not the `.ap` corpus.
+
 ### Narrow-width comparisons
 
 Comparisons run in synthesis mode (their result is always `bool`, never the

@@ -639,3 +639,255 @@ asm fn f(i64 a: rdi) -> i64: rax
         let (_p, res) = check(src);
         assert!(res.is_ok(), "expected ok, got {res:?}");
     }
+
+    // ── Checker-resolved `MethodCall` (Three-Hook-Metasystem Phase 0) ─────────
+    //
+    // The parser never emits `ExprKind::MethodCall` — it resolves method calls
+    // at parse time. These tests exercise the checker's resolution path
+    // directly (the coverage vehicle for this slice, per §14.2): they parse a
+    // fixture that registers the type/methods/fields, inject a hand-built
+    // `MethodCall` into a probe function's body, run the full checker, and
+    // assert the node was rewritten (and mangled) as expected.
+
+    const METHOD_SETUP: &str = "\
+type Widget {
+    public i32 w
+    public fn(i32) -> i32 cb
+
+    public fn make(i32 v) -> Widget { return Widget { w = v, cb = null } }
+    public fn inst(this, i32 n) -> i32 { return this.w + n }
+    fn secret(this) -> i32 { return this.w }
+}
+
+fn probe(Widget wg, Widget* wgp, Widget** wgpp, i32 num) -> u0 {
+    num
+}
+
+fn main(u32 argc, u8 **argv) -> i32 { return 0 }
+";
+
+    fn p() -> Position {
+        Position::new(1, 1)
+    }
+
+    fn v(name: &str) -> Expression {
+        Expression::new(ExprKind::Variable(name.to_string()), LangType::VOID, p())
+    }
+
+    fn lit(n: i64) -> Expression {
+        Expression::new(ExprKind::Literal(LiteralValue::Integer(n)), LangType::I32, p())
+    }
+
+    fn mcall(base: &str, name: &str, args: Vec<Expression>) -> Expression {
+        Expression::new(
+            ExprKind::MethodCall {
+                base: Box::new(v(base)),
+                name: name.to_string(),
+                args,
+            },
+            LangType::VOID,
+            p(),
+        )
+    }
+
+    /// Inject `injected` as `probe`'s sole (expression-statement) body, run the
+    /// checker, and return the (rewritten) expression plus any errors.
+    fn check_probe_expr(injected: Expression) -> (Expression, Vec<TypeCheckError>) {
+        let tokens = tokenize(METHOD_SETUP.to_string()).expect("setup tokenizes");
+        let mut parser = Parser::new(tokens);
+        let mut program = parser.parse_program().expect("setup parses");
+        let stmt = Statement::new(StatementKind::Expression(injected), p());
+        let probe = program
+            .functions
+            .iter_mut()
+            .find(|f| f.proto.name == "probe")
+            .expect("probe exists");
+        match &mut probe.body {
+            FunctionBody::Aspect(stmts) => *stmts = vec![stmt],
+            _ => panic!("probe has no Aspect body"),
+        }
+        let errs = TypeChecker::new()
+            .check_program(&mut program)
+            .err()
+            .unwrap_or_default();
+        let probe = program
+            .functions
+            .iter()
+            .find(|f| f.proto.name == "probe")
+            .unwrap();
+        let expr = match &probe.body {
+            FunctionBody::Aspect(stmts) => match &stmts[0].kind {
+                StatementKind::Expression(e) => e.clone(),
+                _ => panic!("probe body is not an expression statement"),
+            },
+            _ => panic!("probe has no Aspect body"),
+        };
+        (expr, errs)
+    }
+
+    // 1. Static `Type.method(args)` → `FunctionCall` with no receiver prepended.
+    #[test]
+    fn mcall_static_resolves_to_function_call() {
+        let (expr, errs) = check_probe_expr(mcall("Widget", "make", vec![lit(5)]));
+        assert!(errs.is_empty(), "unexpected errors: {errs:?}");
+        match &expr.kind {
+            ExprKind::FunctionCall { name, args } => {
+                assert_eq!(name, "Widget$make");
+                assert_eq!(args.len(), 1, "static call prepends no receiver");
+            }
+            other => panic!("expected FunctionCall, got {other:?}"),
+        }
+        assert!(matches!(expr.expr_type.base, TypeBase::Struct(_)));
+    }
+
+    // 2. Instance call on a value receiver → receiver is autoref'd (`Reference`).
+    #[test]
+    fn mcall_instance_value_receiver_is_autorefd() {
+        let (expr, errs) = check_probe_expr(mcall("wg", "inst", vec![lit(3)]));
+        assert!(errs.is_empty(), "unexpected errors: {errs:?}");
+        match &expr.kind {
+            ExprKind::FunctionCall { name, args } => {
+                assert_eq!(name, "Widget$inst");
+                assert_eq!(args.len(), 2, "receiver + one arg");
+                assert!(
+                    matches!(args[0].kind, ExprKind::Reference(_)),
+                    "value receiver should be autoref'd, got {:?}",
+                    args[0].kind
+                );
+            }
+            other => panic!("expected FunctionCall, got {other:?}"),
+        }
+        assert_ty(expr.expr_type, TypeBase::SInt, 32, 0);
+    }
+
+    // 3. Instance call on a `*Struct` receiver → receiver passed as-is.
+    #[test]
+    fn mcall_instance_pointer_receiver_passed_as_is() {
+        let (expr, errs) = check_probe_expr(mcall("wgp", "inst", vec![lit(3)]));
+        assert!(errs.is_empty(), "unexpected errors: {errs:?}");
+        match &expr.kind {
+            ExprKind::FunctionCall { name, args } => {
+                assert_eq!(name, "Widget$inst");
+                assert!(
+                    matches!(args[0].kind, ExprKind::Variable(ref n) if n == "wgp"),
+                    "pointer receiver passed as-is, got {:?}",
+                    args[0].kind
+                );
+            }
+            other => panic!("expected FunctionCall, got {other:?}"),
+        }
+    }
+
+    // 4. Instance call on a `**Struct` receiver → error (only one level auto).
+    #[test]
+    fn mcall_deeper_pointer_receiver_errors() {
+        let (_expr, errs) = check_probe_expr(mcall("wgpp", "inst", vec![lit(3)]));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, TypeCheckError::InvalidMethodReceiver { .. })),
+            "expected InvalidMethodReceiver, got {errs:?}"
+        );
+    }
+
+    // 5. `name` is a fn-pointer field → `IndirectCall` through a `FieldAccess`.
+    #[test]
+    fn mcall_fnptr_field_resolves_to_indirect_call() {
+        let (expr, errs) = check_probe_expr(mcall("wg", "cb", vec![lit(7)]));
+        assert!(errs.is_empty(), "unexpected errors: {errs:?}");
+        match &expr.kind {
+            ExprKind::IndirectCall { callee, args } => {
+                assert!(
+                    matches!(callee.kind, ExprKind::FieldAccess { ref field, .. } if field == "cb"),
+                    "callee should be the `cb` field access, got {:?}",
+                    callee.kind
+                );
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("expected IndirectCall, got {other:?}"),
+        }
+    }
+
+    // 6. `name` is a non-fn-pointer field → not callable.
+    #[test]
+    fn mcall_non_fnptr_field_is_not_callable() {
+        let (_expr, errs) = check_probe_expr(mcall("wg", "w", vec![lit(1)]));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, TypeCheckError::NotCallable { .. })),
+            "expected NotCallable, got {errs:?}"
+        );
+    }
+
+    // 7. `name` is neither a method nor a field → unknown member.
+    #[test]
+    fn mcall_unknown_member_errors() {
+        let (_expr, errs) = check_probe_expr(mcall("wg", "nope", vec![]));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, TypeCheckError::UnknownField { field, .. } if field == "nope")),
+            "expected UnknownField, got {errs:?}"
+        );
+    }
+
+    // 8. Static form used on an instance method → form error.
+    #[test]
+    fn mcall_static_form_on_instance_method_errors() {
+        let (_expr, errs) = check_probe_expr(mcall("Widget", "inst", vec![lit(3)]));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, TypeCheckError::MethodCallForm { .. })),
+            "expected MethodCallForm, got {errs:?}"
+        );
+    }
+
+    // 9. Instance form used on a static method → form error.
+    #[test]
+    fn mcall_instance_form_on_static_method_errors() {
+        let (_expr, errs) = check_probe_expr(mcall("wg", "make", vec![lit(5)]));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, TypeCheckError::MethodCallForm { .. })),
+            "expected MethodCallForm, got {errs:?}"
+        );
+    }
+
+    // 10. Non-struct receiver → error.
+    #[test]
+    fn mcall_non_struct_receiver_errors() {
+        let (_expr, errs) = check_probe_expr(mcall("num", "inst", vec![lit(3)]));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, TypeCheckError::InvalidMethodReceiver { .. })),
+            "expected InvalidMethodReceiver, got {errs:?}"
+        );
+    }
+
+    // 11. Private method called from outside its type → still gated after the
+    //     rewrite (proves `check_method_access` fires on the resolved call).
+    #[test]
+    fn mcall_private_method_from_outside_is_gated() {
+        let (_expr, errs) = check_probe_expr(mcall("wg", "secret", vec![]));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, TypeCheckError::InaccessibleMethod { method, .. } if method == "secret")),
+            "expected InaccessibleMethod, got {errs:?}"
+        );
+    }
+
+    // 12. Re-check idempotence: resolving produces a plain `FunctionCall`;
+    //     re-checking that resolved node leaves it unchanged and error-free.
+    #[test]
+    fn mcall_resolution_is_idempotent_on_recheck() {
+        let (resolved, errs) = check_probe_expr(mcall("Widget", "make", vec![lit(5)]));
+        assert!(errs.is_empty(), "first pass errors: {errs:?}");
+        assert!(matches!(resolved.kind, ExprKind::FunctionCall { .. }));
+        let first_ty = resolved.expr_type;
+        let (again, errs2) = check_probe_expr(resolved);
+        assert!(errs2.is_empty(), "re-check errors: {errs2:?}");
+        assert!(
+            matches!(again.kind, ExprKind::FunctionCall { ref name, .. } if name == "Widget$make"),
+            "re-check should leave the FunctionCall unchanged, got {:?}",
+            again.kind
+        );
+        assert_eq!(again.expr_type, first_ty, "type stable across re-check");
+    }

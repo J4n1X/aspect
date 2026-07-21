@@ -455,6 +455,9 @@ pub(crate) fn walk_expression<'ctx>(
         ExprKind::ValueBlock(stmts) => {
             cg.generate_value_block(stmts, expr.expr_type, expr.pos)
         }
+        // The typechecker resolves every `MethodCall` into a `FunctionCall` /
+        // `IndirectCall` (see `resolve_method_call`); codegen never sees one.
+        ExprKind::MethodCall { .. } => unreachable!("MethodCall is lowered by the typechecker"),
     }
 }
 

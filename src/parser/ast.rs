@@ -98,6 +98,20 @@ pub enum ExprKind {
         callee: Box<Expression>,
         args: Vec<Expression>,
     },
+    /// An *unresolved* method or fn-pointer-field call `base.name(args)` whose
+    /// receiver type is not known until type-checking. The parser resolves such
+    /// calls at parse time (`build_method_call`) and never emits this node; it
+    /// exists so metaprogram-generated AST (Three-Hook-Metasystem Phases 3/4),
+    /// which has no parse-time receiver types, can defer method-vs-field
+    /// dispatch, static-vs-instance resolution, and `Type$method` mangling to
+    /// the checker. The checker resolves it and **rewrites the node in place**
+    /// into a `FunctionCall` (method) or `IndirectCall` (fn-ptr field), so
+    /// codegen never sees a `MethodCall`. See `synth_method_call`.
+    MethodCall {
+        base: Box<Expression>,
+        name: String,
+        args: Vec<Expression>,
+    },
     /// `sizeof(T)` — the compile-time size of a type in bytes. Lowered to a
     /// `u64` constant at codegen using the target data layout (so struct
     /// padding and target pointer width are respected). The type checker

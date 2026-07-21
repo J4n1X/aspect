@@ -17,6 +17,13 @@ impl TypeChecker {
     /// resolution, indices, conditions, cast/dereference operands.
     pub(crate) fn synth_expression(&mut self, expr: &mut Expression) -> LangType {
         let pos = expr.pos;
+        // `MethodCall` is resolved and rewritten *before* the main match: it
+        // replaces the whole node (method → `FunctionCall`, fn-ptr field →
+        // `IndirectCall`), which a `match &mut expr.kind` arm cannot do. This is
+        // the checker's one in-place lowering — see `resolve_method_call`.
+        if matches!(expr.kind, ExprKind::MethodCall { .. }) {
+            return self.resolve_method_call(expr);
+        }
         let default_type = expr.expr_type;
         match &mut expr.kind {
             ExprKind::Literal(_) => default_type,
@@ -323,6 +330,11 @@ impl TypeChecker {
                 expr.expr_type = ty;
                 ty
             }
+
+            // Resolved-and-rewritten before this match (see the guard at the
+            // top of `synth_expression`), so the node is never a `MethodCall`
+            // by the time control reaches here.
+            ExprKind::MethodCall { .. } => unreachable!("MethodCall resolved before the match"),
         }
     }
 
@@ -455,6 +467,230 @@ impl TypeChecker {
                 .push(TypeCheckError::UndefinedFunction(name.to_string(), pos));
             for arg in args.iter_mut() {
                 self.synth_expression(arg);
+            }
+        }
+    }
+
+    // ── MethodCall resolution (checker-side lowering) ────────────────────────
+
+    /// Resolve an `ExprKind::MethodCall` in place: build the concrete call node
+    /// (`FunctionCall` for a method, `IndirectCall` for a fn-pointer field),
+    /// install it on `expr`, and return the call's result type by re-checking
+    /// the rewritten node.
+    ///
+    /// This is the checker analogue of the parser's `build_method_call`; it
+    /// exists so metaprogram-generated AST (Three-Hook-Metasystem Phases 3/4),
+    /// which carries no parse-time receiver types, can defer method dispatch to
+    /// type-checking. It is a *one-shot* lowering — the resulting node is a
+    /// plain call, so re-checking it is stable — and must not be counted as a
+    /// handler rewrite by any future rounds driver (§14.1).
+    ///
+    /// The per-method privacy gate (`MethodSig.vis`) is enforced for free when
+    /// the rewritten `FunctionCall` flows through `check_call` →
+    /// `check_method_access`. The `public type` cross-module gate is
+    /// deliberately **not** reproduced here — the checker has no
+    /// `file_id → module` map — matching §14.2's accepted carve-out that
+    /// metaprogram-generated code bypasses import visibility. When the parser
+    /// eventually migrates to emit `MethodCall`, that gate (and the module maps
+    /// it needs) must move with it.
+    fn resolve_method_call(&mut self, expr: &mut Expression) -> LangType {
+        let pos = expr.pos;
+        let (base, name, args) = match std::mem::replace(&mut expr.kind, ExprKind::Null) {
+            ExprKind::MethodCall { base, name, args } => (*base, name, args),
+            _ => unreachable!("resolve_method_call called on a non-MethodCall node"),
+        };
+        *expr = self.build_method_call_node(base, name, args, pos);
+        // Re-check the rewritten node: `FunctionCall` runs `check_call`
+        // (arity/arg types + the per-method gate), `IndirectCall` validates the
+        // callee signature.
+        self.synth_expression(expr)
+    }
+
+    /// Build the resolved call `Expression` for `base.name(args)`. Returns a
+    /// `FunctionCall` (static or instance method), an `IndirectCall` (fn-pointer
+    /// field), or a `void` `Null` placeholder after pushing a diagnostic.
+    fn build_method_call_node(
+        &mut self,
+        mut base: Expression,
+        name: String,
+        args: Vec<Expression>,
+        pos: crate::lexer::Position,
+    ) -> Expression {
+        // Static form: `TypeName.method(args)` — `base` is `Variable(TypeName)`
+        // naming a known type-struct not shadowed by a local.
+        if let ExprKind::Variable(var_name) = &base.kind
+            && let Some(id) = self.symbols.struct_id(var_name)
+            && self.lookup_var(var_name).is_none()
+        {
+            return self.build_static_method_call(id, &name, args, pos);
+        }
+
+        // Instance form: synth the receiver, which must be a type-struct value
+        // or single-level pointer-to-struct.
+        let base_type = self.synth_expression(&mut base);
+        let TypeBase::Struct(id) = base_type.base else {
+            self.errors.push(TypeCheckError::InvalidMethodReceiver {
+                found: base_type,
+                position: pos,
+            });
+            return Expression::new(ExprKind::Null, LangType::VOID, pos);
+        };
+        let type_name = self.symbols.struct_info(id).name.clone();
+
+        // Method vs fn-pointer field. Snapshot the needed facts before any
+        // `self.errors` borrow.
+        let method_is_static = self
+            .symbols
+            .struct_info(id)
+            .methods
+            .get(&name)
+            .map(|sig| sig.is_static);
+
+        if let Some(is_static) = method_is_static {
+            // An instance call must resolve to an instance method.
+            if is_static {
+                self.errors.push(TypeCheckError::MethodCallForm {
+                    message: format!(
+                        "'{type_name}.{name}' is a static method; call it as \
+                         `{type_name}.{name}(...)` without a receiver"
+                    ),
+                    position: pos,
+                });
+                return Expression::new(ExprKind::Null, LangType::VOID, pos);
+            }
+            let mangled = crate::symbol::module::mangle_method(&type_name, &name);
+            let return_type = self
+                .symbols
+                .lookup_function(&mangled)
+                .map_or(LangType::VOID, |f| f.return_type);
+            // Receiver: autoref a value, pass a pointer as-is, reject deeper
+            // pointers. Const propagates into the reference type, so calling a
+            // mutating (non-`const fn`) method on a const receiver is rejected
+            // downstream by `check_call`'s coercion of the receiver arg.
+            let receiver = match base_type.pointer_depth {
+                0 => {
+                    let ref_ty = base_type.with_pointer_depth(1);
+                    let base_pos = base.pos;
+                    Expression::new(ExprKind::Reference(Box::new(base)), ref_ty, base_pos)
+                }
+                1 => base,
+                _ => {
+                    self.errors.push(TypeCheckError::InvalidMethodReceiver {
+                        found: base_type,
+                        position: pos,
+                    });
+                    return Expression::new(ExprKind::Null, LangType::VOID, pos);
+                }
+            };
+            let mut all_args = Vec::with_capacity(args.len() + 1);
+            all_args.push(receiver);
+            all_args.extend(args);
+            return Expression::new(
+                ExprKind::FunctionCall {
+                    name: mangled,
+                    args: all_args,
+                },
+                return_type,
+                pos,
+            );
+        }
+
+        // Not a method: `name` may be a fn-pointer *field*, callable through an
+        // indirect call. Anything else is a diagnostic.
+        let field_ty = self.symbols.field(id, &name).map(|(_, f)| f.ty);
+        match field_ty {
+            Some(fty) if matches!(fty.base, TypeBase::FnPtr(_)) && fty.pointer_depth == 0 => {
+                let TypeBase::FnPtr(fid) = fty.base else {
+                    unreachable!("guarded by the match arm")
+                };
+                let return_type = self.symbols.fnptr_sig(fid).return_type;
+                let base_pos = base.pos;
+                let field_access = Expression::new(
+                    ExprKind::FieldAccess {
+                        base: Box::new(base),
+                        field: name,
+                    },
+                    fty,
+                    base_pos,
+                );
+                Expression::new(
+                    ExprKind::IndirectCall {
+                        callee: Box::new(field_access),
+                        args,
+                    },
+                    return_type,
+                    pos,
+                )
+            }
+            Some(fty) => {
+                self.errors.push(TypeCheckError::NotCallable {
+                    name,
+                    type_name,
+                    found: fty,
+                    position: pos,
+                });
+                Expression::new(ExprKind::Null, LangType::VOID, pos)
+            }
+            None => {
+                self.errors.push(TypeCheckError::UnknownField {
+                    field: name,
+                    type_name,
+                    position: pos,
+                });
+                Expression::new(ExprKind::Null, LangType::VOID, pos)
+            }
+        }
+    }
+
+    /// Resolve a static-form `Type.method(args)` call node.
+    fn build_static_method_call(
+        &mut self,
+        id: u32,
+        name: &str,
+        args: Vec<Expression>,
+        pos: crate::lexer::Position,
+    ) -> Expression {
+        let type_name = self.symbols.struct_info(id).name.clone();
+        let method_is_static = self
+            .symbols
+            .struct_info(id)
+            .methods
+            .get(name)
+            .map(|sig| sig.is_static);
+        match method_is_static {
+            // A static call must resolve to a static method.
+            Some(false) => {
+                self.errors.push(TypeCheckError::MethodCallForm {
+                    message: format!(
+                        "'{type_name}.{name}' is an instance method; call it as \
+                         `<receiver>.{name}(...)`"
+                    ),
+                    position: pos,
+                });
+                Expression::new(ExprKind::Null, LangType::VOID, pos)
+            }
+            Some(true) => {
+                let mangled = crate::symbol::module::mangle_method(&type_name, name);
+                let return_type = self
+                    .symbols
+                    .lookup_function(&mangled)
+                    .map_or(LangType::VOID, |f| f.return_type);
+                Expression::new(
+                    ExprKind::FunctionCall {
+                        name: mangled,
+                        args,
+                    },
+                    return_type,
+                    pos,
+                )
+            }
+            None => {
+                self.errors.push(TypeCheckError::UnknownField {
+                    field: name.to_string(),
+                    type_name,
+                    position: pos,
+                });
+                Expression::new(ExprKind::Null, LangType::VOID, pos)
             }
         }
     }

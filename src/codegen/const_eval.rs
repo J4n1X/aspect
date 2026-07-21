@@ -290,6 +290,10 @@ pub(crate) fn const_eval<'ctx>(
             "value block is not a compile-time constant".to_string(),
             expr.pos,
         )),
+        // The typechecker rewrites every `MethodCall` into a `FunctionCall` /
+        // `IndirectCall` before codegen; one reaching here means the checker
+        // was bypassed.
+        ExprKind::MethodCall { .. } => unreachable!("MethodCall is lowered by the typechecker"),
     }
 }
 
