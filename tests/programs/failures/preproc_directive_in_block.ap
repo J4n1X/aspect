@@ -1,10 +1,9 @@
 # expected: "top level", "inside a block"
-# Directives are only meaningful at the top level of a file: a line-leading
-# `$` inside a function body (brace depth > 0) is an error.
+# Conditional directives (`$if*`/`$else`/`$endif`) are allowed inside a
+# function body, but the state-mutating directives are not: a line-leading
+# `$define`/`$undefine`/`$module`/`$import` at brace depth > 0 is an error.
 
 fn main(u32 argc, u8 **argv) -> i32 {
-$ifdef OS_LINUX
-    return 1
-$endif
-    return 0
+$define ENABLED 1
+    return ENABLED
 }

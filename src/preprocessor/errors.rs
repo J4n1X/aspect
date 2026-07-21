@@ -75,7 +75,7 @@ pub enum PreprocessError {
         pos: Position,
     },
 
-    #[error("preprocessor directives must be at the top level of a file, but `$` at {0} is inside a block")]
+    #[error("`$` at {0} is inside a block; only conditional directives (`$if`/`$ifdef`/`$else`/`$endif`/…) may appear inside a block — `$define`/`$undefine`/`$module`/`$import` must be at the top level")]
     DirectiveInsideBlock(Position),
 
     #[error("undefined identifier `{name}` in `$if` expression at {pos}; use `defined({name})` to test whether it is defined")]

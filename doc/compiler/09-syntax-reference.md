@@ -270,9 +270,12 @@ substitution is word-boundary-safe and can never rewrite string literals.
 
 Directives are **line-anchored**: `$` must be the first token on its line
 (leading whitespace is fine), and everything up to the newline belongs to
-the directive. A `$` anywhere else on a line is an error, as is a
-line-leading `$` inside a block — directives only exist at the top level
-of a file. Unknown directive names error with a did-you-mean suggestion.
+the directive. A `$` anywhere else on a line is an error. The conditional
+directives (`$if`/`$ifdef`/…/`$endif`) may appear anywhere, including
+inside a function body; the state-mutating directives (`$define`,
+`$undefine`, `$module`, `$import`) exist only at the top level of a file,
+so a line-leading one inside a block is an error. Unknown directive names
+error with a did-you-mean suggestion.
 
 The directive families:
 

@@ -88,10 +88,12 @@ declared identity and the on-disk location from drifting apart silently.
 
 All directives are **line-anchored**: `$` must be the first token on the
 line (leading whitespace fine). Everything until the newline belongs to the
-directive. Directives are only meaningful at the top level of a file;
-inside a block, a line-leading `$` is an error (simplifies reasoning, can
-be relaxed later). This tightens the shipped behaviour, where `$include`
-was recognised anywhere in the stream.
+directive. The conditional-compilation directives
+(`$if`/`$ifdef`/…/`$endif`) are valid at any brace depth — the initial
+"top level only" restriction was relaxed for them so conditional
+compilation works inside a function body. The state-mutating directives
+(`$define`/`$undefine`/`$module`/`$import`) remain top-level only; a
+line-leading one inside a block is an error.
 
 ### Defines
 

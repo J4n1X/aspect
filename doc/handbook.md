@@ -1032,10 +1032,13 @@ fn main(u32 argc, u8** argv) -> i32 {
 A token-level pass runs before parsing and expands line-anchored `$`
 directives — chosen instead of `#` because `#` is already comments, and
 `@` is reserved for the (planned) metasystem. A `$` must be the first
-token on its line, and directives exist only at the **top level of a
-file** — a line-leading `$` inside any block is an error. Unlike C, you
-cannot `$ifdef` inside a function body; hoist the conditional to file
-scope and gate whole declarations instead.
+token on its line. The **conditional-compilation** directives
+(`$if`/`$ifdef`/`$ifndef`/`$elseif`/`$elseifdef`/`$else`/`$endif`) work
+anywhere, including inside a function body — just like C's `#ifdef`, they
+gate which tokens reach the parser. The **state-mutating** directives
+(`$define`/`$undefine`/`$module`/`$import`) exist only at the **top level
+of a file**: a line-leading `$define`/`$import`/… inside any block is an
+error, since they affect module-level state or inject whole files.
 
 ### Defines
 

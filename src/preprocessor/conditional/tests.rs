@@ -285,20 +285,70 @@ fn ifdef_operand_must_be_a_single_identifier() {
     ));
 }
 
-// ── top-level enforcement ───────────────────────────────────────────
+// ── conditionals inside a block ─────────────────────────────────────
 
 #[test]
-fn directive_inside_a_block_is_an_error() {
-    let src = "fn main(u32 argc, u8 **argv) -> i32 {\n$ifdef A\n    return 1\n$endif\n}\n";
-    let err = preprocess_str(src).unwrap_err();
-    let PreprocessError::DirectiveInsideBlock(pos) = err else {
-        panic!("expected DirectiveInsideBlock, got {err:?}");
-    };
-    assert_eq!(pos.line, 2);
+fn ifdef_inside_a_block_gates_its_body() {
+    // A conditional chain may open and close inside a function body.
+    // Undefined name -> the guarded statement is dropped, braces survive.
+    let src = "fn main() -> i32 {\n$ifdef A\n    return 1\n$endif\n    return 0\n}\n";
+    assert_eq!(ints(src), vec![0]);
+    // Defined name -> the guarded statement is kept.
+    let src = "$define A\nfn main() -> i32 {\n$ifdef A\n    return 1\n$endif\n    return 0\n}\n";
+    assert_eq!(ints(src), vec![1, 0]);
 }
 
 #[test]
-fn directive_after_a_closed_block_is_fine() {
+fn if_else_inside_a_block_selects_one_branch() {
+    let base = "fn main() -> i32 {\n$ifdef A\n    return 1\n$else\n    return 2\n$endif\n}\n";
+    assert_eq!(ints(base), vec![2]);
+    assert_eq!(ints(&format!("$define A\n{base}")), vec![1]);
+}
+
+#[test]
+fn conditional_branches_with_uneven_braces_keep_brace_tracking_honest() {
+    // The live branch opens one kind of block, the dead branch another;
+    // only the live branch's braces count. After the function closes,
+    // brace depth is back to 0, so the trailing top-level `$define` is
+    // accepted — which it would not be if the dead braces had leaked.
+    let src = "\
+$define A
+fn main() {
+$ifdef A
+    while (cond) {
+$else
+    if (other) {
+$endif
+        stop()
+    }
+}
+$define AFTER 7
+AFTER
+";
+    assert_eq!(ints(src), vec![7]);
+}
+
+// ── top-level enforcement ───────────────────────────────────────────
+
+#[test]
+fn non_conditional_directive_inside_a_block_is_an_error() {
+    // `$define`/`$undefine`/`$import` stay top-level only; only the
+    // conditional family is allowed inside a block.
+    for src in [
+        "fn main() -> i32 {\n$define X 1\n    return 0\n}\n",
+        "fn main() -> i32 {\n$undefine X\n    return 0\n}\n",
+        "fn main() -> i32 {\n$import foo\n    return 0\n}\n",
+    ] {
+        let err = preprocess_str(src).unwrap_err();
+        assert!(
+            matches!(err, PreprocessError::DirectiveInsideBlock(_)),
+            "expected DirectiveInsideBlock for {src:?}, got {err:?}"
+        );
+    }
+}
+
+#[test]
+fn non_conditional_directive_after_a_closed_block_is_fine() {
     assert_eq!(ints("{\n}\n$define X 7\nX\n"), vec![7]);
 }
 

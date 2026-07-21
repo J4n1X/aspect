@@ -1,0 +1,33 @@
+# expected: 42
+# Conditional-compilation directives inside a function body (brace depth > 0):
+# $ifdef (undefined -> dropped), $ifndef (undefined -> kept), and an
+# $if/$else chain, plus a chain nested two blocks deep inside a loop. The
+# return value pins down exactly which branches survived.
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    i32 total = 0
+
+    $ifdef DEFINITELY_NOT_DEFINED
+    total = total + 1000
+    $endif
+
+    $ifndef DEFINITELY_NOT_DEFINED
+    total = total + 2
+    $endif
+
+    $if ASPECT_VERSION_MAJOR >= 0
+    total = total + 40
+    $else
+    total = total - 40
+    $endif
+
+    for (u32 i = 0; i < 3; i += 1) {
+        if (i > 0) {
+            $ifdef DEFINITELY_NOT_DEFINED
+            total = total + 100
+            $endif
+        }
+    }
+
+    return total
+}

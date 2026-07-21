@@ -29,8 +29,12 @@
 //! - `$module <path>` / `$import <path>` — module identity, `-I` root
 //!   resolution, and import-once loading ([`modules`] module).
 //!
-//! Directives are only meaningful at the top level of a file: the walk
-//! tracks brace depth, and a line-leading `$` inside a block is an error.
+//! Conditional-compilation directives (`$if*`/`$else`/`$endif`) work
+//! anywhere, including inside a function body — they only gate which tokens
+//! reach the parser. The other directives establish module-level state
+//! (`$define`/`$undefine`) or file structure (`$module`/`$import`), so they
+//! are top-level only: the walk tracks brace depth, and a line-leading `$`
+//! for one of those inside a block is an error.
 //!
 //! ## Why a separate stage
 //!
@@ -398,15 +402,15 @@ impl Preprocessor {
                         i += 1;
                         continue;
                     }
-                    if brace_depth > 0 {
-                        return Err(PreprocessError::DirectiveInsideBlock(token.pos));
-                    }
                     // Everything up to the newline belongs to the directive.
+                    // Brace-depth enforcement is deferred to
+                    // `process_directive_line`: conditional directives are
+                    // valid inside a block, the rest are top-level only.
                     let line_len = raw[i..]
                         .iter()
                         .position(|t| matches!(t.kind, TokenKind::Newline | TokenKind::Eof))
                         .unwrap_or(raw.len() - i);
-                    self.process_directive_line(&raw[i..i + line_len])?;
+                    self.process_directive_line(&raw[i..i + line_len], brace_depth)?;
                     i += line_len;
                     // Consume the terminating newline too (nothing of the
                     // directive line reaches the output stream).
@@ -472,7 +476,18 @@ impl Preprocessor {
     /// state and keep nesting matched inside skipped branches. Every other
     /// directive is inert while a branch is skipped: `$define` does not
     /// define, `$import` does not resolve, unknown names do not error.
-    fn process_directive_line(&mut self, line: &[Token]) -> Result<(), PreprocessError> {
+    ///
+    /// `brace_depth` is the raw-source block nesting at the directive.
+    /// Conditional directives (`$if*`/`$else`/`$endif`) are valid at any
+    /// depth — conditional compilation works inside a function body just as
+    /// at the top level. The remaining directives establish module-level
+    /// state (`$define`/`$undefine`) or file structure (`$module`/`$import`),
+    /// so they stay top-level only and error inside a block.
+    fn process_directive_line(
+        &mut self,
+        line: &[Token],
+        brace_depth: usize,
+    ) -> Result<(), PreprocessError> {
         let pos = line[0].pos;
         // `$if` / `$else` lex as keywords, not identifiers — take the name
         // from either kind so the whole directive table is reachable.
@@ -502,6 +517,11 @@ impl Preprocessor {
         }
         if !self.conditionals.active() {
             return Ok(());
+        }
+        // Everything below mutates module-level state or injects file
+        // content — none of it belongs inside a block.
+        if brace_depth > 0 {
+            return Err(PreprocessError::DirectiveInsideBlock(pos));
         }
         match name.as_str() {
             "define" => self.handle_define(rest, pos),
