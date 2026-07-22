@@ -5,6 +5,32 @@ use crate::symbol::module::Visibility;
 use aspect_macros::parse_rule;
 
 impl Parser {
+    /// Register a function in the module symbol table, mapping a duplicate or
+    /// signature clash to a positioned error. `has_body` is `!is_extern` (only
+    /// `extern` declarations lack a body); shared by the fn/asm/naked/method
+    /// parsers.
+    pub(crate) fn register_fn_symbol(
+        &mut self,
+        name: &str,
+        params: &[(LangType, String)],
+        return_type: LangType,
+        is_extern: bool,
+        vis: Visibility,
+        pos: crate::lexer::Position,
+    ) -> Result<(), ParserError> {
+        self.module
+            .add_function(crate::symbol::table::FunctionSymbol {
+                name: name.to_string(),
+                params: params.to_vec(),
+                return_type,
+                is_extern,
+                has_body: !is_extern,
+                vis,
+                pos,
+            })
+            .map_err(|e| ParserError::from_symbol(e, pos))
+    }
+
     /// Attributes are inert cargo: the parser validates only the shape and
     /// attaches them, in source order, to the item that follows. Source order
     /// is outside-in — in `@a @b x`, `a` is applied last. Newlines after an
@@ -221,8 +247,6 @@ impl Parser {
     ) -> Result<crate::parser::Function, ParserError> {
         use crate::parser::{Function, FunctionProto};
         use crate::symbol::module::{mangle_method, MethodSig};
-        use crate::symbol::table::FunctionSymbol;
-
         let pos = pos!();
         kw!(Fn);
         let method_name = ident!();
@@ -283,17 +307,7 @@ impl Parser {
         };
 
         // Register so plain `FunctionCall { name: mangled, ... }` resolves.
-        self.module
-            .add_function(FunctionSymbol {
-                name: mangled.clone(),
-                params: params.clone(),
-                return_type,
-                is_extern: false,
-                has_body: true,
-                vis: Visibility::Private,
-                pos,
-            })
-            .map_err(|e| ParserError::from_symbol(e, pos))?;
+        self.register_fn_symbol(&mangled, &params, return_type, false, Visibility::Private, pos)?;
 
         // Register in the struct's method registry (params exclude `this`).
         let visible_params: Vec<(LangType, String)> = if has_this {
@@ -379,8 +393,6 @@ impl Parser {
         attrs: Vec<Attribute>,
     ) -> Result<crate::parser::Function, ParserError> {
         use crate::parser::{Function, FunctionProto};
-        use crate::symbol::table::FunctionSymbol;
-
         let pos = pos!();
         kw!(Fn);
         let name = ident!();
@@ -410,17 +422,7 @@ impl Parser {
             pos,
         };
 
-        self.module
-            .add_function(FunctionSymbol {
-                name: name.clone(),
-                params: params.clone(),
-                return_type,
-                is_extern,
-                has_body: !is_extern,
-                vis,
-                pos,
-            })
-            .map_err(|e| ParserError::from_symbol(e, pos))?;
+        self.register_fn_symbol(&name, &params, return_type, is_extern, vis, pos)?;
 
         skip_nl!();
 

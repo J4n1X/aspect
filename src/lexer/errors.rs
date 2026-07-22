@@ -45,6 +45,25 @@ impl std::fmt::Display for Position {
     }
 }
 
+/// Render `err` prefixed with `file:line:col:`, resolving `pos.file_id` against
+/// `files`. A positionless error — or one whose `file_id` is out of range —
+/// prints bare. Shared by every phase's `format_error` so their diagnostics
+/// share one shape; callers pass the error's own `position()`.
+#[must_use]
+pub fn format_diagnostic(
+    files: &[std::path::PathBuf],
+    err: &impl std::fmt::Display,
+    pos: Option<Position>,
+) -> String {
+    let Some(pos) = pos else {
+        return err.to_string();
+    };
+    match files.get(pos.file_id as usize) {
+        Some(path) => format!("{}:{}:{}: {}", path.display(), pos.line, pos.column, err),
+        None => err.to_string(),
+    }
+}
+
 #[derive(Error, Debug, ErrorPosition)]
 pub enum LexerError {
     #[error("Unexpected character '{0}' at {1}")]

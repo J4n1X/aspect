@@ -339,9 +339,9 @@ impl Scanner {
     ) -> Result<Token, LexerError> {
         if first == '0' {
             if self.match_char('x') || self.match_char('X') {
-                return self.scan_hex_number(start_pos, start_idx);
+                return self.scan_radix_number(start_pos, start_idx, 16, Self::is_hex_digit);
             } else if self.match_char('b') || self.match_char('B') {
-                return self.scan_binary_number(start_pos, start_idx);
+                return self.scan_radix_number(start_pos, start_idx, 2, |c| c == '0' || c == '1');
             }
         }
 
@@ -373,37 +373,23 @@ impl Scanner {
         }
     }
 
-    fn scan_hex_number(
+    /// Scan the digits of a `0x`/`0b`-prefixed integer (the two-char prefix is
+    /// already consumed). `is_digit` bounds the digit run; `radix` parses it.
+    fn scan_radix_number(
         &mut self,
         start_pos: Position,
         start_idx: usize,
+        radix: u32,
+        is_digit: impl Fn(char) -> bool,
     ) -> Result<Token, LexerError> {
-        while Self::is_hex_digit(self.peek().unwrap_or('\0')) {
+        while is_digit(self.peek().unwrap_or('\0')) {
             self.advance();
         }
 
         let lexeme = self.slice_to_string(start_idx, self.current);
-        let hex_str = &lexeme[2..]; // Skip "0x"
+        let digits = &lexeme[2..]; // skip the `0x`/`0b` prefix
 
-        let value = i64::from_str_radix(hex_str, 16)
-            .map_err(|_| LexerError::InvalidNumber(lexeme.clone(), start_pos))?;
-
-        Ok(Token::new(TokenKind::Integer(value), start_pos, lexeme))
-    }
-
-    fn scan_binary_number(
-        &mut self,
-        start_pos: Position,
-        start_idx: usize,
-    ) -> Result<Token, LexerError> {
-        while self.peek() == Some('0') || self.peek() == Some('1') {
-            self.advance();
-        }
-
-        let lexeme = self.slice_to_string(start_idx, self.current);
-        let bin_str = &lexeme[2..]; // Skip "0b"
-
-        let value = i64::from_str_radix(bin_str, 2)
+        let value = i64::from_str_radix(digits, radix)
             .map_err(|_| LexerError::InvalidNumber(lexeme.clone(), start_pos))?;
 
         Ok(Token::new(TokenKind::Integer(value), start_pos, lexeme))

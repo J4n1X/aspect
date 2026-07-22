@@ -3,7 +3,7 @@ use crate::lexer::{LangType, TypeBase};
 use crate::parser::ComparisonOp;
 use inkwell::builder::{Builder, BuilderError};
 use inkwell::context::Context;
-use inkwell::types::{ArrayType, BasicType, BasicTypeEnum};
+use inkwell::types::BasicTypeEnum;
 use inkwell::values::{FloatValue, IntValue};
 use inkwell::AddressSpace;
 use inkwell::FloatPredicate;
@@ -16,56 +16,20 @@ use inkwell::IntPredicate;
 /// `LangType` lives in `src/lexer/`; this trait adds codegen-specific helpers
 /// without modifying that crate.
 pub trait LangTypeExt {
-    fn is_signed_int(&self) -> bool;
-    fn is_unsigned_int(&self) -> bool;
-    /// Signed or unsigned integer — not floats or pointers.
-    fn is_int(&self) -> bool;
-    fn is_float(&self) -> bool;
-    fn is_pointer(&self) -> bool;
     fn is_void(&self) -> bool;
 
     /// Array types decay to `ptr` (same as pointers); for the backing array
-    /// type use [`LangTypeExt::to_llvm_array`]. Returns a position-less
-    /// [`TypeLoweringError`]; the caller attaches a position via `with_pos`.
+    /// type use the code generator's `lang_type_to_llvm_array`. Returns a
+    /// position-less [`TypeLoweringError`]; the caller attaches a position via
+    /// `with_pos`.
     fn to_llvm<'ctx>(&self, ctx: &'ctx Context)
         -> Result<BasicTypeEnum<'ctx>, TypeLoweringError>;
-
-    /// Errors if the type is not an array.
-    fn to_llvm_array<'ctx>(&self, ctx: &'ctx Context)
-        -> Result<ArrayType<'ctx>, TypeLoweringError>;
-
-    /// The element LLVM type, with the array dimension stripped (pointer depth
-    /// is part of the element — `(i32*)[3]` has element `ptr`).
-    fn element_to_llvm<'ctx>(
-        &self,
-        ctx: &'ctx Context,
-    ) -> Result<BasicTypeEnum<'ctx>, TypeLoweringError>;
 
     /// Return a `LangType` one pointer-depth less (the pointee type).
     fn pointee(&self) -> LangType;
 }
 
 impl LangTypeExt for LangType {
-    fn is_signed_int(&self) -> bool {
-        matches!(self.base, TypeBase::SInt) && self.pointer_depth == 0
-    }
-
-    fn is_unsigned_int(&self) -> bool {
-        matches!(self.base, TypeBase::UInt) && self.pointer_depth == 0
-    }
-
-    fn is_int(&self) -> bool {
-        matches!(self.base, TypeBase::SInt | TypeBase::UInt) && self.pointer_depth == 0
-    }
-
-    fn is_float(&self) -> bool {
-        matches!(self.base, TypeBase::SFloat) && self.pointer_depth == 0
-    }
-
-    fn is_pointer(&self) -> bool {
-        self.pointer_depth > 0
-    }
-
     fn is_void(&self) -> bool {
         matches!(self.base, TypeBase::Void) && self.pointer_depth == 0
     }
@@ -121,65 +85,6 @@ impl LangTypeExt for LangType {
         })
     }
 
-    fn to_llvm_array<'ctx>(&self, ctx: &'ctx Context) -> Result<ArrayType<'ctx>, TypeLoweringError> {
-        let array_size = self
-            .array_size
-            .ok_or_else(|| TypeLoweringError("Expected array type".to_string()))?;
-        let element_type = self.element_to_llvm(ctx)?;
-        Ok(element_type.array_type(array_size))
-    }
-
-    fn element_to_llvm<'ctx>(
-        &self,
-        ctx: &'ctx Context,
-    ) -> Result<BasicTypeEnum<'ctx>, TypeLoweringError> {
-        // Pointer depth is part of the element: `(i32*)[3]` must allocate
-        // `[3 x ptr]`, not `[3 x i32]` — else the literal store corrupts stack.
-        if self.pointer_depth > 0 {
-            return Ok(ctx.ptr_type(AddressSpace::default()).into());
-        }
-        Ok(match self.base {
-            TypeBase::Bool => ctx.i8_type().into(),
-            TypeBase::SInt | TypeBase::UInt => match self.size_bits {
-                8 => ctx.i8_type().into(),
-                16 => ctx.i16_type().into(),
-                32 => ctx.i32_type().into(),
-                64 => ctx.i64_type().into(),
-                _ => {
-                    return Err(TypeLoweringError(format!(
-                        "Invalid integer size: {}",
-                        self.size_bits
-                    )))
-                }
-            },
-            TypeBase::SFloat => match self.size_bits {
-                32 => ctx.f32_type().into(),
-                64 => ctx.f64_type().into(),
-                _ => {
-                    return Err(TypeLoweringError(format!(
-                        "Invalid float size: {}",
-                        self.size_bits
-                    )))
-                }
-            },
-            TypeBase::Void => {
-                return Err(TypeLoweringError(
-                    "Void type cannot be used as a value type".to_string(),
-                ))
-            }
-            TypeBase::Struct(id) => {
-                return Err(TypeLoweringError(format!(
-                    "struct#{id} element must be lowered via lang_type_to_llvm"
-                )))
-            }
-            // A function-pointer array element is `ptr` (opaque), same as
-            // `to_llvm` above — see the comment there.
-            TypeBase::FnPtr(_) => ctx.ptr_type(AddressSpace::default()).into(),
-            // An enum element lowers to `i32`, same as `to_llvm` above.
-            TypeBase::Enum(_) => ctx.i32_type().into(),
-        })
-    }
-
     fn pointee(&self) -> LangType {
         LangType {
             base: self.base,
@@ -210,20 +115,6 @@ macro_rules! signed_op {
             $builder.$signed($($arg),+)
         } else {
             $builder.$unsigned($($arg),+)
-        }
-    };
-}
-
-/// Dispatch to the signed or unsigned const method on an `IntValue` (no builder needed).
-///
-/// Usage: `const_signed_op!(int_value, is_signed, const_signed_div, const_unsigned_div, rhs)`
-#[macro_export]
-macro_rules! const_signed_op {
-    ($val:expr_2021, $is_signed:expr_2021, $signed:ident, $unsigned:ident, $arg:expr_2021) => {
-        if $is_signed {
-            $val.$signed($arg)
-        } else {
-            $val.$unsigned($arg)
         }
     };
 }

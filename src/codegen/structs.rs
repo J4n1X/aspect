@@ -64,7 +64,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Lower an array `LangType` to `[N x T]`, resolving type-struct elements
-    /// through the cache. Cache-aware sibling of [`LangTypeExt::to_llvm_array`].
+    /// through the cache (unlike the value-only `LangTypeExt::to_llvm`).
     pub(crate) fn lang_type_to_llvm_array(
         &self,
         ty: &LangType,

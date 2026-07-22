@@ -16,11 +16,12 @@
 pub mod builtins;
 pub mod jit;
 pub mod query;
+mod walk;
 
 use std::path::PathBuf;
 
 use crate::lexer::{LangType, Position, TypeBase};
-use crate::parser::ast::{ExprKind, Expression, FunctionBody, Statement, StatementKind};
+use crate::parser::ast::{ExprKind, Expression, FunctionBody};
 use crate::parser::{MetaKind, Program, RuleAnchor};
 use query::QueryIndex;
 
@@ -72,11 +73,14 @@ pub fn check_meta_gate(program: &Program) -> Vec<Judgment> {
             });
         }
         if let FunctionBody::Aspect(body) = &func.body {
-            let mut calls = Vec::new();
+            let mut calls = MetaCalls {
+                meta_fns: &meta_fns,
+                found: Vec::new(),
+            };
             for stmt in body {
-                collect_meta_calls(stmt, &meta_fns, &mut calls);
+                walk::walk_stmt(stmt, &mut calls);
             }
-            for (callee, pos) in calls {
+            for (callee, pos) in calls.found {
                 out.push(Judgment {
                     severity: Severity::Error,
                     pos,
@@ -92,87 +96,20 @@ pub fn check_meta_gate(program: &Program) -> Vec<Judgment> {
     out
 }
 
-type Calls = Vec<(String, Position)>;
-
-fn collect_meta_calls(stmt: &Statement, meta_fns: &std::collections::HashSet<&str>, out: &mut Calls) {
-    let expr = |e, out: &mut Calls| walk_expr_calls(e, meta_fns, out);
-    match &stmt.kind {
-        StatementKind::Expression(e) | StatementKind::Return(Some(e)) => expr(e, out),
-        StatementKind::Return(None) | StatementKind::Break | StatementKind::Continue => {}
-        StatementKind::Block(b) => b.iter().for_each(|s| collect_meta_calls(s, meta_fns, out)),
-        StatementKind::If { condition, then_block, else_block } => {
-            expr(condition, out);
-            then_block.iter().for_each(|s| collect_meta_calls(s, meta_fns, out));
-            if let Some(eb) = else_block {
-                eb.iter().for_each(|s| collect_meta_calls(s, meta_fns, out));
-            }
-        }
-        StatementKind::While { condition, body } => {
-            expr(condition, out);
-            body.iter().for_each(|s| collect_meta_calls(s, meta_fns, out));
-        }
-        StatementKind::For { init, condition, increment, body } => {
-            if let Some(s) = init {
-                collect_meta_calls(s, meta_fns, out);
-            }
-            if let Some(c) = condition {
-                expr(c, out);
-            }
-            if let Some(s) = increment {
-                collect_meta_calls(s, meta_fns, out);
-            }
-            body.iter().for_each(|s| collect_meta_calls(s, meta_fns, out));
-        }
-        StatementKind::VarDecl { initializer, .. } => {
-            if let Some(e) = initializer {
-                expr(e, out);
-            }
-        }
-        StatementKind::VarAssign { value, .. } => expr(value, out),
-        StatementKind::DerefAssign { target, value } | StatementKind::FieldAssign { target, value } => {
-            expr(target, out);
-            expr(value, out);
-        }
-    }
+/// Collects, over a function body, every call to a meta function. Used by the
+/// meta-only gate to flag meta calls sitting in ordinary code.
+struct MetaCalls<'a> {
+    meta_fns: &'a std::collections::HashSet<&'a str>,
+    found: Vec<(String, Position)>,
 }
 
-fn walk_expr_calls(e: &Expression, meta_fns: &std::collections::HashSet<&str>, out: &mut Calls) {
-    let go = |e, out: &mut Calls| walk_expr_calls(e, meta_fns, out);
-    match &e.kind {
-        ExprKind::FunctionCall { name, args } => {
-            if meta_fns.contains(name.as_str()) {
-                out.push((name.clone(), e.pos));
-            }
-            args.iter().for_each(|a| go(a, out));
+impl walk::Visitor for MetaCalls<'_> {
+    fn visit_expr(&mut self, expr: &Expression) {
+        if let ExprKind::FunctionCall { name, .. } = &expr.kind
+            && self.meta_fns.contains(name.as_str())
+        {
+            self.found.push((name.clone(), expr.pos));
         }
-        ExprKind::Binary { left, right, .. } | ExprKind::Comparison { left, right, .. } => {
-            go(left, out);
-            go(right, out);
-        }
-        ExprKind::Reference(x)
-        | ExprKind::Dereference(x)
-        | ExprKind::UnaryNot(x)
-        | ExprKind::BitwiseNot(x)
-        | ExprKind::Cast { expr: x, .. }
-        | ExprKind::FieldAccess { base: x, .. } => go(x, out),
-        ExprKind::IndirectCall { callee, args } => {
-            go(callee, out);
-            args.iter().for_each(|a| go(a, out));
-        }
-        ExprKind::MethodCall { base, args, .. } => {
-            go(base, out);
-            args.iter().for_each(|a| go(a, out));
-        }
-        ExprKind::StructLiteral { fields, .. } => fields.iter().for_each(|(_, fe)| go(fe, out)),
-        ExprKind::Alloc { count, .. } => go(count, out),
-        ExprKind::ListInitializer(items) => items.iter().for_each(|x| go(x, out)),
-        ExprKind::ValueBlock(stmts) => stmts.iter().for_each(|s| collect_meta_calls(s, meta_fns, out)),
-        ExprKind::Literal(_)
-        | ExprKind::Variable(_)
-        | ExprKind::EnumValue { .. }
-        | ExprKind::FunctionRef(_)
-        | ExprKind::SizeOf(_)
-        | ExprKind::Null => {}
     }
 }
 

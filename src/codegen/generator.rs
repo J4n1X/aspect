@@ -12,6 +12,7 @@ use std::ffi::CString;
 use std::os::raw::c_char;
 
 use crate::codegen::scope::ScopeStack;
+use crate::codegen::value_emitter::{ConstantEmitter, RuntimeEmitter};
 use crate::codegen::CodegenError;
 use crate::parser::{FunctionBody, LangType, Program};
 use crate::target::TargetSpec;
@@ -314,18 +315,28 @@ impl<'ctx> CodeGenerator<'ctx> {
         fltused.set_linkage(inkwell::module::Linkage::External);
     }
 
+    /// A `ValueEmitter` that lowers arithmetic to IR through this generator's
+    /// builder. Convenience over the repeated inline struct literal.
+    pub(crate) fn runtime_emitter(&self) -> RuntimeEmitter<'_, 'ctx> {
+        RuntimeEmitter {
+            builder: &self.builder,
+            context: self.context,
+        }
+    }
+
+    /// A `ValueEmitter` that folds arithmetic into LLVM constants (no builder).
+    pub(crate) fn constant_emitter(&self) -> ConstantEmitter<'ctx> {
+        ConstantEmitter {
+            context: self.context,
+        }
+    }
+
     /// Format a codegen error with the originating source file prepended,
     /// looking up the file via the error's `pos.file_id`. Mirrors the
     /// parser/typechecker formatters.
     #[must_use]
     pub fn format_error(&self, err: &CodegenError) -> String {
-        let Some(pos) = err.position() else {
-            return err.to_string();
-        };
-        match self.source_files.get(pos.file_id as usize) {
-            Some(path) => format!("{}:{}:{}: {}", path.display(), pos.line, pos.column, err),
-            None => err.to_string(),
-        }
+        crate::lexer::format_diagnostic(&self.source_files, err, err.position())
     }
     pub fn module(&self) -> &Module<'ctx> {
         &self.module

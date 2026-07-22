@@ -120,14 +120,6 @@ impl Parser {
         }
     }
 
-    /// Set a single-entry source-file registry (the simple single-file case).
-    /// Equivalent to `with_source_files(vec![path])`.
-    #[must_use]
-    pub fn with_source_file(mut self, path: impl Into<String>) -> Self {
-        self.source_files = vec![std::path::PathBuf::from(path.into())];
-        self
-    }
-
     /// Set the full source-file registry from the preprocessor — entry file
     /// at id 0, each `$import`-pulled file at the next ids. Error formatting
     /// uses each error's `pos.file_id` to look up the right filename here.
@@ -258,13 +250,7 @@ impl Parser {
     /// from (resolved via `pos.file_id`) and its line/column.
     #[must_use]
     pub fn format_error(&self, err: &ParserError) -> String {
-        let Some(pos) = err.position() else {
-            return err.to_string();
-        };
-        match self.source_files.get(pos.file_id as usize) {
-            Some(path) => format!("{}:{}:{}: {}", path.display(), pos.line, pos.column, err),
-            None => err.to_string(),
-        }
+        crate::lexer::format_diagnostic(&self.source_files, err, err.position())
     }
 
     /// Advance past tokens until a safe recovery point.
@@ -295,18 +281,8 @@ impl Parser {
         }
     }
 
-    #[must_use]
-    pub fn symbol_table(&self) -> &SymbolTable {
-        &self.symbol_table
-    }
-
     pub fn symbol_table_mut(&mut self) -> &mut SymbolTable {
         &mut self.symbol_table
-    }
-
-    #[must_use]
-    pub fn take_string_literals(self) -> Vec<String> {
-        self.string_literals.into_iter().collect()
     }
 
     pub(crate) fn is_at_end(&self) -> bool {

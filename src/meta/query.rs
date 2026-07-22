@@ -7,8 +7,10 @@
 use std::collections::HashMap;
 
 use crate::lexer::{Position, TypeBase};
-use crate::parser::ast::{Attribute, ExprKind, Expression, FunctionBody, Statement, StatementKind};
+use crate::parser::ast::{Attribute, ExprKind, Expression, FunctionBody, Statement};
 use crate::parser::Program;
+
+use super::walk;
 
 /// Post-typecheck dictionaries over a program. Borrows the program for the
 /// lifetime of a rule run.
@@ -33,14 +35,14 @@ impl<'a> QueryIndex<'a> {
             idx.record_attrs(&func.proto.attrs);
             if let FunctionBody::Aspect(body) = &func.body {
                 for stmt in body {
-                    idx.walk_stmt(stmt);
+                    walk::walk_stmt(stmt, &mut idx);
                 }
             }
         }
         for global in &program.global_vars {
             idx.record_attrs(&global.attrs);
             if let Some(init) = &global.initializer {
-                idx.walk_expr(init);
+                walk::walk_expr(init, &mut idx);
             }
         }
         for s in program.symbols.structs() {
@@ -83,102 +85,29 @@ impl<'a> QueryIndex<'a> {
         }
     }
 
-    fn walk_stmt(&mut self, stmt: &Statement) {
+}
+
+impl walk::Visitor for QueryIndex<'_> {
+    fn visit_stmt(&mut self, stmt: &Statement) {
         self.record_attrs(&stmt.attrs);
-        match &stmt.kind {
-            StatementKind::Expression(e) => self.walk_expr(e),
-            StatementKind::Block(body) => body.iter().for_each(|s| self.walk_stmt(s)),
-            StatementKind::Return(Some(e)) => self.walk_expr(e),
-            StatementKind::Return(None) | StatementKind::Break | StatementKind::Continue => {}
-            StatementKind::If {
-                condition,
-                then_block,
-                else_block,
-            } => {
-                self.walk_expr(condition);
-                then_block.iter().for_each(|s| self.walk_stmt(s));
-                if let Some(eb) = else_block {
-                    eb.iter().for_each(|s| self.walk_stmt(s));
-                }
-            }
-            StatementKind::While { condition, body } => {
-                self.walk_expr(condition);
-                body.iter().for_each(|s| self.walk_stmt(s));
-            }
-            StatementKind::For {
-                init,
-                condition,
-                increment,
-                body,
-            } => {
-                if let Some(s) = init {
-                    self.walk_stmt(s);
-                }
-                if let Some(c) = condition {
-                    self.walk_expr(c);
-                }
-                if let Some(s) = increment {
-                    self.walk_stmt(s);
-                }
-                body.iter().for_each(|s| self.walk_stmt(s));
-            }
-            StatementKind::VarDecl { initializer, .. } => {
-                if let Some(e) = initializer {
-                    self.walk_expr(e);
-                }
-            }
-            StatementKind::VarAssign { value, .. } => self.walk_expr(value),
-            StatementKind::DerefAssign { target, value }
-            | StatementKind::FieldAssign { target, value } => {
-                self.walk_expr(target);
-                self.walk_expr(value);
-            }
-        }
     }
 
-    fn walk_expr(&mut self, expr: &Expression) {
+    fn visit_expr(&mut self, expr: &Expression) {
         match &expr.kind {
-            ExprKind::StructLiteral { struct_id, fields } => {
-                self.instantiations.entry(*struct_id).or_default().push(expr.pos);
-                for (_, value) in fields {
-                    self.walk_expr(value);
+            ExprKind::StructLiteral { struct_id, .. } => {
+                self.instantiations
+                    .entry(*struct_id)
+                    .or_default()
+                    .push(expr.pos);
+            }
+            ExprKind::Alloc { alloc_type, .. } => {
+                if alloc_type.pointer_depth == 0
+                    && let TypeBase::Struct(id) = alloc_type.base
+                {
+                    self.instantiations.entry(id).or_default().push(expr.pos);
                 }
             }
-            ExprKind::Alloc { alloc_type, count } => {
-                if alloc_type.pointer_depth == 0 {
-                    if let TypeBase::Struct(id) = alloc_type.base {
-                        self.instantiations.entry(id).or_default().push(expr.pos);
-                    }
-                }
-                self.walk_expr(count);
-            }
-            ExprKind::Binary { left, right, .. } | ExprKind::Comparison { left, right, .. } => {
-                self.walk_expr(left);
-                self.walk_expr(right);
-            }
-            ExprKind::Reference(inner)
-            | ExprKind::Dereference(inner)
-            | ExprKind::UnaryNot(inner)
-            | ExprKind::BitwiseNot(inner)
-            | ExprKind::Cast { expr: inner, .. }
-            | ExprKind::FieldAccess { base: inner, .. } => self.walk_expr(inner),
-            ExprKind::FunctionCall { args, .. } => args.iter().for_each(|a| self.walk_expr(a)),
-            ExprKind::IndirectCall { callee, args } => {
-                self.walk_expr(callee);
-                args.iter().for_each(|a| self.walk_expr(a));
-            }
-            ExprKind::MethodCall { base, args, .. } => {
-                self.walk_expr(base);
-                args.iter().for_each(|a| self.walk_expr(a));
-            }
-            ExprKind::ListInitializer(items) => items.iter().for_each(|e| self.walk_expr(e)),
-            ExprKind::ValueBlock(stmts) => stmts.iter().for_each(|s| self.walk_stmt(s)),
-            ExprKind::Literal(_)
-            | ExprKind::Variable(_)
-            | ExprKind::EnumValue { .. }
-            | ExprKind::FunctionRef(_)
-            | ExprKind::SizeOf(_)
-            | ExprKind::Null => {}
+            _ => {}
         }
     }
 }

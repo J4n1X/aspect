@@ -4,6 +4,15 @@ use crate::parser::{ExprKind, Expression, Statement, StatementKind};
 use crate::typechecker::errors::TypeCheckError;
 
 impl TypeChecker {
+    /// Type-check `stmts` in a fresh lexical scope (enter, check each, exit).
+    fn check_scoped(&mut self, stmts: &mut [Statement]) {
+        self.enter_scope();
+        for s in stmts.iter_mut() {
+            self.check_statement(s);
+        }
+        self.exit_scope();
+    }
+
     pub(crate) fn check_statement(&mut self, stmt: &mut Statement) {
         let stmt_pos = stmt.pos;
         match &mut stmt.kind {
@@ -13,9 +22,7 @@ impl TypeChecker {
                 initializer,
             } => {
                 let var_type = *var_type;
-                if var_type.is_void_value() {
-                    self.errors.push(TypeCheckError::InvalidVoidValue(stmt_pos));
-                }
+                self.reject_void_value(var_type, stmt_pos);
                 self.define_var(name.clone(), var_type);
                 if let Some(init_expr) = initializer {
                     self.check_initializer(init_expr, &var_type);
@@ -106,27 +113,15 @@ impl TypeChecker {
                 else_block,
             } => {
                 self.check_condition(condition);
-                self.enter_scope();
-                for s in then_block.iter_mut() {
-                    self.check_statement(s);
-                }
-                self.exit_scope();
+                self.check_scoped(then_block);
                 if let Some(else_stmts) = else_block {
-                    self.enter_scope();
-                    for s in else_stmts.iter_mut() {
-                        self.check_statement(s);
-                    }
-                    self.exit_scope();
+                    self.check_scoped(else_stmts);
                 }
             }
 
             StatementKind::While { condition, body } => {
                 self.check_condition(condition);
-                self.enter_scope();
-                for s in body.iter_mut() {
-                    self.check_statement(s);
-                }
-                self.exit_scope();
+                self.check_scoped(body);
             }
 
             StatementKind::For {
@@ -152,11 +147,7 @@ impl TypeChecker {
             }
 
             StatementKind::Block(stmts) => {
-                self.enter_scope();
-                for s in stmts.iter_mut() {
-                    self.check_statement(s);
-                }
-                self.exit_scope();
+                self.check_scoped(stmts);
             }
 
             StatementKind::Expression(expr) => {
@@ -188,11 +179,7 @@ impl TypeChecker {
         pos: crate::lexer::Position,
     ) -> LangType {
         self.value_block_types.push(target);
-        self.enter_scope();
-        for s in stmts.iter_mut() {
-            self.check_statement(s);
-        }
-        self.exit_scope();
+        self.check_scoped(stmts);
         let resolved = self.value_block_types.pop().flatten();
 
         if !Self::always_returns(stmts) {

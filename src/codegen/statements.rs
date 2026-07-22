@@ -1,10 +1,10 @@
 use inkwell::types::BasicTypeEnum;
-use inkwell::values::{BasicValueEnum, IntValue, PointerValue};
+use inkwell::values::{BasicValueEnum, FunctionValue, IntValue, PointerValue};
 use inkwell::IntPredicate;
 
 use crate::codegen::const_eval::const_eval;
 use crate::codegen::generator::CodeGenerator;
-use crate::codegen::value_emitter::{ConstantEmitter, ValueEmitter};
+use crate::codegen::value_emitter::ValueEmitter;
 use crate::codegen::{CodegenError, LangTypeExt, TypeLoweringError};
 use crate::parser::LangType;
 use crate::parser::{ExprKind, Expression, Statement, StatementKind};
@@ -89,6 +89,30 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// Allocate `name` of `llvm_type` at the top of `function`'s entry block
+    /// (before its first instruction), then restore the builder's insert
+    /// position. Entry-block allocas are what let mem2reg promote locals.
+    fn build_entry_alloca(
+        &self,
+        function: FunctionValue<'ctx>,
+        llvm_type: BasicTypeEnum<'ctx>,
+        name: &str,
+        pos: crate::lexer::Position,
+    ) -> Result<PointerValue<'ctx>, CodegenError> {
+        let entry_block = function
+            .get_first_basic_block()
+            .ok_or(CodegenError::UnexpectedStatement(pos))?;
+        let current_block = self.builder.get_insert_block().unwrap();
+        if let Some(first_instr) = entry_block.get_first_instruction() {
+            self.builder.position_before(&first_instr);
+        } else {
+            self.builder.position_at_end(entry_block);
+        }
+        let alloca = self.builder.build_alloca(llvm_type, name)?;
+        self.builder.position_at_end(current_block);
+        Ok(alloca)
+    }
+
     pub(crate) fn generate_var_decl(
         &mut self,
         pos: crate::lexer::Position,
@@ -109,19 +133,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let function = self
             .current_function
             .ok_or(CodegenError::UnexpectedStatement(pos))?;
-        let entry_block = function
-            .get_first_basic_block()
-            .ok_or(CodegenError::UnexpectedStatement(pos))?;
-        let current_block = self.builder.get_insert_block().unwrap();
-
-        // Position at the start of the entry block (before any instructions/terminators)
-        if let Some(first_instr) = entry_block.get_first_instruction() {
-            self.builder.position_before(&first_instr);
-        } else {
-            self.builder.position_at_end(entry_block);
-        }
-        let alloca = self.builder.build_alloca(llvm_type, name)?;
-        self.builder.position_at_end(current_block);
+        let alloca = self.build_entry_alloca(function, llvm_type, name, pos)?;
 
         if var_type.is_array() {
             self.add_variable(name.to_string(), alloca, llvm_type, *var_type, None);
@@ -145,10 +157,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             let coerced = if folded.get_type() == target_llvm {
                 folded
             } else {
-                ConstantEmitter {
-                    context: self.context,
-                }
-                .emit_cast(
+                self.constant_emitter().emit_cast(
                     folded,
                     target_llvm,
                     &init_expr.expr_type,
@@ -313,17 +322,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Result slot in the entry block (mem2reg-friendly), mirroring
         // `generate_var_decl`'s alloca placement.
-        let entry_block = function
-            .get_first_basic_block()
-            .ok_or(CodegenError::UnexpectedStatement(pos))?;
-        let current_block = self.builder.get_insert_block().unwrap();
-        if let Some(first_instr) = entry_block.get_first_instruction() {
-            self.builder.position_before(&first_instr);
-        } else {
-            self.builder.position_at_end(entry_block);
-        }
-        let slot = self.builder.build_alloca(llvm_type, "vblock.slot")?;
-        self.builder.position_at_end(current_block);
+        let slot = self.build_entry_alloca(function, llvm_type, "vblock.slot", pos)?;
 
         let exit_bb = self.context.append_basic_block(function, "vblock.exit");
 

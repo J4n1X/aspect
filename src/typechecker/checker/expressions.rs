@@ -8,6 +8,14 @@ use crate::typechecker::types::{
 };
 
 impl TypeChecker {
+    /// Synthesise every argument for error recovery, discarding the results —
+    /// used after an arity/lookup failure so each argument's own errors surface.
+    fn synth_all(&mut self, args: &mut [Expression]) {
+        for arg in args.iter_mut() {
+            self.synth_expression(arg);
+        }
+    }
+
     /// Synthesise the type of `expr` with no contextual expectation (callee
     /// resolution, indices, conditions, cast/dereference operands).
     pub(crate) fn synth_expression(&mut self, expr: &mut Expression) -> LangType {
@@ -156,9 +164,7 @@ impl TypeChecker {
             }
 
             ExprKind::Alloc { alloc_type, count } => {
-                if alloc_type.is_void_value() {
-                    self.errors.push(TypeCheckError::InvalidVoidValue(pos));
-                }
+                self.reject_void_value(*alloc_type, pos);
                 let count_pos = count.pos;
                 let count_type = self.synth_expression(count);
                 if !matches!(count_type.base, TypeBase::SInt | TypeBase::UInt)
@@ -304,18 +310,14 @@ impl TypeChecker {
                             found: args.len(),
                             position: pos,
                         });
-                        for arg in args.iter_mut() {
-                            self.synth_expression(arg);
-                        }
+                        self.synth_all(args);
                     } else {
                         for (pty, arg) in params.iter().zip(args.iter_mut()) {
                             self.check_expression(arg, pty);
                         }
                     }
                 } else {
-                    for arg in args.iter_mut() {
-                        self.synth_expression(arg);
-                    }
+                    self.synth_all(args);
                 }
                 default_type
             }
@@ -459,9 +461,7 @@ impl TypeChecker {
                     position: pos,
                 });
                 // Still synthesise the arguments so their own errors surface.
-                for arg in args.iter_mut() {
-                    self.synth_expression(arg);
-                }
+                self.synth_all(args);
             } else {
                 for ((param_ty, _), arg_expr) in sig.params.iter().zip(args.iter_mut()) {
                     self.check_expression(arg_expr, param_ty);
@@ -470,9 +470,7 @@ impl TypeChecker {
         } else {
             self.errors
                 .push(TypeCheckError::UndefinedFunction(name.to_string(), pos));
-            for arg in args.iter_mut() {
-                self.synth_expression(arg);
-            }
+            self.synth_all(args);
         }
     }
 

@@ -187,14 +187,19 @@ impl Preprocessor {
         self.include_dirs.push(dir.into());
     }
 
-    #[must_use]
-    pub fn include_dirs(&self) -> &[PathBuf] {
-        &self.include_dirs
+    /// The file context currently being processed. A context is always active
+    /// while tokens flow, so absence is an internal invariant break — never a
+    /// user error — hence the `expect`.
+    fn current_ctx(&self) -> &FileContext {
+        self.file_stack
+            .last()
+            .expect("a file context is always active while tokens are processed")
     }
 
-    #[must_use]
-    pub fn defines(&self) -> &DefineTable {
-        &self.defines
+    fn current_ctx_mut(&mut self) -> &mut FileContext {
+        self.file_stack
+            .last_mut()
+            .expect("a file context is always active while tokens are processed")
     }
 
     /// # Errors
@@ -266,19 +271,7 @@ impl Preprocessor {
             return Ok(());
         }
         let pos = Position::with_file(1, 1, 0);
-        let files = modules::resolve_module_files(&self.include_dirs, META_MODULE, pos)?;
-        for file in files {
-            let file_id = self.process_file(&file)?;
-            let declared = self.file_modules[file_id as usize].clone();
-            if declared.as_deref() != Some(META_MODULE) {
-                return Err(PreprocessError::ModuleDeclarationMismatch {
-                    module: META_MODULE.to_string(),
-                    file: self.files[file_id as usize].clone(),
-                    declared,
-                    pos,
-                });
-            }
-        }
+        modules::load_and_verify_module(self, META_MODULE, pos)?;
         // Visible to every module (including the anonymous root `""`) so a meta
         // function anywhere can name std/meta's types.
         let modules: Vec<String> = self
@@ -352,13 +345,7 @@ impl Preprocessor {
     /// against the file registry) — the shape the parser and checker produce.
     #[must_use]
     pub fn format_error(&self, err: &PreprocessError) -> String {
-        let Some(pos) = err.position() else {
-            return err.to_string();
-        };
-        match self.files.get(pos.file_id as usize) {
-            Some(path) => format!("{}:{}:{}: {}", path.display(), pos.line, pos.column, err),
-            None => err.to_string(),
-        }
+        crate::lexer::format_diagnostic(&self.files, err, err.position())
     }
 
     /// The entry point AND the recursive descent step for `$import`. An
@@ -599,11 +586,7 @@ impl Preprocessor {
                 pos: extra.pos,
             });
         }
-        let this_file = self
-            .file_stack
-            .last()
-            .expect("a file context is always active while tokens are processed")
-            .file_id;
+        let this_file = self.current_ctx().file_id;
         self.defines.undefine(name, this_file, &self.file_modules);
         Ok(())
     }

@@ -33,10 +33,7 @@ pub(crate) fn handle_module(
     pos: Position,
 ) -> Result<(), PreprocessError> {
     let module = parse_module_path("module", rest, pos)?;
-    let ctx = pp
-        .file_stack
-        .last_mut()
-        .expect("a file context is always active while tokens are processed");
+    let ctx = pp.current_ctx_mut();
     if let Some(previous) = ctx.module_pos {
         return Err(PreprocessError::DuplicateModuleDirective { pos, previous });
     }
@@ -62,10 +59,7 @@ pub(crate) fn handle_import(
     // The direct edge belongs to the *importing file*; it accrues to that
     // file's module when the file finishes processing (the file's own
     // `$module` may legally appear after this import).
-    let ctx = pp
-        .file_stack
-        .last_mut()
-        .expect("a file context is always active while tokens are processed");
+    let ctx = pp.current_ctx_mut();
     if !ctx.imports.contains(&module) {
         ctx.imports.push(module.clone());
     }
@@ -77,20 +71,7 @@ pub(crate) fn handle_import(
         return Ok(());
     }
 
-    let files = resolve_module_files(&pp.include_dirs, &module, pos)?;
-    for file in files {
-        let file_id = pp.process_file(&file)?;
-        let declared = pp.file_modules[file_id as usize].clone();
-        if declared.as_deref() != Some(module.as_str()) {
-            return Err(PreprocessError::ModuleDeclarationMismatch {
-                module,
-                file: pp.files[file_id as usize].clone(),
-                declared,
-                pos,
-            });
-        }
-    }
-    Ok(())
+    load_and_verify_module(pp, &module, pos)
 }
 
 /// Returns the canonical `a/b/c` string form.
@@ -150,6 +131,30 @@ pub(crate) fn parse_module_path(
 
 /// The returned list is non-empty and deterministic (directory-form files
 /// are sorted by name).
+/// Resolve `module` against the `-I` roots, process every file it maps to, and
+/// verify each file's `$module` declaration matches `module`. Shared by the
+/// `$import` handler and the std/meta injection.
+pub(crate) fn load_and_verify_module(
+    pp: &mut Preprocessor,
+    module: &str,
+    pos: Position,
+) -> Result<(), PreprocessError> {
+    let files = resolve_module_files(&pp.include_dirs, module, pos)?;
+    for file in files {
+        let file_id = pp.process_file(&file)?;
+        let declared = pp.file_modules[file_id as usize].clone();
+        if declared.as_deref() != Some(module) {
+            return Err(PreprocessError::ModuleDeclarationMismatch {
+                module: module.to_string(),
+                file: pp.files[file_id as usize].clone(),
+                declared,
+                pos,
+            });
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn resolve_module_files(
     roots: &[PathBuf],
     module: &str,

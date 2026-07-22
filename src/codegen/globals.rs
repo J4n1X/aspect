@@ -57,7 +57,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Cast the constant to the declared global type if widths differ
                 // (e.g. integer literal emitted as i32 into a u8/i16/i64 global).
                 const_eval(init_expr, self)
-                    .map(|v| coerce_constant_to_type(v, global_type, self.context))
+                    .map(|v| coerce_constant_to_type(v, global_type))
             };
             self.in_global_init = prev_in_global_init;
             global_var.set_initializer(&folded?);
@@ -140,7 +140,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let vals: Vec<IntValue> = const_vals
                     .iter()
                     .map(|v| {
-                        coerce_constant_to_type(*v, elem_llvm_type, self.context).into_int_value()
+                        coerce_constant_to_type(*v, elem_llvm_type).into_int_value()
                     })
                     .collect();
                 Ok(int_ty.const_array(&vals).into())
@@ -176,7 +176,6 @@ impl<'ctx> CodeGenerator<'ctx> {
 fn coerce_constant_to_type<'ctx>(
     val: BasicValueEnum<'ctx>,
     target: BasicTypeEnum<'ctx>,
-    _ctx: &'ctx inkwell::context::Context,
 ) -> BasicValueEnum<'ctx> {
     if val.get_type() == target {
         return val;

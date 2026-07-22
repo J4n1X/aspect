@@ -13,7 +13,7 @@ use crate::codegen::CodegenError;
 use crate::codegen::expressions::emit_binary_dispatch;
 use crate::codegen::generator::CodeGenerator;
 use crate::codegen::types::LangTypeExt;
-use crate::codegen::value_emitter::{ConstantEmitter, ValueEmitter};
+use crate::codegen::value_emitter::ValueEmitter;
 use crate::lexer::{LangType, TypeBase};
 use crate::parser::{ExprKind, Expression, LiteralValue};
 
@@ -26,16 +26,14 @@ pub(crate) fn const_eval<'ctx>(
 ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
     match &expr.kind {
         ExprKind::Literal(lit) => match lit {
-            LiteralValue::Integer(val) => ConstantEmitter {
-                context: cg.context,
-            }
-            .emit_int_literal(*val, &expr.expr_type)
-            .map_err(|e| e.with_pos(expr.pos)),
-            LiteralValue::Float(val) => ConstantEmitter {
-                context: cg.context,
-            }
-            .emit_float_literal(*val, &expr.expr_type)
-            .map_err(|e| e.with_pos(expr.pos)),
+            LiteralValue::Integer(val) => cg
+                .constant_emitter()
+                .emit_int_literal(*val, &expr.expr_type)
+                .map_err(|e| e.with_pos(expr.pos)),
+            LiteralValue::Float(val) => cg
+                .constant_emitter()
+                .emit_float_literal(*val, &expr.expr_type)
+                .map_err(|e| e.with_pos(expr.pos)),
             // A string literal is a global pointer; cast it to `u8*` as a
             // link-time constant (no builder instruction).
             LiteralValue::String(index) => {
@@ -105,9 +103,7 @@ pub(crate) fn const_eval<'ctx>(
             }
 
             emit_binary_dispatch(
-                &ConstantEmitter {
-                    context: cg.context,
-                },
+                &cg.constant_emitter(),
                 left_val,
                 right_val,
                 op,
@@ -160,10 +156,8 @@ pub(crate) fn const_eval<'ctx>(
             let target_llvm = target_type
                 .to_llvm(cg.context)
                 .map_err(|e| e.with_pos(expr.pos))?;
-            ConstantEmitter {
-                context: cg.context,
-            }
-            .emit_cast(val, target_llvm, &inner.expr_type, target_type, inner.pos)
+            cg.constant_emitter()
+                .emit_cast(val, target_llvm, &inner.expr_type, target_type, inner.pos)
         }
 
         ExprKind::Alloc { alloc_type, count } => cg.generate_alloc(alloc_type, count),
@@ -304,10 +298,9 @@ fn const_coerced_value<'ctx>(
             .to_llvm(cg.context)
             .map_err(|e| e.with_pos(expr.pos))?;
         if val.get_type() != target_llvm {
-            return ConstantEmitter {
-                context: cg.context,
-            }
-            .emit_cast(val, target_llvm, &expr.expr_type, target_ty, expr.pos);
+            return cg
+                .constant_emitter()
+                .emit_cast(val, target_llvm, &expr.expr_type, target_ty, expr.pos);
         }
     }
 

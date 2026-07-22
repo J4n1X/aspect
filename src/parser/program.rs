@@ -368,19 +368,18 @@ impl Parser {
         })
     }
 
-    /// Reserves an id for every `type <Name>` before the main parse, so named
-    /// types resolve regardless of order (self/mutual reference included).
-    /// Records each name's declaring file and module visibility (a directly
-    /// preceding `public`) — both must be known at intern time, since import
-    /// cycles can place a module's *uses* of a struct before its definition in
-    /// the inlined token stream. Does not consume tokens.
-    fn prescan_type_names(&mut self) {
-        let names: Vec<(String, u32, Visibility)> = self
-            .tokens
+    /// Collect the `(name, file_id, visibility)` of every `<kw> <Name>`
+    /// declaration, honoring a directly-preceding `public`. Shared spine of
+    /// [`Self::prescan_type_names`] and [`Self::prescan_enum_names`]; both must
+    /// know visibility at intern time, since import cycles can place a module's
+    /// *uses* of a name before its definition in the inlined token stream. Does
+    /// not consume tokens.
+    fn prescan_named(&self, kw: Keyword) -> Vec<(String, u32, Visibility)> {
+        self.tokens
             .windows(2)
             .enumerate()
             .filter_map(|(i, w)| match (&w[0].kind, &w[1].kind) {
-                (TokenKind::Keyword(Keyword::Type), TokenKind::Identifier(name)) => {
+                (TokenKind::Keyword(k), TokenKind::Identifier(name)) if *k == kw => {
                     let vis = if i > 0
                         && matches!(
                             self.tokens[i - 1].kind,
@@ -394,37 +393,21 @@ impl Parser {
                 }
                 _ => None,
             })
-            .collect();
-        for (name, file_id, vis) in names {
+            .collect()
+    }
+
+    /// Reserves an id for every `type <Name>` before the main parse, so named
+    /// types resolve regardless of order (self/mutual reference included).
+    fn prescan_type_names(&mut self) {
+        for (name, file_id, vis) in self.prescan_named(Keyword::Type) {
             self.module.intern_struct(&name, file_id, vis);
         }
     }
 
     /// The enum twin of [`Self::prescan_type_names`]: reserves an id for every
-    /// `enum <Name>`, recording its declaring file and visibility at intern
-    /// time so forward references and import cycles resolve.
+    /// `enum <Name>`, so forward references and import cycles resolve.
     fn prescan_enum_names(&mut self) {
-        let names: Vec<(String, u32, Visibility)> = self
-            .tokens
-            .windows(2)
-            .enumerate()
-            .filter_map(|(i, w)| match (&w[0].kind, &w[1].kind) {
-                (TokenKind::Keyword(Keyword::Enum), TokenKind::Identifier(name)) => {
-                    let vis = if i > 0
-                        && matches!(
-                            self.tokens[i - 1].kind,
-                            TokenKind::Keyword(Keyword::Public)
-                        ) {
-                        Visibility::Public
-                    } else {
-                        Visibility::Private
-                    };
-                    Some((name.clone(), w[0].pos.file_id, vis))
-                }
-                _ => None,
-            })
-            .collect();
-        for (name, file_id, vis) in names {
+        for (name, file_id, vis) in self.prescan_named(Keyword::Enum) {
             self.module.intern_enum(&name, file_id, vis);
         }
     }

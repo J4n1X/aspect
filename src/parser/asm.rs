@@ -19,8 +19,6 @@ impl Parser {
         attrs: Vec<crate::parser::Attribute>,
     ) -> Result<crate::parser::Function, ParserError> {
         use crate::parser::{AsmReg, AsmSpec, Function, FunctionProto};
-        use crate::symbol::table::FunctionSymbol;
-
         kw!(Fn);
         let name = ident!();
         token!(OpenParen);
@@ -85,17 +83,7 @@ impl Parser {
             return Err(ParserError::AsmEmptyBody(name.clone(), body_pos));
         }
 
-        self.module
-            .add_function(FunctionSymbol {
-                name: name.clone(),
-                params: params.clone(),
-                return_type,
-                is_extern: false,
-                has_body: true,
-                vis,
-                pos,
-            })
-            .map_err(|e| ParserError::from_symbol(e, pos))?;
+        self.register_fn_symbol(&name, &params, return_type, false, vis, pos)?;
 
         Ok(Function {
             proto: FunctionProto {
@@ -132,8 +120,6 @@ impl Parser {
         attrs: Vec<crate::parser::Attribute>,
     ) -> Result<crate::parser::Function, ParserError> {
         use crate::parser::{Function, FunctionProto, NakedSpec};
-        use crate::symbol::table::FunctionSymbol;
-
         kw!(Fn);
         let name = ident!();
         token!(OpenParen);
@@ -160,17 +146,7 @@ impl Parser {
             return Err(ParserError::AsmEmptyBody(name.clone(), body_pos));
         }
 
-        self.module
-            .add_function(FunctionSymbol {
-                name: name.clone(),
-                params: params.clone(),
-                return_type,
-                is_extern: false,
-                has_body: true,
-                vis,
-                pos,
-            })
-            .map_err(|e| ParserError::from_symbol(e, pos))?;
+        self.register_fn_symbol(&name, &params, return_type, false, vis, pos)?;
 
         Ok(Function {
             proto: FunctionProto {

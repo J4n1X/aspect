@@ -223,11 +223,6 @@ impl ModuleSymbols {
         &self.structs_by_id[id as usize]
     }
 
-    #[must_use]
-    pub fn struct_info_mut(&mut self, id: u32) -> &mut StructInfo {
-        &mut self.structs_by_id[id as usize]
-    }
-
     /// All registered structs, in id order.
     pub fn structs(&self) -> impl Iterator<Item = &StructInfo> {
         self.structs_by_id.iter()

@@ -64,27 +64,12 @@ impl TypeChecker {
         self
     }
 
-    /// Set a single-entry source-file registry. Convenience for the simple
-    /// single-file case; multi-file consumers should let `check_program`
-    /// pull the registry from `Program::source_files` directly.
-    #[must_use]
-    pub fn with_source_file(mut self, path: impl Into<String>) -> Self {
-        self.source_files = vec![std::path::PathBuf::from(path.into())];
-        self
-    }
-
     /// Format a single error with the originating source file prepended.
     /// Looks up the file via the error's `pos.file_id` so errors inside an
     /// imported file are attributed to that file, not the entry one.
     #[must_use]
     pub fn format_error(&self, err: &TypeCheckError) -> String {
-        let Some(pos) = err.position() else {
-            return format!("{err}");
-        };
-        match self.source_files.get(pos.file_id as usize) {
-            Some(path) => format!("{}:{}:{}: {}", path.display(), pos.line, pos.column, err),
-            None => format!("{err}"),
-        }
+        crate::lexer::format_diagnostic(&self.source_files, err, err.position())
     }
 
     /// Warnings accumulated during the last `check_program`. Read after a
@@ -118,8 +103,8 @@ impl TypeChecker {
     /// Returns `Err(Vec<TypeCheckError>)` listing every type error found.
     pub fn check_program(&mut self, program: &mut Program) -> Result<(), Vec<TypeCheckError>> {
         self.symbols = std::mem::take(&mut program.symbols);
-        // Inherit the parser's file registry unless the caller pre-set one via
-        // `with_source_file`.
+        // Adopt the file registry that rides on `Program` (unless one was
+        // already set), so diagnostics resolve `pos.file_id` to a filename.
         if self.source_files.is_empty() {
             self.source_files = program.source_files.clone();
         }
@@ -165,12 +150,17 @@ impl TypeChecker {
 
     // ── Global variable checking ─────────────────────────────────────────────
 
+    /// Push an `InvalidVoidValue` error if `ty` is a bare `void` value; a
+    /// `void` pointer (`u0*`) is fine. Shared by the decl/param/alloc checks.
+    fn reject_void_value(&mut self, ty: LangType, pos: crate::lexer::Position) {
+        if ty.is_void_value() {
+            self.errors.push(TypeCheckError::InvalidVoidValue(pos));
+        }
+    }
+
     fn check_global_var(&mut self, global: &mut GlobalVar) {
         let var_type = global.var_type;
-        if var_type.is_void_value() {
-            self.errors
-                .push(TypeCheckError::InvalidVoidValue(global.pos));
-        }
+        self.reject_void_value(var_type, global.pos);
         if let Some(init_expr) = &mut global.initializer {
             self.check_initializer(init_expr, &var_type);
         }
@@ -204,10 +194,7 @@ impl TypeChecker {
     /// extern declarations too (they never reach `check_function`).
     fn check_proto(&mut self, proto: &crate::parser::FunctionProto) {
         for (param_type, _) in &proto.params {
-            if param_type.is_void_value() {
-                self.errors
-                    .push(TypeCheckError::InvalidVoidValue(proto.pos));
-            }
+            self.reject_void_value(*param_type, proto.pos);
         }
     }
 

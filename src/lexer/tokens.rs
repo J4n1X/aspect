@@ -30,71 +30,58 @@ pub enum Keyword {
     False,
 }
 
-impl fmt::Display for Keyword {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let s = match self {
-            Keyword::Fn => "fn",
-            Keyword::Extern => "extern",
-            Keyword::Asm => "asm",
-            Keyword::Naked => "naked",
-            Keyword::Const => "const",
-            Keyword::Type => "type",
-            Keyword::Enum => "enum",
-            Keyword::Struct => "struct",
-            Keyword::Alias => "alias",
-            Keyword::Public => "public",
-            Keyword::Export => "export",
-            Keyword::Sizeof => "sizeof",
-            Keyword::Null => "null",
-            Keyword::While => "while",
-            Keyword::If => "if",
-            Keyword::Else => "else",
-            Keyword::Elif => "elif",
-            Keyword::For => "for",
-            Keyword::Switch => "switch",
-            Keyword::Break => "break",
-            Keyword::Continue => "continue",
-            Keyword::As => "as",
-            Keyword::Return => "return",
-            Keyword::True => "true",
-            Keyword::False => "false",
-        };
-        write!(f, "{s}")
-    }
+/// Generates the two directions of the `Keyword` ↔ spelling map from one list,
+/// so a keyword add/rename touches a single place. Expands to the same `Display`
+/// and `keyword_from_str` match expressions that were previously hand-written.
+macro_rules! keyword_table {
+    ($($variant:ident => $spelling:literal),+ $(,)?) => {
+        impl fmt::Display for Keyword {
+            fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                let s = match self {
+                    $(Keyword::$variant => $spelling,)+
+                };
+                write!(f, "{s}")
+            }
+        }
+
+        impl Keyword {
+            #[must_use]
+            pub fn keyword_from_str(s: &str) -> Option<Self> {
+                match s {
+                    $($spelling => Some(Keyword::$variant),)+
+                    _ => None,
+                }
+            }
+        }
+    };
 }
 
-impl Keyword {
-    #[must_use]
-    pub fn keyword_from_str(s: &str) -> Option<Self> {
-        match s {
-            "fn" => Some(Keyword::Fn),
-            "extern" => Some(Keyword::Extern),
-            "asm" => Some(Keyword::Asm),
-            "naked" => Some(Keyword::Naked),
-            "const" => Some(Keyword::Const),
-            "type" => Some(Keyword::Type),
-            "enum" => Some(Keyword::Enum),
-            "struct" => Some(Keyword::Struct),
-            "alias" => Some(Keyword::Alias),
-            "public" => Some(Keyword::Public),
-            "export" => Some(Keyword::Export),
-            "sizeof" => Some(Keyword::Sizeof),
-            "null" => Some(Keyword::Null),
-            "while" => Some(Keyword::While),
-            "if" => Some(Keyword::If),
-            "else" => Some(Keyword::Else),
-            "elif" => Some(Keyword::Elif),
-            "for" => Some(Keyword::For),
-            "switch" => Some(Keyword::Switch),
-            "break" => Some(Keyword::Break),
-            "continue" => Some(Keyword::Continue),
-            "as" => Some(Keyword::As),
-            "return" => Some(Keyword::Return),
-            "true" => Some(Keyword::True),
-            "false" => Some(Keyword::False),
-            _ => None,
-        }
-    }
+keyword_table! {
+    Fn => "fn",
+    Extern => "extern",
+    Asm => "asm",
+    Naked => "naked",
+    Const => "const",
+    Type => "type",
+    Enum => "enum",
+    Struct => "struct",
+    Alias => "alias",
+    Public => "public",
+    Export => "export",
+    Sizeof => "sizeof",
+    Null => "null",
+    While => "while",
+    If => "if",
+    Else => "else",
+    Elif => "elif",
+    For => "for",
+    Switch => "switch",
+    Break => "break",
+    Continue => "continue",
+    As => "as",
+    Return => "return",
+    True => "true",
+    False => "false",
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -388,28 +375,20 @@ impl fmt::Display for LangType {
             };
         }
 
-        // Structs/enums/fn-pointers print by interned id: `Display` cannot
-        // reach the registry, so registry-aware diagnostics render real names.
-        if let TypeBase::Struct(id) = self.base {
+        // Structs/enums/fn-pointers print by interned id under a keyword prefix:
+        // `Display` cannot reach the registry, so registry-aware diagnostics
+        // render real names. `fn(...) -> R` is itself a pointer, so a trailing
+        // `*` after `fn#id` means pointer-to-fn-ptr.
+        let nominal = match self.base {
+            TypeBase::Struct(id) => Some(("struct", id)),
+            TypeBase::FnPtr(id) => Some(("fn", id)),
+            TypeBase::Enum(id) => Some(("enum", id)),
+            _ => None,
+        };
+        if let Some((kind, id)) = nominal {
             return match self.array_size {
-                Some(size) => write!(f, "{const_str}struct#{id}[{size}]{asterisks}"),
-                None => write!(f, "{const_str}struct#{id}{asterisks}"),
-            };
-        }
-
-        // `fn(...) -> R` is itself a pointer, so a trailing `*` here means
-        // pointer-to-fn-ptr.
-        if let TypeBase::FnPtr(id) = self.base {
-            return match self.array_size {
-                Some(size) => write!(f, "{const_str}fn#{id}[{size}]{asterisks}"),
-                None => write!(f, "{const_str}fn#{id}{asterisks}"),
-            };
-        }
-
-        if let TypeBase::Enum(id) = self.base {
-            return match self.array_size {
-                Some(size) => write!(f, "{const_str}enum#{id}[{size}]{asterisks}"),
-                None => write!(f, "{const_str}enum#{id}{asterisks}"),
+                Some(size) => write!(f, "{const_str}{kind}#{id}[{size}]{asterisks}"),
+                None => write!(f, "{const_str}{kind}#{id}{asterisks}"),
             };
         }
 

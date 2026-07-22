@@ -58,6 +58,23 @@ struct Frame {
     else_pos: Option<Position>,
 }
 
+/// Reject an `$elseif*`/`$else` that follows a chain's `$else` (which closes
+/// the chain to further branches). Shared by the three continuation handlers.
+fn check_no_else(
+    frame: &Frame,
+    directive: &'static str,
+    pos: Position,
+) -> Result<(), PreprocessError> {
+    if let Some(else_pos) = frame.else_pos {
+        return Err(PreprocessError::ConditionalAfterElse {
+            directive,
+            else_pos,
+            pos,
+        });
+    }
+    Ok(())
+}
+
 /// The stack of open conditional chains, owned by the driver. Every routed
 /// directive mutates the top frame; `active` gates the rest of the walk.
 #[derive(Debug, Default)]
@@ -158,13 +175,7 @@ impl ConditionalStack {
         defines: &ScopedDefines,
     ) -> Result<(), PreprocessError> {
         let frame = self.top("elseif", pos)?;
-        if let Some(else_pos) = frame.else_pos {
-            return Err(PreprocessError::ConditionalAfterElse {
-                directive: "elseif",
-                else_pos,
-                pos,
-            });
-        }
+        check_no_else(frame, "elseif", pos)?;
         if frame.parent_active && frame.state == Branch::Pending {
             if eval_if_expr(rest, defines, pos)? != 0 {
                 frame.state = Branch::Live;
@@ -185,13 +196,7 @@ impl ConditionalStack {
         defines: &ScopedDefines,
     ) -> Result<(), PreprocessError> {
         let frame = self.top("elseifdef", pos)?;
-        if let Some(else_pos) = frame.else_pos {
-            return Err(PreprocessError::ConditionalAfterElse {
-                directive: "elseifdef",
-                else_pos,
-                pos,
-            });
-        }
+        check_no_else(frame, "elseifdef", pos)?;
         let name = single_name("elseifdef", rest, pos)?;
         if frame.parent_active && frame.state == Branch::Pending {
             if defines.is_defined(&name) {
@@ -206,13 +211,7 @@ impl ConditionalStack {
     /// `$else` — activates iff no branch was taken; at most one per chain.
     fn chain_else(&mut self, rest: &[Token], pos: Position) -> Result<(), PreprocessError> {
         let frame = self.top("else", pos)?;
-        if let Some(else_pos) = frame.else_pos {
-            return Err(PreprocessError::ConditionalAfterElse {
-                directive: "else",
-                else_pos,
-                pos,
-            });
-        }
+        check_no_else(frame, "else", pos)?;
         if let Some(extra) = rest.first() {
             return Err(PreprocessError::TrailingTokens {
                 directive: "else",

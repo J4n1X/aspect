@@ -11,7 +11,7 @@ use crate::codegen::generator::CodeGenerator;
 use crate::codegen::types::{
     LangTypeExt, float_cmp_pred, int_cmp_pred, widen_floats_to_match, widen_ints_to_match,
 };
-use crate::codegen::value_emitter::{RuntimeEmitter, ValueEmitter};
+use crate::codegen::value_emitter::ValueEmitter;
 use crate::lexer::{LangType, Position, TypeBase};
 use crate::parser::{BinaryOp, ExprKind, Expression, LiteralValue};
 
@@ -109,18 +109,14 @@ pub(crate) fn walk_expression<'ctx>(
 ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
     match &expr.kind {
         ExprKind::Literal(lit) => match lit {
-            LiteralValue::Integer(val) => RuntimeEmitter {
-                builder: &cg.builder,
-                context: cg.context,
-            }
-            .emit_int_literal(*val, &expr.expr_type)
-            .map_err(|e| e.with_pos(expr.pos)),
-            LiteralValue::Float(val) => RuntimeEmitter {
-                builder: &cg.builder,
-                context: cg.context,
-            }
-            .emit_float_literal(*val, &expr.expr_type)
-            .map_err(|e| e.with_pos(expr.pos)),
+            LiteralValue::Integer(val) => cg
+                .runtime_emitter()
+                .emit_int_literal(*val, &expr.expr_type)
+                .map_err(|e| e.with_pos(expr.pos)),
+            LiteralValue::Float(val) => cg
+                .runtime_emitter()
+                .emit_float_literal(*val, &expr.expr_type)
+                .map_err(|e| e.with_pos(expr.pos)),
             LiteralValue::String(index) => cg.emit_string_ptr(*index),
             // Boolean literal: an i1 value (zero-extended to i8 when stored).
             LiteralValue::Bool(b) => Ok(cg
@@ -192,10 +188,7 @@ pub(crate) fn walk_expression<'ctx>(
             }
 
             emit_binary_dispatch(
-                &RuntimeEmitter {
-                    builder: &cg.builder,
-                    context: cg.context,
-                },
+                &cg.runtime_emitter(),
                 left_val,
                 right_val,
                 op,
@@ -304,11 +297,8 @@ pub(crate) fn walk_expression<'ctx>(
             let target_llvm = target_type
                 .to_llvm(cg.context)
                 .map_err(|e| e.with_pos(expr.pos))?;
-            RuntimeEmitter {
-                builder: &cg.builder,
-                context: cg.context,
-            }
-            .emit_cast(val, target_llvm, &inner.expr_type, target_type, inner.pos)
+            cg.runtime_emitter()
+                .emit_cast(val, target_llvm, &inner.expr_type, target_type, inner.pos)
         }
 
         ExprKind::Alloc { alloc_type, count } => cg.generate_alloc(alloc_type, count),
@@ -493,11 +483,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .to_llvm(self.context)
                 .map_err(|e| e.with_pos(expr.pos))?;
             if val.get_type() != target_llvm {
-                return RuntimeEmitter {
-                    builder: &self.builder,
-                    context: self.context,
-                }
-                .emit_cast(val, target_llvm, &expr.expr_type, target_ty, expr.pos);
+                return self
+                    .runtime_emitter()
+                    .emit_cast(val, target_llvm, &expr.expr_type, target_ty, expr.pos);
             }
         }
 
