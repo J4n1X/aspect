@@ -59,7 +59,13 @@ jobs:
 
       - run: cargo build --release
 
+      # Gates the job: a test failure fails the workflow even though the
+      # artifact upload below still runs (if: always()).
+      - name: Run tests
+        run: cargo test --release
+
       - uses: actions/upload-artifact@v7
+        if: always()
         with:
           name: binary-${{ matrix.os }}
           path: ${{ matrix.artifact }}

@@ -1,0 +1,26 @@
+# expected: 42
+#-
+  Regression: a function named only inside an `asm fn` body (here `make_42`,
+  reached solely through `call make_42`) has no IR-level reference, so
+  `globaldce` used to strip it — a JIT crash / link-time undefined symbol.
+  It must now survive via the module's `@llvm.used` array and still return 42.
+-#
+
+$ifdef ARCH_X86_64
+asm fn make_42() -> i64: rax
+{
+    "mov rax, 42"
+}
+
+asm fn via_asm_call() -> i64: rax
+{
+    "call make_42"
+}
+$else
+fn make_42() -> i64 { return 42 }
+fn via_asm_call() -> i64 { return make_42() }
+$endif
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return via_asm_call() as i32
+}

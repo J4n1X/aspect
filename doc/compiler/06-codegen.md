@@ -272,6 +272,17 @@ case) stays an ordinary untied `{rax}`; the numeric-tie form (`0`) exists to
 constrain the register *allocator*, and nothing is left to allocate once both
 ends are pinned by name.
 
+**Retaining asm-named callees.** A function reached only through asm text
+(`"call helper"`) has no IR-level reference, so `globaldce` would strip it —
+a JIT crash or a link-time undefined symbol. After emitting the body,
+`generate_asm_function` scans the lines for whitespace-split words resolving to
+in-module functions and collects them; `generate` then emits one `@llvm.used`
+array over the set (`emit_asm_retained`). `@llvm.used`, not
+`@llvm.compiler.used`: the linker's view of the reference is also only the asm
+text, so the retain must outlast it too. This keeps the callee *internal* —
+unlike marking it `public`, the historical workaround. The word scan
+over-approximates, which is safe: a false hit merely retains a reachable symbol.
+
 ## `naked fn` Lowering (`asm.rs`)
 
 A `naked fn` also becomes a real LLVM function, but the opposite of an `asm fn`

@@ -80,6 +80,10 @@ pub struct CodeGenerator<'ctx> {
     /// contracts, so every function is tagged `"no-builtins"` to keep the
     /// optimizer's name-based allocation reasoning away from it. Off by default.
     pub(crate) disable_builtins: bool,
+
+    /// Callees named only inside `asm fn` bodies — no IR reference exists, so
+    /// `globaldce` would strip them. Pinned in `@llvm.used` by `emit_asm_retained`.
+    pub(crate) asm_retained: Vec<FunctionValue<'ctx>>,
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -185,6 +189,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             value_block_stack: Vec::new(),
             in_global_init: false,
             disable_builtins: false,
+            asm_retained: Vec::new(),
         })
     }
 
@@ -258,8 +263,34 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
+        self.emit_asm_retained();
         self.emit_fltused_if_windows();
         Ok(())
+    }
+
+    /// Pin `asm_retained` callees in the module's one `@llvm.used` array,
+    /// surviving `globaldce` and `--gc-sections`. `@llvm.used`, not
+    /// `compiler.used`: the sole reference is asm text the linker can't follow
+    /// either. LangRef fixes the form — ptr array, appending, `llvm.metadata`.
+    fn emit_asm_retained(&mut self) {
+        if self.asm_retained.is_empty() {
+            return;
+        }
+        // LLVM rejects a repeated entry in `@llvm.used`.
+        let mut seen = std::collections::HashSet::new();
+        let ptrs: Vec<inkwell::values::PointerValue<'ctx>> = self
+            .asm_retained
+            .iter()
+            .filter(|f| seen.insert(f.as_global_value().as_pointer_value()))
+            .map(|f| f.as_global_value().as_pointer_value())
+            .collect();
+
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let array = ptr_ty.const_array(&ptrs);
+        let used = self.module.add_global(array.get_type(), None, "llvm.used");
+        used.set_initializer(&array);
+        used.set_linkage(inkwell::module::Linkage::Appending);
+        used.set_section(Some("llvm.metadata"));
     }
 
     /// The `_fltused` marker MSVC's CRT references to pull in FP support.

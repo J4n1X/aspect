@@ -99,6 +99,18 @@ impl<'ctx> CodeGenerator<'ctx> {
             Some(value) => self.builder.build_return(Some(&value))?,
             None => self.builder.build_return(None)?, // `-> u0` asm fn
         };
+
+        // A callee named only in asm text (`call foo`) has no IR reference, so
+        // `globaldce` would strip it. Retain any word resolving to a function;
+        // over-approximating is safe — a false hit was already reachable.
+        for line in &spec.lines {
+            for word in line.split_whitespace() {
+                if let Some(func) = self.module.get_function(word) {
+                    self.asm_retained.push(func);
+                }
+            }
+        }
+
         Ok(())
     }
 
