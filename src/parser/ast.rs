@@ -226,12 +226,15 @@ impl Statement {
 }
 
 /// The metaprogramming hook a `<hook> fn` implements. The surface keyword is
-/// hook-specific and glanceable — `rule fn`, and later `expansion fn` /
-/// `transform fn` — while this enum is the shared category they all belong to.
-/// Only `Rule` exists today.
+/// hook-specific and glanceable — `rule fn`, `transform fn`, and later
+/// `expansion fn` — while this enum is the shared category they all belong to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetaKind {
+    /// `rule fn` — a post-typecheck judgment, `(Program, Type) -> Judgments`.
     Rule,
+    /// `transform fn` — an obligation handler run during elaboration,
+    /// `(Expr) -> Expr`.
+    Transform,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -373,6 +376,30 @@ pub struct RuleDecl {
     pub pos: Position,
 }
 
+/// The demand a `transform <key> <handler>` binds a handler to. An enum from the
+/// start (like [`RuleAnchor`]) so new key kinds join without breaking the AST.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TransformKey {
+    /// `transform String -> u8* to_cstr` — fires when built-in coercion of
+    /// `from` to `to` fails at a demand site.
+    Coerce { from: LangType, to: LangType },
+    /// `transform @debug debug_print` — an attribute site. Parses now; firing is
+    /// deferred (like attribute-anchored rule fns).
+    Attribute(String),
+}
+
+/// A `transform <key> <handler_fn>` binding: an obligation handler run during
+/// round-based elaboration ([`crate::typechecker::elaborate`]). Like a rule,
+/// visibility governs reach — a private transform applies only in its declaring
+/// module, `public` program-wide.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransformDecl {
+    pub key: TransformKey,
+    pub handler_fn: String,
+    pub vis: Visibility,
+    pub pos: Position,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub functions: Vec<Function>,
@@ -392,4 +419,7 @@ pub struct Program {
     /// `Position::file_id`); empty ⇒ every file is the anonymous root module
     /// `""`. Carried so `meta` queries can resolve a position to its module.
     pub file_modules: Vec<String>,
+    /// Transform handlers (`transform <key> <fn>`), consulted at demand sites
+    /// during elaboration. Empty for programs declaring no transforms.
+    pub transforms: Vec<TransformDecl>,
 }

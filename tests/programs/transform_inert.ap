@@ -1,0 +1,18 @@
+# expected: 0
+# compile_args: "-I", "lib"
+#-
+  A transform declaration passes through the pipeline inertly. This slice only
+  *parses* transforms — no engine is wired — so the `transform fn` handler is a
+  meta fn (std/meta injected, gated, stripped from the artifact) and the
+  coercion binding sits unused in `Program.transforms`. The program compiles and
+  runs.
+-#
+
+type MyStr { public i32 x }
+
+transform fn to_cstr(Expr site) -> Expr { return site }
+transform MyStr -> u8* to_cstr
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

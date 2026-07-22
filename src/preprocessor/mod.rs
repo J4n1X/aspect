@@ -250,12 +250,13 @@ impl Preprocessor {
     }
 
     /// Whether the assembled token stream declares a metaprogramming function —
-    /// the identifier `rule` immediately before the `fn` keyword. Precise: `rule`
-    /// is only ever adjacent to `fn` in the `rule fn` descriptor (a type named
-    /// `rule` is always followed by `{`, a global by a name or `=`).
+    /// the identifier `rule` or `transform` immediately before the `fn` keyword.
+    /// Precise: those identifiers are only ever adjacent to `fn` in a `rule fn` /
+    /// `transform fn` descriptor (or a `transform fn(...)` fn-ptr coercion key,
+    /// which likewise implies the program uses the meta surface).
     fn declares_a_meta_fn(&self) -> bool {
         self.tokens.windows(2).any(|w| {
-            matches!(&w[0].kind, TokenKind::Identifier(n) if n == "rule")
+            matches!(&w[0].kind, TokenKind::Identifier(n) if n == "rule" || n == "transform")
                 && matches!(w[1].kind, TokenKind::Keyword(crate::lexer::Keyword::Fn))
         })
     }

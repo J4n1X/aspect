@@ -49,6 +49,7 @@ impl Parser {
         let mut functions = Vec::new();
         let mut global_vars = Vec::new();
         let mut rules = Vec::new();
+        let mut transforms = Vec::new();
 
         // Pre-register type/enum names and aliases so named types resolve
         // regardless of declaration order. Enums are interned before the alias
@@ -116,6 +117,56 @@ impl Parser {
                     self.parse_function(false, Visibility::Private, false, Vec::new())?;
                 func.proto.meta_kind = Some(crate::parser::MetaKind::Rule);
                 functions.push(func);
+                skip_nl!();
+                continue;
+            }
+
+            // `transform fn <name>(Expr) -> Expr` — an obligation handler run
+            // during elaboration. `transform` is a soft keyword; `transform fn
+            // <name>` is distinguished from a `transform fn(...) -> ...` fn-ptr
+            // coercion key by the identifier after `fn`. The handler is
+            // private-implementation; visibility lives on the binding below.
+            if self.is_transform_fn() {
+                Self::reject_attrs(&attrs, "a transform function")?;
+                if vis == Visibility::Public || export {
+                    return Err(ParserError::UnexpectedToken(
+                        "a transform function cannot be public or export — visibility lives on the `transform <key> <fn>` binding".to_string(),
+                        vis_pos,
+                    ));
+                }
+                if let Some((kw, kw_pos)) = &kind {
+                    return Err(ParserError::UnexpectedToken(
+                        format!("a transform function cannot be {kw}"),
+                        *kw_pos,
+                    ));
+                }
+                self.advance(); // consume the `transform` soft keyword
+                let mut func =
+                    self.parse_function(false, Visibility::Private, false, Vec::new())?;
+                func.proto.meta_kind = Some(crate::parser::MetaKind::Transform);
+                functions.push(func);
+                skip_nl!();
+                continue;
+            }
+
+            // `transform <key> <handler>` — bind a handler to a coercion
+            // (`From -> To`) or attribute (`@name`) key. `public` governs reach
+            // (like a rule); `export`/linkage make no sense on a transform.
+            if self.is_transform_decl() {
+                Self::reject_attrs(&attrs, "a transform declaration")?;
+                if export {
+                    return Err(ParserError::UnexpectedToken(
+                        "a transform cannot be export".to_string(),
+                        vis_pos,
+                    ));
+                }
+                if let Some((kw, kw_pos)) = &kind {
+                    return Err(ParserError::UnexpectedToken(
+                        format!("a transform cannot be {kw}"),
+                        *kw_pos,
+                    ));
+                }
+                transforms.push(self.parse_transform_decl(vis)?);
                 skip_nl!();
                 continue;
             }
@@ -246,6 +297,7 @@ impl Parser {
             source_files: self.source_files.clone(),
             rules,
             file_modules: self.file_modules.clone(),
+            transforms,
         })
     }
 
@@ -363,6 +415,77 @@ impl Parser {
         Ok(RuleDecl {
             anchor,
             checker_fn,
+            vis,
+            pos,
+        })
+    }
+
+    /// Lookahead-only detector for `transform fn <name>`: the identifier
+    /// `transform`, the `fn` keyword, then an identifier (the handler name). The
+    /// trailing identifier distinguishes a handler descriptor from a `transform
+    /// fn(...) -> ...` fn-pointer coercion key (where `(` follows `fn`). Consumes
+    /// nothing.
+    fn is_transform_fn(&self) -> bool {
+        matches!(&self.peek().kind, TokenKind::Identifier(n) if n == "transform")
+            && matches!(
+                self.tokens.get(self.current + 1).map(|t| &t.kind),
+                Some(TokenKind::Keyword(Keyword::Fn))
+            )
+            && matches!(
+                self.tokens.get(self.current + 2).map(|t| &t.kind),
+                Some(TokenKind::Identifier(_))
+            )
+    }
+
+    /// Lookahead-only detector for a `transform <key> <handler>` binding: the
+    /// identifier `transform` followed by an `@` (attribute key) or a
+    /// type-starting token (coercion `From -> To` key). Checked after
+    /// [`Self::is_transform_fn`], which claims `transform fn <name>`; `transform`
+    /// is otherwise reserved at item position. Consumes nothing.
+    fn is_transform_decl(&self) -> bool {
+        if !matches!(&self.peek().kind, TokenKind::Identifier(n) if n == "transform") {
+            return false;
+        }
+        matches!(
+            self.tokens.get(self.current + 1).map(|t| &t.kind),
+            Some(
+                TokenKind::At
+                    | TokenKind::LangType(_)
+                    | TokenKind::Identifier(_)
+                    | TokenKind::OpenParen
+                    | TokenKind::Keyword(Keyword::Const)
+                    | TokenKind::Keyword(Keyword::Fn)
+            )
+        )
+    }
+
+    /// Parse `transform <key> <handler_fn>` with the cursor on the `transform`
+    /// soft keyword (guaranteed by [`Self::is_transform_decl`]). The key is an
+    /// `@attribute` or a coercion `<from> -> <to>`; `parse_type` on the from-type
+    /// greedily eats a fn-pointer type's own `->`, so the arrow that survives is
+    /// always the key separator.
+    #[parse_rule]
+    fn parse_transform_decl(
+        &mut self,
+        vis: Visibility,
+    ) -> Result<crate::parser::TransformDecl, ParserError> {
+        use crate::parser::{TransformDecl, TransformKey};
+        let pos = pos!();
+        self.advance(); // the `transform` soft keyword
+        let key = if self.check(&TokenKind::At) {
+            self.advance();
+            TransformKey::Attribute(ident!())
+        } else {
+            let from = self.parse_type()?;
+            token!(Arrow);
+            let to = self.parse_type()?;
+            TransformKey::Coerce { from, to }
+        };
+        let handler_fn = ident!();
+        term!();
+        Ok(TransformDecl {
+            key,
+            handler_fn,
             vis,
             pos,
         })
@@ -663,6 +786,75 @@ mod tests {
         let tokens =
             crate::lexer::tokenize("public rule fn f() -> i32 {\n    return 0\n}".to_string())
                 .expect("lex");
+        assert!(Parser::new(tokens).parse_program().is_err());
+    }
+
+    /// `transform fn <name>` is a *function* marked with `MetaKind::Transform`,
+    /// not a `transform <key> <handler>` binding.
+    #[test]
+    fn transform_fn_is_marked() {
+        let program = parse("transform fn xf(u64 e) -> u64 {\n    return e\n}");
+        assert_eq!(program.functions.len(), 1);
+        assert_eq!(
+            program.functions[0].proto.meta_kind,
+            Some(MetaKind::Transform)
+        );
+        assert!(program.transforms.is_empty());
+    }
+
+    /// A coercion binding parses into `Program.transforms` with a `Coerce` key.
+    #[test]
+    fn transform_coerce_decl_parses() {
+        let program = parse("transform i32 -> u8* to_cstr\nfn f() -> i32 {\n    return 0\n}");
+        assert_eq!(program.transforms.len(), 1);
+        assert!(matches!(
+            program.transforms[0].key,
+            crate::parser::TransformKey::Coerce { .. }
+        ));
+        assert_eq!(program.transforms[0].handler_fn, "to_cstr");
+        assert_eq!(
+            program.transforms[0].vis,
+            crate::symbol::module::Visibility::Private
+        );
+    }
+
+    /// An attribute binding parses into an `Attribute` key.
+    #[test]
+    fn transform_attr_decl_parses() {
+        let program = parse("transform @debug dbg\nfn f() -> i32 {\n    return 0\n}");
+        assert!(matches!(
+            &program.transforms[0].key,
+            crate::parser::TransformKey::Attribute(n) if n == "debug"
+        ));
+    }
+
+    /// The coercion from-type may itself be a fn-pointer type carrying its own
+    /// `->`; the *separator* arrow is the one `parse_type` leaves behind.
+    #[test]
+    fn transform_fnptr_from_type_key_parses() {
+        let program =
+            parse("transform fn(i32) -> i32 -> u8* h\nfn f() -> i32 {\n    return 0\n}");
+        assert_eq!(program.transforms.len(), 1);
+        assert_eq!(program.transforms[0].handler_fn, "h");
+    }
+
+    /// A transform binding may carry `public` (whole-program reach); the handler
+    /// fn may not.
+    #[test]
+    fn public_transform_binding_parses() {
+        let program = parse("public transform i32 -> u8* xf\nfn f() -> i32 {\n    return 0\n}");
+        assert_eq!(
+            program.transforms[0].vis,
+            crate::symbol::module::Visibility::Public
+        );
+    }
+
+    #[test]
+    fn public_transform_fn_is_rejected() {
+        let tokens = crate::lexer::tokenize(
+            "public transform fn xf(u64 e) -> u64 {\n    return e\n}".to_string(),
+        )
+        .expect("lex");
         assert!(Parser::new(tokens).parse_program().is_err());
     }
 }
