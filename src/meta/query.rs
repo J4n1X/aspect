@@ -18,10 +18,17 @@ pub struct QueryIndex<'a> {
     program: &'a Program,
     /// struct id → every **construction** site of that struct.
     instantiations: HashMap<u32, Vec<Position>>,
+    /// struct id → construction sites inside a **function body** (a subset of
+    /// `instantiations`). The complement — sites in a global initializer — runs
+    /// exactly once, so this is what a bombproof singleton must be empty.
+    local_instantiations: HashMap<u32, Vec<Position>>,
     /// attribute name → the position of every carrier.
     attr_carriers: HashMap<String, Vec<Position>>,
     /// callee name (mangled `Type$method` for methods) → every direct call site.
     call_sites: HashMap<String, Vec<Position>>,
+    /// Transient walk state: true while walking a function body, false while
+    /// walking a global initializer. Routes construction sites to the right bucket.
+    in_function: bool,
 }
 
 impl<'a> QueryIndex<'a> {
@@ -31,9 +38,12 @@ impl<'a> QueryIndex<'a> {
         let mut idx = QueryIndex {
             program,
             instantiations: HashMap::new(),
+            local_instantiations: HashMap::new(),
             attr_carriers: HashMap::new(),
             call_sites: HashMap::new(),
+            in_function: false,
         };
+        idx.in_function = true;
         for func in &program.functions {
             idx.record_attrs(&func.proto.attrs);
             if let FunctionBody::Aspect(body) = &func.body {
@@ -42,6 +52,7 @@ impl<'a> QueryIndex<'a> {
                 }
             }
         }
+        idx.in_function = false;
         for global in &program.global_vars {
             idx.record_attrs(&global.attrs);
             if let Some(init) = &global.initializer {
@@ -65,6 +76,16 @@ impl<'a> QueryIndex<'a> {
     #[must_use]
     pub fn instantiations_of(&self, id: u32) -> &[Position] {
         self.instantiations.get(&id).map_or(&[], Vec::as_slice)
+    }
+
+    /// Construction sites of struct `id` that sit inside a **function body**
+    /// (not a global initializer). A global initializer runs exactly once, so a
+    /// singleton whose only construction is a global init is provably single;
+    /// any construction here could execute repeatedly (a loop, or a helper
+    /// called more than once) and defeats that guarantee.
+    #[must_use]
+    pub fn local_instantiations_of(&self, id: u32) -> &[Position] {
+        self.local_instantiations.get(&id).map_or(&[], Vec::as_slice)
     }
 
     /// The position of every site carrying attribute `name` (`@name` → `name`).
@@ -102,6 +123,15 @@ impl<'a> QueryIndex<'a> {
         }
     }
 
+    /// Record a construction of struct `id` at `pos` into the all-sites bucket,
+    /// and additionally into the function-body bucket when the walk is inside a
+    /// function (not a global initializer).
+    fn record_construction(&mut self, id: u32, pos: Position) {
+        self.instantiations.entry(id).or_default().push(pos);
+        if self.in_function {
+            self.local_instantiations.entry(id).or_default().push(pos);
+        }
+    }
 }
 
 impl walk::Visitor for QueryIndex<'_> {
@@ -112,16 +142,13 @@ impl walk::Visitor for QueryIndex<'_> {
     fn visit_expr(&mut self, expr: &Expression) {
         match &expr.kind {
             ExprKind::StructLiteral { struct_id, .. } => {
-                self.instantiations
-                    .entry(*struct_id)
-                    .or_default()
-                    .push(expr.pos);
+                self.record_construction(*struct_id, expr.pos);
             }
             ExprKind::Alloc { alloc_type, .. } => {
                 if alloc_type.pointer_depth == 0
                     && let TypeBase::Struct(id) = alloc_type.base
                 {
-                    self.instantiations.entry(id).or_default().push(expr.pos);
+                    self.record_construction(id, expr.pos);
                 }
             }
             ExprKind::FunctionCall { name, .. } => {
@@ -177,6 +204,21 @@ mod tests {
             "Config",
         );
         assert_eq!(count, 2);
+    }
+
+    /// A global initializer's construction is counted overall but NOT as a
+    /// function-body construction; a construction inside a function is both.
+    #[test]
+    fn local_instantiations_excludes_global_init() {
+        let src = "type Config {\n    public i32 x\n}\n\
+                   Config g = Config { x = 1 }\n\
+                   fn f() -> i32 {\n    Config c = Config { x = 2 }\n    return c.x\n}";
+        let tokens = crate::lexer::tokenize(src.to_string()).expect("lex");
+        let program = Parser::new(tokens).parse_program().expect("parse");
+        let id = program.symbols.struct_id("Config").expect("struct interned");
+        let idx = QueryIndex::build(&program);
+        assert_eq!(idx.instantiations_of(id).len(), 2, "global + local");
+        assert_eq!(idx.local_instantiations_of(id).len(), 1, "only the one in f()");
     }
 
     /// Direct calls are recorded under the callee name; an uncalled name has none.

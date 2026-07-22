@@ -1,9 +1,8 @@
-# expected: "rule", "only_one", "global initializer"
+# expected: "rule", "only_one", "at most once"
 # compile_args: "-I", "lib"
 #-
-  The evasion a count-based rule misses: nest construction in a helper and call
-  it repeatedly. Because the construction lives in a function body, the
-  confinement rule rejects it no matter how much indirection wraps it.
+  Two global instances are two constructions — rejected by the at-most-one
+  clause even though neither is inside a function body.
 -#
 
 rule fn only_one(Program p, Type anchor) -> Judgments {
@@ -24,13 +23,10 @@ rule fn only_one(Program p, Type anchor) -> Judgments {
 }
 
 type Config { public i32 x }
+Config g_a = Config { x = 1 }
+Config g_b = Config { x = 2 }
 rule Config only_one
 
-# Construction hidden behind a helper — still a function body.
-fn make() -> Config { return Config { x = 1 } }
-
 fn main(u32 argc, u8 **argv) -> i32 {
-    Config a = make()
-    Config b = make()
-    return a.x + b.x
+    return g_a.x + g_b.x
 }

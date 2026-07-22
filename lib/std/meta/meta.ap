@@ -237,6 +237,11 @@ public type Program {
     public fn instantiations_of(this, u8* type_name) -> ExprList {
         return ExprList.from_handle(meta_program_instantiations_of(this.handle, type_name))
     }
+    # Construction sites inside a function body (not a global initializer, which
+    # runs exactly once). Empty ⇒ every construction is a run-once global init.
+    public fn local_instantiations_of(this, u8* type_name) -> ExprList {
+        return ExprList.from_handle(meta_program_local_instantiations_of(this.handle, type_name))
+    }
 }
 
 # ── Judgments (the only "write" a rule may do) ───────────────────────────────
@@ -325,9 +330,10 @@ extern fn meta_fn_pos(u64 h)               -> u64
 extern fn meta_fnlist_count(u64 h)         -> u64
 extern fn meta_fnlist_at(u64 h, u64 i)     -> u64
 
-extern fn meta_program_functions(u64 h)                 -> u64
-extern fn meta_program_call_sites_of(u64 h, u8* name)   -> u64
-extern fn meta_program_instantiations_of(u64 h, u8* nm) -> u64
+extern fn meta_program_functions(u64 h)                       -> u64
+extern fn meta_program_call_sites_of(u64 h, u8* name)         -> u64
+extern fn meta_program_instantiations_of(u64 h, u8* nm)       -> u64
+extern fn meta_program_local_instantiations_of(u64 h, u8* nm) -> u64
 
 extern fn meta_judgments_new()                        -> u64
 extern fn meta_judgment_error(u64 js, u64 pos, u8* m) -> u0

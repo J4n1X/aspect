@@ -67,6 +67,8 @@ struct FnInfo {
 struct MetaCtx {
     arena: Vec<HandleData>,
     instantiations: HashMap<u32, Vec<Position>>,
+    /// Construction sites inside function bodies (subset of `instantiations`).
+    local_instantiations: HashMap<u32, Vec<Position>>,
     struct_names: HashMap<u32, String>,
     struct_ids: HashMap<String, u32>,
     /// Every function in the program, in declaration order.
@@ -135,6 +137,17 @@ extern "C" fn meta_program_instantiations_of(_prog: u64, name: *const u8) -> u64
             return 0;
         };
         let sites = c.instantiations.get(&id).cloned().unwrap_or_default();
+        c.push(HandleData::ExprList(sites))
+    })
+}
+
+extern "C" fn meta_program_local_instantiations_of(_prog: u64, name: *const u8) -> u64 {
+    let name = read_cstr(name);
+    with_ctx(|c| {
+        let Some(&id) = c.struct_ids.get(&name) else {
+            return 0;
+        };
+        let sites = c.local_instantiations.get(&id).cloned().unwrap_or_default();
         c.push(HandleData::ExprList(sites))
     })
 }
@@ -373,6 +386,7 @@ fn extern_bindings() -> Vec<(&'static str, usize)> {
         ("meta_type_struct_methods", meta_type_struct_methods as *const () as usize),
         ("meta_program_functions", meta_program_functions as *const () as usize),
         ("meta_program_call_sites_of", meta_program_call_sites_of as *const () as usize),
+        ("meta_program_local_instantiations_of", meta_program_local_instantiations_of as *const () as usize),
         ("meta_fnlist_count", meta_fnlist_count as *const () as usize),
         ("meta_fnlist_at", meta_fnlist_at as *const () as usize),
         ("meta_fn_name", meta_fn_name as *const () as usize),
@@ -405,10 +419,12 @@ fn build_ctx(program: &Program, anchor_id: u32, query: &QueryIndex) -> MetaCtx {
     let mut struct_names = HashMap::new();
     let mut struct_ids = HashMap::new();
     let mut instantiations = HashMap::new();
+    let mut local_instantiations = HashMap::new();
     for s in program.symbols.structs() {
         struct_names.insert(s.id, s.name.clone());
         struct_ids.insert(s.name.clone(), s.id);
         instantiations.insert(s.id, query.instantiations_of(s.id).to_vec());
+        local_instantiations.insert(s.id, query.local_instantiations_of(s.id).to_vec());
     }
 
     // A function is a method iff its (mangled) name is one a struct lowered to.
@@ -447,6 +463,7 @@ fn build_ctx(program: &Program, anchor_id: u32, query: &QueryIndex) -> MetaCtx {
     MetaCtx {
         arena: Vec::new(),
         instantiations,
+        local_instantiations,
         struct_names,
         struct_ids,
         functions,

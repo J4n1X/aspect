@@ -1,45 +1,39 @@
 # expected: 5
 # compile_args: "-I", "lib"
 #-
-  An Aspect-authored `rule fn` singleton, JIT-compiled and run over the program
-  via the std/meta handle ABI. Beyond counting struct literals, it discovers the
-  `*$new` factory among the anchor's methods and counts *that constructor's*
-  call sites — catching construction funneled through a factory, which
-  `instantiations_of` alone cannot see. Config is constructed once, so the rule
+  A bombproof singleton, JIT-compiled and run over the program via the std/meta
+  handle ABI. Rather than counting construction sites (which any helper, factory,
+  loop, or recursion can defeat), it *confines* construction: the only legal
+  place to build the type is a global initializer, which is constant-folded and
+  so exists exactly once. Config is a single global built once here, so the rule
   passes and main runs.
 -#
 
 rule fn only_one(Program p, Type anchor) -> Judgments {
     Judgments js = Judgments.new()
+    u8* name = anchor.struct_name()
 
-    # Direct construction sites (struct literals / value allocs).
-    ExprList sites = p.instantiations_of(anchor.struct_name())
-    if sites.count() > 1 as u64 {
-        js.error(sites.at(1 as u64).pos(), "constructed more than once")
+    # Construction inside a function body can run more than once (a loop, or a
+    # helper called repeatedly), so a singleton forbids it outright — the only
+    # legal construction is a global initializer, which runs exactly once.
+    ExprList in_funcs = p.local_instantiations_of(name)
+    if in_funcs.count() > 0 as u64 {
+        js.error(in_funcs.at(0 as u64).pos(), "a singleton may be constructed only in a global initializer, not inside a function")
     }
 
-    # Construction funneled through a `new` factory: count the constructor's calls.
-    FnList methods = anchor.struct_methods()
-    for (u64 i = 0; i < methods.count(); i += 1) {
-        Fn m = methods.at(i)
-        if str_ends_with(m.name(), "$new") {
-            ExprList calls = p.call_sites_of(m.name())
-            if calls.count() > 1 as u64 {
-                js.error(calls.at(1 as u64).pos(), "constructed more than once")
-            }
-        }
+    # And at most one construction total — hence at most one instance.
+    ExprList all = p.instantiations_of(name)
+    if all.count() > 1 as u64 {
+        js.error(all.at(1 as u64).pos(), "a singleton must be constructed at most once")
     }
 
     return js
 }
 
-type Config {
-    public i32 x
-    public fn new(i32 v) -> Config { return Config { x = v } }
-}
+type Config { public i32 x }
+Config g_config = Config { x = 5 }
 rule Config only_one
 
 fn main(u32 argc, u8 **argv) -> i32 {
-    Config c = Config.new(5)
-    return c.x
+    return g_config.x
 }
