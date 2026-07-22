@@ -8,7 +8,6 @@ use aspect::codegen::CodeGenerator;
 use aspect::preprocessor::{PreprocessedSource, Preprocessor};
 use aspect::parser::{FunctionBody, Parser, Program};
 use aspect::target::TargetSpec;
-use aspect::typechecker::TypeChecker;
 
 #[derive(ClapParser)]
 #[command(name = "aspc")]
@@ -72,6 +71,11 @@ struct PreprocArgs {
     /// `compile`/`interpret`.
     #[arg(long = "target", value_name = "TRIPLE", default_value_t = TargetSpec::host().triple().to_string())]
     target: String,
+
+    /// Maximum type-check elaboration rounds before a non-settling transform is
+    /// an error (default 16).
+    #[arg(long = "max-rounds", value_name = "N", default_value_t = aspect::typechecker::DEFAULT_MAX_ROUNDS)]
+    max_rounds: usize,
 }
 
 impl PreprocArgs {
@@ -304,8 +308,15 @@ fn parse_program_from(path: &Path, preproc: &PreprocArgs) -> Result<Program> {
 fn build_program(path: &Path, preproc: &PreprocArgs) -> Result<Program> {
     let mut program = parse_program_from(path, preproc)?;
 
-    let mut typechecker = TypeChecker::new().with_target(preproc.target_spec());
-    typechecker.check_program(&mut program).map_err(|errors| {
+    // Re-check to a fixpoint so transforms can rewrite the AST; the final
+    // round's checker formats diagnostics.
+    let elaboration = aspect::typechecker::elaborate_program(
+        &mut program,
+        preproc.target_spec(),
+        preproc.max_rounds,
+    );
+    let typechecker = elaboration.checker;
+    elaboration.result.map_err(|errors| {
         let mut err_msg = String::new();
         for error in &errors {
             let _ = writeln!(err_msg, "{}", typechecker.format_error(error));

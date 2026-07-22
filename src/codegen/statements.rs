@@ -5,7 +5,7 @@ use inkwell::IntPredicate;
 use crate::codegen::const_eval::const_eval;
 use crate::codegen::generator::CodeGenerator;
 use crate::codegen::value_emitter::ValueEmitter;
-use crate::codegen::{CodegenError, LangTypeExt, TypeLoweringError};
+use crate::codegen::CodegenError;
 use crate::parser::LangType;
 use crate::parser::{ExprKind, Expression, Statement, StatementKind};
 
@@ -539,14 +539,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             .get_insert_block()
             .and_then(inkwell::basic_block::BasicBlock::get_terminator)
             .is_some()
-    }
-
-    pub(crate) fn get_zero_value(
-        &self,
-        ty: &crate::lexer::LangType,
-    ) -> Result<BasicValueEnum<'ctx>, TypeLoweringError> {
-        let llvm_type = ty.to_llvm(self.context)?;
-        Ok(llvm_type.const_zero())
     }
 
     pub(crate) fn enter_scope(&mut self) {

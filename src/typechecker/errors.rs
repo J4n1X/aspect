@@ -156,6 +156,11 @@ pub enum TypeCheckError {
         position: Position,
     },
 
+    /// Elaboration did not reach a fixpoint within the round bound — a transform
+    /// keeps rewriting. Positionless: it describes the run, not one site.
+    #[error("{message}")]
+    RoundLimitExceeded { message: String },
+
     #[error("Value block does not produce a value on every path — each control path must end in `return <expr>` at {0}")]
     ValueBlockMissingReturn(Position),
 

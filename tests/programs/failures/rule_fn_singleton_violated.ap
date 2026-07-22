@@ -1,24 +1,42 @@
 # expected: "rule", "only_one", "more than once"
 # compile_args: "-I", "lib"
 #-
-  Two constructions: the JIT'd Aspect rule fn detects it and emits an error,
-  failing the build.
+  Construction funneled through a `new` factory called twice. `instantiations_of`
+  sees only the single struct literal inside `new`, so the rule counts the
+  constructor's call sites instead — catching what a literal count cannot — and
+  fails the build.
 -#
 
 rule fn only_one(Program p, Type anchor) -> Judgments {
     Judgments js = Judgments.new()
+
     ExprList sites = p.instantiations_of(anchor.struct_name())
     if sites.count() > 1 as u64 {
         js.error(sites.at(1 as u64).pos(), "constructed more than once")
     }
+
+    FnList methods = anchor.struct_methods()
+    for (u64 i = 0; i < methods.count(); i += 1) {
+        Fn m = methods.at(i)
+        if str_ends_with(m.name(), "$new") {
+            ExprList calls = p.call_sites_of(m.name())
+            if calls.count() > 1 as u64 {
+                js.error(calls.at(1 as u64).pos(), "constructed more than once")
+            }
+        }
+    }
+
     return js
 }
 
-type Config { public i32 x }
+type Config {
+    public i32 x
+    public fn new(i32 v) -> Config { return Config { x = v } }
+}
 rule Config only_one
 
 fn main(u32 argc, u8 **argv) -> i32 {
-    Config a = Config { x = 1 }
-    Config b = Config { x = 2 }
+    Config a = Config.new(2)
+    Config b = Config.new(3)
     return a.x + b.x
 }

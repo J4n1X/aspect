@@ -20,6 +20,8 @@ pub struct QueryIndex<'a> {
     instantiations: HashMap<u32, Vec<Position>>,
     /// attribute name → the position of every carrier.
     attr_carriers: HashMap<String, Vec<Position>>,
+    /// callee name (mangled `Type$method` for methods) → every direct call site.
+    call_sites: HashMap<String, Vec<Position>>,
 }
 
 impl<'a> QueryIndex<'a> {
@@ -30,6 +32,7 @@ impl<'a> QueryIndex<'a> {
             program,
             instantiations: HashMap::new(),
             attr_carriers: HashMap::new(),
+            call_sites: HashMap::new(),
         };
         for func in &program.functions {
             idx.record_attrs(&func.proto.attrs);
@@ -70,6 +73,20 @@ impl<'a> QueryIndex<'a> {
         self.attr_carriers.get(name).cloned().unwrap_or_default()
     }
 
+    /// Every direct call site of `name`. Methods are keyed by their mangled
+    /// `Type$method` name, so `call_sites_of("Config$new")` finds `Config.new(..)`
+    /// calls. Indirect (fn-pointer) calls are not counted.
+    #[must_use]
+    pub fn call_sites_of(&self, name: &str) -> &[Position] {
+        self.call_sites.get(name).map_or(&[], Vec::as_slice)
+    }
+
+    /// The whole callee → call-sites map, for snapshotting into a JIT run.
+    #[must_use]
+    pub fn call_sites(&self) -> &HashMap<String, Vec<Position>> {
+        &self.call_sites
+    }
+
     /// Declared name of struct `id`, for judgment messages.
     #[must_use]
     pub fn struct_name(&self, id: u32) -> &str {
@@ -106,6 +123,12 @@ impl walk::Visitor for QueryIndex<'_> {
                 {
                     self.instantiations.entry(id).or_default().push(expr.pos);
                 }
+            }
+            ExprKind::FunctionCall { name, .. } => {
+                self.call_sites
+                    .entry(name.clone())
+                    .or_default()
+                    .push(expr.pos);
             }
             _ => {}
         }
@@ -154,5 +177,17 @@ mod tests {
             "Config",
         );
         assert_eq!(count, 2);
+    }
+
+    /// Direct calls are recorded under the callee name; an uncalled name has none.
+    #[test]
+    fn call_sites_counts_direct_calls() {
+        let src = "fn helper() -> i32 { return 1 }\n\
+                   fn f() -> i32 {\n    helper()\n    helper()\n    return 0\n}";
+        let tokens = crate::lexer::tokenize(src.to_string()).expect("lex");
+        let program = Parser::new(tokens).parse_program().expect("parse");
+        let idx = QueryIndex::build(&program);
+        assert_eq!(idx.call_sites_of("helper").len(), 2);
+        assert_eq!(idx.call_sites_of("absent").len(), 0);
     }
 }

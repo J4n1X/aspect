@@ -2,6 +2,7 @@ use super::TypeChecker;
 use crate::lexer::{LangType, TypeBase};
 use crate::parser::{BinaryOp, ComparisonOp, ExprKind, Expression, LiteralValue};
 use crate::symbol::module::Visibility;
+use crate::typechecker::elaborate::Obligation;
 use crate::typechecker::errors::TypeCheckError;
 use crate::typechecker::types::{
     cast_valid, literal_float_compatible, literal_int_fits, types_coercible,
@@ -356,6 +357,11 @@ impl TypeChecker {
         field: &str,
         pos: crate::lexer::Position,
     ) -> LangType {
+        // A poisoned base has no fields to resolve; propagate the sentinel
+        // instead of a spurious `UnknownField`.
+        if base_type.base == TypeBase::Unresolved {
+            return LangType::UNRESOLVED;
+        }
         if let TypeBase::Struct(id) = base_type.base
             && base_type.pointer_depth <= 1
         {
@@ -814,9 +820,31 @@ impl TypeChecker {
             // synthesise and assert coercibility at the boundary.
             _ => {
                 let found = self.synth_expression(expr);
+                // A failed coercion is a repair demand site: consult a transform
+                // handler before erroring.
+                if !types_coercible(&found, target)
+                    && let Some(rewrite) =
+                        self.try_repair(&Obligation::Coerce { from: found, to: *target })
+                {
+                    *expr = rewrite; // re-checked next round; obligation discharged
+                    return;
+                }
                 self.assert_coercible(found, target, pos);
             }
         }
+    }
+
+    /// Consult a transform handler to repair a stuck demand site, returning a
+    /// rewritten node if a handler claims the obligation. Returns `None` when
+    /// none does, and the caller falls back to erroring.
+    fn try_repair(&mut self, obl: &Obligation) -> Option<Expression> {
+        if self.handlers.is_empty() {
+            return None;
+        }
+        // No handler dispatch yet; the registry is never populated, so this is
+        // currently unreachable.
+        let _ = obl;
+        None
     }
 
     /// Emit a `TypeMismatch` unless `found` is coercible to `target`; otherwise

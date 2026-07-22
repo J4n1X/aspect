@@ -5,6 +5,12 @@ use crate::lexer::{LangType, TypeBase};
 /// within the integer or float family; integer ↔ float needs an explicit cast.
 #[must_use]
 pub fn types_coercible(from: &LangType, to: &LangType) -> bool {
+    // A poisoned operand coerces to anything, suppressing secondary mismatches
+    // downstream of a stuck demand site.
+    if from.base == TypeBase::Unresolved || to.base == TypeBase::Unresolved {
+        return true;
+    }
+
     // Exact match (ignoring const)
     if from == to {
         return true;

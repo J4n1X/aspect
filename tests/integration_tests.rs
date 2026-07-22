@@ -52,8 +52,15 @@ fn parse_and_typecheck(
             .join("\n")
     })?;
 
-    let mut typechecker = TypeChecker::new();
-    typechecker.check_program(&mut program).map_err(|errors| {
+    // Elaborate to a fixpoint, mirroring `build_program` so the corpus exercises
+    // the same path production does.
+    let elaboration = aspect::typechecker::elaborate_program(
+        &mut program,
+        TargetSpec::host(),
+        aspect::typechecker::DEFAULT_MAX_ROUNDS,
+    );
+    let typechecker = elaboration.checker;
+    elaboration.result.map_err(|errors| {
         errors
             .iter()
             .map(|e| typechecker.format_error(e))
@@ -196,6 +203,41 @@ fn compile_and_run_with_args(
 
 fn compile_and_run(source_path: &str) -> Result<i32, String> {
     compile_and_run_with_args(source_path, &[], &[])
+}
+
+/// Re-checking an already type-checked `Program` with a fresh checker must
+/// produce an identical program — the elaboration driver relies on this to
+/// re-check to a fixpoint. Guards against non-idempotent mutation (stale literal
+/// narrowing, double lowering, symbol-table drift).
+#[test]
+fn typecheck_is_idempotent_on_recheck() {
+    // A feature-diverse set, including the `MethodCall` lowering and a stdlib
+    // import.
+    let cases: &[(&str, &[&str])] = &[
+        ("tests/programs/methods.ap", &[]),
+        ("tests/programs/method_chain.ap", &[]),
+        ("tests/programs/value_block.ap", &[]),
+        ("tests/programs/enum_basic.ap", &[]),
+        ("tests/programs/fnptr_vtable.ap", &[]),
+        ("tests/programs/encapsulation.ap", &[]),
+        ("tests/programs/attributes_inert.ap", &[]),
+        ("tests/programs/stdlib_check.ap", &["-I", "lib"]),
+    ];
+    for (path, args) in cases {
+        let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+        let (checked, _warnings) = parse_and_typecheck(path, &args)
+            .unwrap_or_else(|e| panic!("{path}: first typecheck failed: {e}"));
+
+        // Re-check a clone with a fresh checker; it must be unchanged.
+        let mut rechecked = checked.clone();
+        TypeChecker::new()
+            .check_program(&mut rechecked)
+            .unwrap_or_else(|errs| panic!("{path}: re-check errored: {errs:?}"));
+        assert_eq!(
+            checked, rechecked,
+            "{path}: re-checking a checked program changed it — the checker is not idempotent"
+        );
+    }
 }
 
 generate_tests!();

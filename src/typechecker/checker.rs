@@ -37,6 +37,12 @@ pub struct TypeChecker {
     /// appear in the `Err` path and never change the exit code (v1). Both
     /// `main.rs` and the test harness read this, each building its own checker.
     warnings: Vec<super::errors::TypeWarning>,
+    /// Transform handlers consulted at demand sites during a round.
+    handlers: super::elaborate::HandlerRegistry,
+    /// Handler rewrites applied this round; the elaboration driver reads it to
+    /// detect quiescence. Only a transform rewrite bumps it — the one-shot
+    /// `MethodCall` lowering is core lowering and must not.
+    rewrites: usize,
 }
 
 impl TypeChecker {
@@ -52,6 +58,8 @@ impl TypeChecker {
             target: TargetSpec::host(),
             errors: Vec::new(),
             warnings: Vec::new(),
+            handlers: super::elaborate::HandlerRegistry::new(),
+            rewrites: 0,
         }
     }
 
@@ -78,6 +86,13 @@ impl TypeChecker {
     #[must_use]
     pub fn warnings(&self) -> &[super::errors::TypeWarning] {
         &self.warnings
+    }
+
+    /// Handler rewrites applied during the last `check_program`; the elaboration
+    /// driver reads this to detect the fixpoint (a round with zero is quiescent).
+    #[must_use]
+    pub fn rewrites(&self) -> usize {
+        self.rewrites
     }
 
     /// Mirrors [`Self::format_error`], as `file:line:col: warning: <message>`.

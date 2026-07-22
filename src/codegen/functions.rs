@@ -1,8 +1,8 @@
-use inkwell::attributes::{Attribute, AttributeLoc};
-use inkwell::types::{AnyType, BasicMetadataTypeEnum, BasicType};
-use inkwell::module::Linkage;
-use inkwell::values::{BasicValueEnum, FunctionValue};
 use inkwell::AddressSpace;
+use inkwell::attributes::{Attribute, AttributeLoc};
+use inkwell::module::Linkage;
+use inkwell::types::{AnyType, BasicMetadataTypeEnum, BasicType};
+use inkwell::values::{BasicValueEnum, FunctionValue};
 
 use crate::codegen::generator::CodeGenerator;
 use crate::codegen::structs::is_struct_value;
@@ -279,7 +279,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         // Synthesise a return when the body left the block open.
-        if !cg.block_has_terminator() {
+        /*if !cg.block_has_terminator() {
             if ret_is_struct {
                 // Store a zeroed struct through the sret pointer, return void.
                 let struct_ty = cg
@@ -295,6 +295,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .get_zero_value(&func.proto.return_type)
                     .map_err(|e| e.with_pos(func.proto.pos))?;
                 cg.builder.build_return(Some(&zero))?;
+            }
+        }*/
+
+        // If there's no return statement, we throw
+        if !cg.block_has_terminator() {
+            if func.proto.return_type.is_void() {
+                cg.builder.build_return(None)?;
+            } else {
+                cg.builder.build_unreachable()?; // typechecker guarantees all reachable paths returned
             }
         }
 
@@ -324,7 +333,11 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         if let Some((slot, struct_ty)) = sret_slot {
             // The real result was written through the sret pointer; load it.
-            return Ok(Some(self.builder.build_load(struct_ty, slot, "sret.load")?));
+            return Ok(Some(self.builder.build_load(
+                struct_ty,
+                slot,
+                "sret.load",
+            )?));
         }
         Ok(call_result.try_as_basic_value().basic())
     }
@@ -408,9 +421,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             arg_values.push(val.into());
         }
 
-        let call = self
-            .builder
-            .build_indirect_call(fn_ty, callee_ptr, &arg_values, "indirect_call")?;
+        let call =
+            self.builder
+                .build_indirect_call(fn_ty, callee_ptr, &arg_values, "indirect_call")?;
         Ok(call.try_as_basic_value().basic())
     }
 
@@ -450,8 +463,8 @@ mod tests {
         let mut program = parser.parse_program().expect("parse");
         let mut tc = TypeChecker::new();
         tc.check_program(&mut program).expect("typecheck");
-        let mut codegen =
-            CodeGenerator::new(context, "linkage_test", &TargetSpec::host()).expect("codegen setup");
+        let mut codegen = CodeGenerator::new(context, "linkage_test", &TargetSpec::host())
+            .expect("codegen setup");
         codegen.generate(&program).expect("generate");
         codegen.print_ir_to_string()
     }

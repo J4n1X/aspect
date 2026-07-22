@@ -109,11 +109,12 @@ public type Type {
     public fn from_handle(u64 h) -> Type { return Type { handle = h } }
     public fn raw(this) -> u64 { return this.handle }
 
-    public fn base(this)          -> TypeKind { return meta_type_base(this.handle) as TypeKind }
-    public fn pointer_depth(this) -> u64  { return meta_type_pointer_depth(this.handle) }
-    public fn is_const(this)      -> bool { return meta_type_is_const(this.handle) }
-    public fn bits(this)          -> u64  { return meta_type_bits(this.handle) }
-    public fn struct_name(this)   -> u8*  { return meta_type_struct_name(this.handle) }
+    public fn base(this)           -> TypeKind { return meta_type_base(this.handle) as TypeKind }
+    public fn pointer_depth(this)  -> u64  { return meta_type_pointer_depth(this.handle) }
+    public fn is_const(this)       -> bool { return meta_type_is_const(this.handle) }
+    public fn bits(this)           -> u64  { return meta_type_bits(this.handle) }
+    public fn struct_name(this)    -> u8*  { return meta_type_struct_name(this.handle) }
+    public fn struct_methods(this) -> FnList { return FnList.from_handle(meta_type_struct_methods(this.handle)) }
 }
 
 # ── Attribute ────────────────────────────────────────────────────────────────
@@ -196,10 +197,11 @@ public type Fn {
     public fn from_handle(u64 h) -> Fn { return Fn { handle = h } }
     public fn raw(this) -> u64 { return this.handle }
 
-    public fn name(this)      -> u8*  { return meta_fn_name(this.handle) }
-    public fn is_public(this) -> bool { return meta_fn_is_public(this.handle) }
-    public fn is_export(this) -> bool { return meta_fn_is_export(this.handle) }
-    public fn is_extern(this) -> bool { return meta_fn_is_extern(this.handle) }
+    public fn name(this)             -> u8*  { return meta_fn_name(this.handle) }
+    public fn is_public(this)        -> bool { return meta_fn_is_public(this.handle) }
+    public fn is_export(this)        -> bool { return meta_fn_is_export(this.handle) }
+    public fn is_extern(this)        -> bool { return meta_fn_is_extern(this.handle) }
+    public fn is_method(this)        -> bool { return meta_fn_is_method(this.handle) }
 
     public fn param_count(this)       -> u64  { return meta_fn_param_count(this.handle) }
     public fn param_type(this, u64 i) -> Type { return Type.from_handle(meta_fn_param_type(this.handle, i)) }
@@ -251,6 +253,14 @@ public type Judgments {
     public fn count(this) -> u64 { return meta_judgments_count(this.handle) }
 }
 
+# ── String utilities ─────────────────────────────────────────────────────────
+# Public wrappers over the string externs. A rule fn cannot import stdlib (the
+# judge keeps only meta functions), so C-string comparison lives here. `name()`
+# accessors hand back mangled names, so `str_ends_with(fn.name(), "$new")`
+# matches a `new` constructor across any type.
+public fn str_eq(u8* a, u8* b) -> bool { return meta_streq(a, b) }
+public fn str_ends_with(u8* s, u8* suffix) -> bool { return meta_str_ends_with(s, suffix) }
+
 # ── extern builtins (the JIT-side contract; implemented in Rust later) ────────
 # Handles cross as bare u64; strings as u8*; 0 is the null handle. See the doc.
 
@@ -270,11 +280,12 @@ extern fn meta_pos_line(u64 h)   -> u64
 extern fn meta_pos_column(u64 h) -> u64
 extern fn meta_pos_file(u64 h)   -> u8*
 
-extern fn meta_type_base(u64 h)          -> i32
-extern fn meta_type_pointer_depth(u64 h) -> u64
-extern fn meta_type_is_const(u64 h)      -> bool
-extern fn meta_type_bits(u64 h)          -> u64
-extern fn meta_type_struct_name(u64 h)   -> u8*
+extern fn meta_type_base(u64 h)           -> i32
+extern fn meta_type_pointer_depth(u64 h)  -> u64
+extern fn meta_type_is_const(u64 h)       -> bool
+extern fn meta_type_bits(u64 h)           -> u64
+extern fn meta_type_struct_name(u64 h)    -> u8*
+extern fn meta_type_struct_methods(u64 h) -> u64
 
 extern fn meta_attr_name(u64 h)          -> u8*
 extern fn meta_attr_arg_count(u64 h)     -> u64
@@ -300,18 +311,19 @@ extern fn meta_stmt_children(u64 h)      -> u64
 extern fn meta_stmtlist_count(u64 h)     -> u64
 extern fn meta_stmtlist_at(u64 h, u64 i) -> u64
 
-extern fn meta_fn_name(u64 h)            -> u8*
-extern fn meta_fn_is_public(u64 h)       -> bool
-extern fn meta_fn_is_export(u64 h)       -> bool
-extern fn meta_fn_is_extern(u64 h)       -> bool
-extern fn meta_fn_param_count(u64 h)     -> u64
+extern fn meta_fn_name(u64 h)              -> u8*
+extern fn meta_fn_is_public(u64 h)         -> bool
+extern fn meta_fn_is_export(u64 h)         -> bool
+extern fn meta_fn_is_extern(u64 h)         -> bool
+extern fn meta_fn_is_method(u64 h)         -> bool
+extern fn meta_fn_param_count(u64 h)       -> u64
 extern fn meta_fn_param_type(u64 h, u64 i) -> u64
-extern fn meta_fn_return_type(u64 h)     -> u64
-extern fn meta_fn_body(u64 h)            -> u64
-extern fn meta_fn_attrs(u64 h)           -> u64
-extern fn meta_fn_pos(u64 h)             -> u64
-extern fn meta_fnlist_count(u64 h)       -> u64
-extern fn meta_fnlist_at(u64 h, u64 i)   -> u64
+extern fn meta_fn_return_type(u64 h)       -> u64
+extern fn meta_fn_body(u64 h)              -> u64
+extern fn meta_fn_attrs(u64 h)             -> u64
+extern fn meta_fn_pos(u64 h)               -> u64
+extern fn meta_fnlist_count(u64 h)         -> u64
+extern fn meta_fnlist_at(u64 h, u64 i)     -> u64
 
 extern fn meta_program_functions(u64 h)                 -> u64
 extern fn meta_program_call_sites_of(u64 h, u8* name)   -> u64
@@ -321,3 +333,9 @@ extern fn meta_judgments_new()                        -> u64
 extern fn meta_judgment_error(u64 js, u64 pos, u8* m) -> u0
 extern fn meta_judgment_warn(u64 js, u64 pos, u8* m)  -> u0
 extern fn meta_judgments_count(u64 h)                 -> u64
+
+# String utilities over the `u8*` names the read surface hands back. A rule fn
+# cannot import stdlib (the judge keeps only meta functions), so basic C-string
+# comparison is part of the meta surface.
+extern fn meta_streq(u8* a, u8* b)              -> bool
+extern fn meta_str_ends_with(u8* s, u8* suffix) -> bool

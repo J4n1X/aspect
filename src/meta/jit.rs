@@ -22,7 +22,8 @@ use inkwell::OptimizationLevel;
 
 use crate::codegen::CodeGenerator;
 use crate::lexer::Position;
-use crate::parser::{Function, MetaKind, Program};
+use crate::parser::{Function, FunctionBody, MetaKind, Program};
+use crate::symbol::module::Visibility;
 use crate::target::TargetSpec;
 
 use super::{query::QueryIndex, RawJudgment};
@@ -40,8 +41,24 @@ enum HandleData {
     ExprList(Vec<Position>),
     Expr(Position),
     Pos(Position),
+    /// A function and its metadata (a method's name is the mangled `Type$method`).
+    Fn(FnInfo),
+    FnList(Vec<FnInfo>),
     /// The single judgment accumulator (the rule's out-channel).
     Judgments,
+}
+
+/// The snapshot of a function's metadata behind a `Fn` handle.
+#[derive(Clone)]
+struct FnInfo {
+    /// Mangled name (`Type$method` for a method), matching `call_sites_of` keys.
+    name: String,
+    is_public: bool,
+    is_export: bool,
+    is_extern: bool,
+    is_method: bool,
+    param_count: u64,
+    pos: Position,
 }
 
 /// Per-invocation state behind the `meta_*` builtins. Owns an arena of handles,
@@ -52,6 +69,12 @@ struct MetaCtx {
     instantiations: HashMap<u32, Vec<Position>>,
     struct_names: HashMap<u32, String>,
     struct_ids: HashMap<String, u32>,
+    /// Every function in the program, in declaration order.
+    functions: Vec<FnInfo>,
+    /// struct id → its methods (deterministic, name-sorted).
+    struct_methods: HashMap<u32, Vec<FnInfo>>,
+    /// callee name → its direct call sites (mangled `Type$method` for methods).
+    call_sites: HashMap<String, Vec<Position>>,
     source_files: Vec<PathBuf>,
     /// Strings handed back as `u8*`, kept alive for the invocation.
     strings: Vec<CString>,
@@ -186,6 +209,107 @@ extern "C" fn meta_type_struct_name(handle: u64) -> *const u8 {
     })
 }
 
+extern "C" fn meta_type_struct_methods(handle: u64) -> u64 {
+    with_ctx(|c| {
+        let methods = match c.get(handle) {
+            Some(HandleData::Type(id)) => c.struct_methods.get(id).cloned().unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        c.push(HandleData::FnList(methods))
+    })
+}
+
+extern "C" fn meta_program_functions(_prog: u64) -> u64 {
+    with_ctx(|c| {
+        let fns = c.functions.clone();
+        c.push(HandleData::FnList(fns))
+    })
+}
+
+extern "C" fn meta_program_call_sites_of(_prog: u64, name: *const u8) -> u64 {
+    let name = read_cstr(name);
+    with_ctx(|c| {
+        let sites = c.call_sites.get(&name).cloned().unwrap_or_default();
+        c.push(HandleData::ExprList(sites))
+    })
+}
+
+extern "C" fn meta_fnlist_count(handle: u64) -> u64 {
+    with_ctx(|c| match c.get(handle) {
+        Some(HandleData::FnList(v)) => v.len() as u64,
+        _ => 0,
+    })
+}
+
+extern "C" fn meta_fnlist_at(handle: u64, i: u64) -> u64 {
+    with_ctx(|c| {
+        let f = match c.get(handle) {
+            Some(HandleData::FnList(v)) => v.get(i as usize).cloned(),
+            _ => None,
+        };
+        match f {
+            Some(fi) => c.push(HandleData::Fn(fi)),
+            None => 0,
+        }
+    })
+}
+
+extern "C" fn meta_fn_name(handle: u64) -> *const u8 {
+    with_ctx(|c| {
+        let name = match c.get(handle) {
+            Some(HandleData::Fn(f)) => Some(f.name.clone()),
+            _ => None,
+        };
+        c.intern_string(name.unwrap_or_default())
+    })
+}
+
+extern "C" fn meta_fn_is_public(handle: u64) -> bool {
+    with_ctx(|c| matches!(c.get(handle), Some(HandleData::Fn(f)) if f.is_public))
+}
+
+extern "C" fn meta_fn_is_export(handle: u64) -> bool {
+    with_ctx(|c| matches!(c.get(handle), Some(HandleData::Fn(f)) if f.is_export))
+}
+
+extern "C" fn meta_fn_is_extern(handle: u64) -> bool {
+    with_ctx(|c| matches!(c.get(handle), Some(HandleData::Fn(f)) if f.is_extern))
+}
+
+extern "C" fn meta_fn_is_method(handle: u64) -> bool {
+    with_ctx(|c| matches!(c.get(handle), Some(HandleData::Fn(f)) if f.is_method))
+}
+
+extern "C" fn meta_fn_param_count(handle: u64) -> u64 {
+    with_ctx(|c| match c.get(handle) {
+        Some(HandleData::Fn(f)) => f.param_count,
+        _ => 0,
+    })
+}
+
+extern "C" fn meta_fn_pos(handle: u64) -> u64 {
+    with_ctx(|c| {
+        let pos = match c.get(handle) {
+            Some(HandleData::Fn(f)) => Some(f.pos),
+            _ => None,
+        };
+        match pos {
+            Some(p) => c.push(HandleData::Pos(p)),
+            None => 0,
+        }
+    })
+}
+
+// String utilities over C strings — rule fns cannot import stdlib (the judge
+// keeps only meta functions), so basic `u8*` comparison is provided here.
+extern "C" fn meta_streq(a: *const u8, b: *const u8) -> bool {
+    read_cstr(a) == read_cstr(b)
+}
+
+extern "C" fn meta_str_ends_with(s: *const u8, suffix: *const u8) -> bool {
+    read_cstr(s).ends_with(read_cstr(suffix).as_str())
+}
+
 extern "C" fn meta_judgments_new() -> u64 {
     with_ctx(|c| c.push(HandleData::Judgments))
 }
@@ -201,6 +325,18 @@ extern "C" fn meta_judgment_error(_js: u64, pos: u64, msg: *const u8) {
 }
 
 extern "C" fn meta_judgment_warn(_js: u64, pos: u64, msg: *const u8) {
+    let msg = read_cstr(msg);
+    with_ctx(|c| {
+        if let Some(HandleData::Pos(p)) = c.get(pos) {
+            let p = *p;
+            c.judgments.push(RawJudgment::report(p, msg));
+        }
+    });
+}
+
+// `info` currently shares the non-fatal `Report` severity with `warn` (there is
+// no distinct Info tier yet).
+extern "C" fn meta_judgment_info(_js: u64, pos: u64, msg: *const u8) {
     let msg = read_cstr(msg);
     with_ctx(|c| {
         if let Some(HandleData::Pos(p)) = c.get(pos) {
@@ -234,9 +370,24 @@ fn extern_bindings() -> Vec<(&'static str, usize)> {
         ("meta_pos_column", meta_pos_column as *const () as usize),
         ("meta_pos_file", meta_pos_file as *const () as usize),
         ("meta_type_struct_name", meta_type_struct_name as *const () as usize),
+        ("meta_type_struct_methods", meta_type_struct_methods as *const () as usize),
+        ("meta_program_functions", meta_program_functions as *const () as usize),
+        ("meta_program_call_sites_of", meta_program_call_sites_of as *const () as usize),
+        ("meta_fnlist_count", meta_fnlist_count as *const () as usize),
+        ("meta_fnlist_at", meta_fnlist_at as *const () as usize),
+        ("meta_fn_name", meta_fn_name as *const () as usize),
+        ("meta_fn_is_public", meta_fn_is_public as *const () as usize),
+        ("meta_fn_is_export", meta_fn_is_export as *const () as usize),
+        ("meta_fn_is_extern", meta_fn_is_extern as *const () as usize),
+        ("meta_fn_is_method", meta_fn_is_method as *const () as usize),
+        ("meta_fn_param_count", meta_fn_param_count as *const () as usize),
+        ("meta_fn_pos", meta_fn_pos as *const () as usize),
+        ("meta_streq", meta_streq as *const () as usize),
+        ("meta_str_ends_with", meta_str_ends_with as *const () as usize),
         ("meta_judgments_new", meta_judgments_new as *const () as usize),
         ("meta_judgment_error", meta_judgment_error as *const () as usize),
         ("meta_judgment_warn", meta_judgment_warn as *const () as usize),
+        ("meta_judgment_info", meta_judgment_info as *const () as usize),
         ("meta_judgments_count", meta_judgments_count as *const () as usize),
     ]
 }
@@ -259,12 +410,48 @@ fn build_ctx(program: &Program, anchor_id: u32, query: &QueryIndex) -> MetaCtx {
         struct_ids.insert(s.name.clone(), s.id);
         instantiations.insert(s.id, query.instantiations_of(s.id).to_vec());
     }
+
+    // A function is a method iff its (mangled) name is one a struct lowered to.
+    let method_names: std::collections::HashSet<&str> = program
+        .symbols
+        .structs()
+        .flat_map(|s| s.methods.values().map(|m| m.mangled_name.as_str()))
+        .collect();
+    let to_info = |f: &Function| FnInfo {
+        name: f.proto.name.clone(),
+        is_public: f.proto.vis == Visibility::Public,
+        is_export: f.proto.export,
+        is_extern: matches!(f.body, FunctionBody::Extern),
+        is_method: method_names.contains(f.proto.name.as_str()),
+        param_count: f.proto.params.len() as u64,
+        pos: f.proto.pos,
+    };
+    let functions: Vec<FnInfo> = program.functions.iter().map(to_info).collect();
+    let by_name: HashMap<&str, &FnInfo> =
+        functions.iter().map(|fi| (fi.name.as_str(), fi)).collect();
+
+    // Per-struct methods, name-sorted so `FnList.at(i)` is deterministic
+    // (`StructInfo::methods` is a HashMap).
+    let mut struct_methods: HashMap<u32, Vec<FnInfo>> = HashMap::new();
+    for s in program.symbols.structs() {
+        let mut ms: Vec<FnInfo> = s
+            .methods
+            .values()
+            .filter_map(|m| by_name.get(m.mangled_name.as_str()).map(|fi| (*fi).clone()))
+            .collect();
+        ms.sort_by(|a, b| a.name.cmp(&b.name));
+        struct_methods.insert(s.id, ms);
+    }
+
     let _ = anchor_id; // the anchor is passed as a handle, not baked into the snapshot
     MetaCtx {
         arena: Vec::new(),
         instantiations,
         struct_names,
         struct_ids,
+        functions,
+        struct_methods,
+        call_sites: query.call_sites().clone(),
         source_files: program.source_files.clone(),
         strings: Vec::new(),
         judgments: Vec::new(),

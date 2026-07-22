@@ -89,6 +89,10 @@ Options:
 - `--target <TRIPLE>` - Compilation target triple (default: the host). Selects the
   LLVM target machine and seeds the `OS_*`/`ARCH_*` preprocessor defines. See
   [Cross-Compilation](#cross-compilation) below.
+- `--max-rounds <N>` - Maximum type-check elaboration rounds (default: 16). The
+  checker re-runs to a fixpoint so metaprogramming transforms can rewrite the AST;
+  a program that never settles within `N` rounds is an error. Ordinary code needs
+  a single round, so this only matters once transforms are in use.
 
 Examples:
 ```bash

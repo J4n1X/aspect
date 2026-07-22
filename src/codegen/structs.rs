@@ -131,6 +131,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             TypeBase::FnPtr(_) => Ok(u64::from(target_data.get_pointer_byte_size(None))),
             // An enum is represented as an `i32` — 4 bytes.
             TypeBase::Enum(_) => Ok(4),
+            // Never reaches codegen — an unresolved obligation is a fatal error.
+            TypeBase::Unresolved => {
+                unreachable!("unresolved type reached codegen — an unresolved obligation escaped the checker")
+            }
         }
     }
 
