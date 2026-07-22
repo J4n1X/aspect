@@ -1,0 +1,15 @@
+# expected: "rule", "singleton", "more than once"
+# compile_args: "-I", "tests/modules"
+#-
+  `public rule` reaches the whole program: it counts Widget's construction in
+  both this entry and the imported `widget_mod`, sees two, and errors — the
+  same rule that passes when private (see rule_module_scoped.ap).
+-#
+$import widget_mod
+
+public rule Widget singleton
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Widget w = Widget { x = 1 }
+    return w.x + make()
+}

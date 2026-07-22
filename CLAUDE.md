@@ -6,7 +6,7 @@ Developer guide for the Aspect compiler — the conventions, architecture, and r
 
 The Aspect compiler: a statically-typed, C-like systems language compiled to LLVM IR. Rust workspace over Inkwell 0.9 / LLVM 19.1. Binary `aspc`, library crate `aspect`, proc-macro crate `aspect-macros`, sources use `.ap`. (The directory is named `tjlb-rust` for historical reasons — the language was renamed to Aspect.)
 
-Before touching compiler internals, read `doc/compiler/00-overview.md`; before writing Aspect code, skim `doc/handbook.md`.
+Before touching compiler internals, invoke the `aspect-architecture` skill; before writing Aspect code, invoke the `aspect-handbook` skill. Both are condensed, token-cheap stand-ins for `doc/compiler/00-overview.md` and `doc/handbook.md` respectively — read the full doc only for what the skill tells you it doesn't cover.
 
 ## Commands
 
@@ -63,6 +63,7 @@ A behaviour change is not done until the docs match:
 - `doc/compiler/*.md` — one doc per stage; `09-syntax-reference.md` must reflect every syntax change, `07-testing.md` documents the harness.
 - `doc/plans/` — active design docs; move completed ones to `doc/solved/`.
 - `README.md` — CLI flags and user-visible features.
+- `.claude/skills/aspect-handbook/SKILL.md` and `.claude/skills/aspect-architecture/SKILL.md` — condensed derivatives of the handbook/overview docs above; a change big enough to touch those source docs usually needs a matching edit here too, or the skill drifts out of sync and starts misleading agents.
 
 ## Language design review (repo rule)
 

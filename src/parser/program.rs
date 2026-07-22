@@ -69,15 +69,14 @@ impl Parser {
 
             // `rule <anchor> <fn>` — a soft keyword: a type or global literally
             // named `rule` still parses (`rule x = …`), so a rule is detected by
-            // lookahead (`Self::is_rule_decl`), before the item gates below. A
-            // rule is always whole-program and carries no linkage — reject any
-            // modifiers that leaked onto it.
+            // lookahead (`Self::is_rule_decl`), before the item gates below.
+            // `public` governs reach (whole-program vs the declaring module,
+            // like `public type`); `export`/linkage make no sense on a rule.
             if self.is_rule_decl() {
                 Self::reject_attrs(&attrs, "a rule declaration")?;
-                if vis == Visibility::Public || export {
+                if export {
                     return Err(ParserError::UnexpectedToken(
-                        "a rule cannot be public or export — rules are always whole-program"
-                            .to_string(),
+                        "a rule cannot be export".to_string(),
                         vis_pos,
                     ));
                 }
@@ -87,7 +86,7 @@ impl Parser {
                         *kw_pos,
                     ));
                 }
-                rules.push(self.parse_rule_decl()?);
+                rules.push(self.parse_rule_decl(vis)?);
                 skip_nl!();
                 continue;
             }
@@ -349,7 +348,7 @@ impl Parser {
     /// keyword (guaranteed by [`Self::is_rule_decl`]). The anchor is a
     /// type-struct name or an `@attribute`; `checker_fn` names a builtin rule.
     #[parse_rule]
-    fn parse_rule_decl(&mut self) -> Result<crate::parser::RuleDecl, ParserError> {
+    fn parse_rule_decl(&mut self, vis: Visibility) -> Result<crate::parser::RuleDecl, ParserError> {
         use crate::parser::{RuleAnchor, RuleDecl};
         let pos = pos!();
         self.advance(); // the `rule` soft keyword (not a real keyword)
@@ -364,6 +363,7 @@ impl Parser {
         Ok(RuleDecl {
             anchor,
             checker_fn,
+            vis,
             pos,
         })
     }
@@ -607,12 +607,35 @@ mod tests {
         assert!(program.global_vars.iter().any(|g| g.name == "g"));
     }
 
-    /// A rule may not carry `public` — rejected at parse time.
+    /// A rule may carry `public` — it makes the rule whole-program (vs. its
+    /// declaring module by default), mirroring `public type`.
     #[test]
-    fn public_rule_is_rejected() {
-        let tokens =
-            crate::lexer::tokenize("public rule Config singleton\nfn f() -> i32 {\n    return 0\n}".to_string())
-                .expect("lex");
+    fn public_rule_parses_whole_program() {
+        let program = parse("public rule Config singleton\nfn f() -> i32 {\n    return 0\n}");
+        assert_eq!(program.rules.len(), 1);
+        assert_eq!(
+            program.rules[0].vis,
+            crate::symbol::module::Visibility::Public
+        );
+    }
+
+    /// A private (bare) rule defaults to module scope.
+    #[test]
+    fn bare_rule_is_module_scoped() {
+        let program = parse("rule Config singleton\nfn f() -> i32 {\n    return 0\n}");
+        assert_eq!(
+            program.rules[0].vis,
+            crate::symbol::module::Visibility::Private
+        );
+    }
+
+    /// A rule still may not carry `export` — there is no linkage on a rule.
+    #[test]
+    fn export_rule_is_rejected() {
+        let tokens = crate::lexer::tokenize(
+            "export rule Config singleton\nfn f() -> i32 {\n    return 0\n}".to_string(),
+        )
+        .expect("lex");
         assert!(Parser::new(tokens).parse_program().is_err());
     }
 

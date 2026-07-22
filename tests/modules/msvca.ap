@@ -1,0 +1,9 @@
+$module msvca
+$import mcfg
+
+# An in-function construction of Config, in module `msvca`. A module-scoped rule
+# in another file must not see this.
+public fn a_val() -> i32 {
+    Config c = Config { x = 5 }
+    return c.x
+}

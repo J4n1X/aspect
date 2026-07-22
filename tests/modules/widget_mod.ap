@@ -1,0 +1,12 @@
+$module widget_mod
+
+public type Widget {
+    public i32 x
+}
+
+# Constructs a Widget inside this module — a second, program-wide construction
+# that a module-scoped rule in another file must not see.
+public fn make() -> i32 {
+    Widget w = Widget { x = 2 }
+    return w.x
+}

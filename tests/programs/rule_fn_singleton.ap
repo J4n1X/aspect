@@ -13,9 +13,7 @@ rule fn only_one(Program p, Type anchor) -> Judgments {
     Judgments js = Judgments.new()
     u8* name = anchor.struct_name()
 
-    # Construction inside a function body can run more than once (a loop, or a
-    # helper called repeatedly), so a singleton forbids it outright — the only
-    # legal construction is a global initializer, which runs exactly once.
+    # Forbid any local construction. 
     ExprList in_funcs = p.local_instantiations_of(name)
     if in_funcs.count() > 0 as u64 {
         js.error(in_funcs.at(0 as u64).pos(), "a singleton may be constructed only in a global initializer, not inside a function")

@@ -1,0 +1,5 @@
+$module mcfg
+
+public type Config {
+    public i32 x
+}

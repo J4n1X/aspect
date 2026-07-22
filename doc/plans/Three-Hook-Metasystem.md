@@ -288,11 +288,17 @@ graph LR
 
 ### Phase 1 — Round-based elaboration (replaces the obligation-solver refactor; see §14.1), no user handlers
 
-- [ ] Obligation/handler registry type + rounds driver loop as a library function (used by `build_program` *and* the test harness); bounded-rounds compiler flag. (M)
-- [ ] Thread the registry into the checker at the demand sites (`assert_coercible`, `UndefinedFunction`, `UnknownField` in `src/typechecker/checker/expressions.rs`) so handlers fire mid-pass at the `&mut` node; count rewrites per round. (M)
-- [ ] **Poison/`Unresolved` sentinel type** to suppress cascade errors downstream of an unresolved demand (today `VOID` placeholders generate spurious secondaries). (M)
-- [ ] Idempotence guard test: parse a representative corpus file, check, clone the `Program`, re-check the clone with a fresh `TypeChecker`, `assert_eq!`. (S)
-- [ ] Regression: existing error suite unchanged (behaviourally a no-op with no handlers registered).
+**Landed 2026-07-22 as Transforms Slice 1 (inert).** The whole engine is present
+but a behavioural no-op: no handlers are registered, `rewrites()` is always 0, the
+loop runs exactly one round, and the corpus stays byte-for-byte green. See
+`doc/plans/Transforms-Plan.md` and `doc/compiler/05-typechecker.md` (§Round-based
+elaboration).
+
+- [x] Obligation/handler registry type + rounds driver loop as a library function (`src/typechecker/elaborate.rs`: `elaborate_program`, `HandlerRegistry`, `Obligation`, `Elaboration`) used by `build_program` *and* the test harness; bounded-rounds flag (`--max-rounds`, default `DEFAULT_MAX_ROUNDS = 16`). (M)
+- [~] Thread the registry into the checker + count rewrites per round: the `rewrites` counter and the `try_repair` consultation are wired at the **coercion** demand site (`check_expression`'s `_` arm). `UndefinedFunction` / `UnknownField` land with their repair handlers in Phase 4 (§4.2 "and later"; `check_call`/`resolve_field` must first be refactored to carry the `&mut` node — wiring inert non-splicing lookups there now would break under Phase 4). Actual mid-pass firing is Phase 4. (M)
+- [x] **Poison/`Unresolved` sentinel type** (`TypeBase::Unresolved` / `LangType::UNRESOLVED`) + codegen `unreachable!` arms + cascade-suppression guards (`types_coercible`, `resolve_field`). Present but never stamped while inert. (M)
+- [x] Idempotence guard test `typecheck_is_idempotent_on_recheck` (integration tests): check → clone → re-check with a fresh `TypeChecker` → `assert_eq!`, over a feature-diverse set (methods/`MethodCall` lowering, value blocks, enums, fn-ptr vtables, attributes, stdlib import). (S)
+- [x] Regression: full suite green at -O0/-O2 (behaviourally a no-op with no handlers registered).
 
 ### Phase 2a — Rules as Rust builtins (no JIT; shippable governance)
 

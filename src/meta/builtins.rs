@@ -37,14 +37,19 @@ pub fn suggest(name: &str) -> Option<String> {
 /// "Construction" is a struct literal or an `alloc` of the type (see
 /// [`QueryIndex::instantiations_of`] for the counted set and its v1 blind
 /// spots).
-fn singleton(query: &QueryIndex<'_>, anchor: &ResolvedAnchor, decl_pos: Position) -> Vec<RawJudgment> {
+fn singleton(
+    query: &QueryIndex<'_>,
+    anchor: &ResolvedAnchor,
+    decl_pos: Position,
+    module: Option<&str>,
+) -> Vec<RawJudgment> {
     let ResolvedAnchor::Type(id) = anchor else {
         return vec![RawJudgment::error(
             decl_pos,
             "the `singleton` rule needs a type anchor, e.g. `rule Config singleton`".to_string(),
         )];
     };
-    let sites = query.instantiations_of(*id);
+    let sites = query.in_module(query.instantiations_of(*id), module);
     if sites.len() <= 1 {
         return Vec::new();
     }
@@ -67,16 +72,22 @@ fn singleton(query: &QueryIndex<'_>, anchor: &ResolvedAnchor, decl_pos: Position
 /// site of its anchor — the carriers of an `@attribute`, or the construction
 /// sites of a type. Proves attribute-anchor resolution and the report channel;
 /// a zero-carrier anchor produces nothing and compiles clean.
-fn audit(query: &QueryIndex<'_>, anchor: &ResolvedAnchor, _decl_pos: Position) -> Vec<RawJudgment> {
+fn audit(
+    query: &QueryIndex<'_>,
+    anchor: &ResolvedAnchor,
+    _decl_pos: Position,
+    module: Option<&str>,
+) -> Vec<RawJudgment> {
     match anchor {
-        ResolvedAnchor::Attribute(carriers) => carriers
+        ResolvedAnchor::Attribute(carriers) => query
+            .in_module(carriers, module)
             .iter()
             .map(|pos| RawJudgment::report(*pos, "audited: site carries the anchored attribute".to_string()))
             .collect(),
         ResolvedAnchor::Type(id) => {
             let name = query.struct_name(*id);
             query
-                .instantiations_of(*id)
+                .in_module(query.instantiations_of(*id), module)
                 .iter()
                 .map(|pos| RawJudgment::report(*pos, format!("audited: '{name}' constructed here")))
                 .collect()

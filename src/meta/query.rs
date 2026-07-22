@@ -114,6 +114,30 @@ impl<'a> QueryIndex<'a> {
         &self.program.symbols.struct_info(id).name
     }
 
+    /// The module a position belongs to (`""` for the anonymous root module).
+    #[must_use]
+    pub fn module_of(&self, pos: Position) -> &str {
+        self.program
+            .file_modules
+            .get(pos.file_id as usize)
+            .map_or("", String::as_str)
+    }
+
+    /// Restrict `positions` to those in `module`, or return all when `module` is
+    /// `None` (a `public` rule, which is whole-program). This is how a rule's
+    /// visibility scopes what it judges.
+    #[must_use]
+    pub fn in_module(&self, positions: &[Position], module: Option<&str>) -> Vec<Position> {
+        match module {
+            None => positions.to_vec(),
+            Some(m) => positions
+                .iter()
+                .copied()
+                .filter(|p| self.module_of(*p) == m)
+                .collect(),
+        }
+    }
+
     fn record_attrs(&mut self, attrs: &[Attribute]) {
         for attr in attrs {
             self.attr_carriers

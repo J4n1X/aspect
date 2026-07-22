@@ -358,14 +358,18 @@ pub enum RuleAnchor {
 }
 
 /// A `rule <anchor> <checker_fn>` declaration: a post-typecheck judgment run
-/// over the whole typed program by [`crate::meta::run_rules`]. In Phase 2a
+/// over the typed program by [`crate::meta::run_rules`]. In Phase 2a
 /// `checker_fn` names a compiler **builtin** rule (there is no JIT yet); a
 /// later phase lets it name a user-authored Aspect function. Rules modify
 /// nothing — they only emit diagnostics — so the node carries no body.
+///
+/// Visibility governs *reach*, mirroring `public type`: a private rule judges
+/// only sites in its own module; a `public` rule judges the whole program.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuleDecl {
     pub anchor: RuleAnchor,
     pub checker_fn: String,
+    pub vis: Visibility,
     pub pos: Position,
 }
 

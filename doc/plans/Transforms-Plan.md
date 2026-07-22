@@ -1,6 +1,8 @@
 # Transforms (Hook #2) — First-Slice Plan
 
-**Status:** Plan / interface-first design. No compiler code written yet. This
+**Status:** Slice 1 landed 2026-07-22 (the inert round engine — see §5). Slice 2
+(the `transform` / `allow coercion` surface) is still interface-first design and
+gated on the owner decisions in §6 plus a `language-designer` review. This
 plans hook #2 of the three-hook metasystem (`doc/plans/Three-Hook-Metasystem.md`
 §6, §13, §14.1, §15 Phase 1 + Phase 4), building on the rules work already
 landed (`doc/compiler/11-rules.md`, `Meta-Module-JIT-Interface.md` §10). Like
@@ -151,12 +153,20 @@ splices it in place. The scalar-ABI trampoline pattern carries over unchanged
 
 ## 5. Slices (incremental de-risking)
 
-- **Slice 1 — round engine, no handlers (inert).** Land the rounds driver +
-  demand-site consultation (registry empty) + the poison sentinel + the
-  idempotence guard test + the bounded-rounds flag. **Behaviourally a no-op:**
-  the whole corpus must stay green at -O0/-O2, and the idempotence test must
-  pass. This isolates and proves the scary checker restructure *before any
-  handler exists* — the reason transforms are the safer first slice.
+- **Slice 1 — round engine, no handlers (inert). ✅ Landed 2026-07-22.** The
+  rounds driver (`src/typechecker/elaborate.rs`), an empty handler registry +
+  `try_repair` consultation at the coercion demand site, the `Unresolved` poison
+  sentinel, the `typecheck_is_idempotent_on_recheck` guard, and the `--max-rounds`
+  flag. **Behaviourally a no-op:** the whole corpus stays green at -O0/-O2 and the
+  idempotence guard passes. This isolated and proved the scary checker
+  restructure *before any handler exists*. *Refinement made during implementation:*
+  only the coercion demand site is consulted now — `UndefinedFunction` /
+  `UnknownField` need `check_call` / `resolve_field` refactored to carry the `&mut`
+  node, which is Slice 2 work for their repair handlers (matches §4.2's
+  "`assert_coercible`, and later `UndefinedFunction` / `UnknownField`"); wiring
+  non-splicing lookups there now would be dead plumbing that breaks in Slice 2. The
+  obligation-recording + final-round undischarged-obligation diagnostic are
+  likewise Slice 2 (they only bite once a handler can defer a site).
 - **Slice 2 — the coercion transform.** The handler registry (one-per-key), the
   `transform From -> To { fn handle(...) }` surface, the `allow coercion` gate,
   the minimal write primitive (build a `MethodCall`), and the judge wiring to

@@ -1,0 +1,168 @@
+# expected: "rule", "leak", "forbidden", "C ABI"
+# compile_args: "-I", "lib"
+#-
+  A resource-safety *dialect*, enforced entirely by rules (hook #3) written in
+  Aspect and JIT-compiled over the whole program. No singleton counting here —
+  every rule cross-references two independent program facts to catch a real bug
+  class that a single dictionary lookup could not. The program below trips all
+  four on purpose; the compiler answers with four governance verdicts.
+
+  The type under governance is `Conn`, a connection handle. The dialect says:
+
+    1. linear          — a Conn is a *linear* resource: every open() must be
+                         balanced by exactly one close(). Fewer closes than
+                         opens is a leak; more is a double-free. The rule does
+                         not hard-code the method names — it *discovers* the
+                         open/close pair from the type's own method set and then
+                         compares their call sites.
+    2. no_raw_free     — connections are released only through close(); calling
+                         the raw allocator's free() anywhere is forbidden.
+    3. sealed_boundary — a `public extern` re-exports a raw C symbol as safe API,
+                         punching a hole in the abstraction. Banned.
+    4. dead_api        — a *warning* (not an error): a *public* method of Conn
+                         that nothing ever calls is dead API surface. Private
+                         helpers are exempt — they aren't part of the surface.
+
+  Run it standalone to see all four, including the warning:
+      cargo run -- compile tests/programs/failures/rule_fn_resource_safety.ap -I lib
+-#
+
+# ── The governed type ────────────────────────────────────────────────────────
+
+type Conn {
+    public i32 fd
+
+    # The blessed factory. Its name ends in `$open` once mangled, which is how
+    # the `linear` rule finds it without being told.
+    public fn open(i32 fd) -> Conn {
+        return Conn { fd = fd }
+    }
+    public fn close(this) -> i32 {
+        return 0
+    }
+    public fn read(this) -> i32 {
+        return this.fd
+    }
+    # Public and uncalled — the `dead_api` rule flags this as dead API surface.
+    public fn flush(this) -> i32 {
+        return 0
+    }
+    # Private and also uncalled, but deliberately NOT flagged: a private helper
+    # is not part of the public surface, and `dead_api` reads real method
+    # visibility (MethodSig.vis) through `is_public()`.
+    fn recount(this) -> i32 {
+        return this.fd
+    }
+}
+
+# A raw allocator, and a raw C entry point deliberately re-exported as public —
+# `sealed_boundary` flags the latter.
+extern fn malloc(u64 n) -> u0*
+extern fn free(u0* p) -> u0
+public extern fn raw_socket(i32 domain) -> i32
+
+# ── The dialect: four rules, each a JIT'd Aspect metaprogram ──────────────────
+
+# 1. Linear resources: open sites must balance close sites. Discovers the
+#    open/close method names from the anchor's own method set, then compares
+#    their call sites — the imbalance is reported at the *offending* sites.
+rule fn linear(Program p, Type anchor) -> Judgments {
+    Judgments js = Judgments.new()
+
+    u8* open_name = ""
+    u8* close_name = ""
+    FnList methods = anchor.struct_methods()
+    for (u64 i = 0; i < methods.count(); i += 1 as u64) {
+        Fn m = methods.at(i)
+        if str_ends_with(m.name(), "$open") {
+            open_name = m.name()
+        }
+        if str_ends_with(m.name(), "$close") {
+            close_name = m.name()
+        }
+    }
+
+    ExprList opens = p.call_sites_of(open_name)
+    ExprList closes = p.call_sites_of(close_name)
+
+    # More opens than closes: the surplus opens are never closed — a leak.
+    if opens.count() > closes.count() {
+        for (u64 i = closes.count(); i < opens.count(); i += 1 as u64) {
+            js.error(opens.at(i).pos(), "connection opened here is never closed; this resource may leak (linear rule)")
+        }
+    }
+    # More closes than opens: the surplus closes free something twice.
+    if closes.count() > opens.count() {
+        for (u64 i = opens.count(); i < closes.count(); i += 1 as u64) {
+            js.error(closes.at(i).pos(), "close() here has no matching open(); possible double-free (linear rule)")
+        }
+    }
+
+    return js
+}
+
+# 2. No raw free(): the deallocator is off-limits — release via Conn.close().
+rule fn no_raw_free(Program p, Type anchor) -> Judgments {
+    Judgments js = Judgments.new()
+    ExprList frees = p.call_sites_of("free")
+    for (u64 i = 0; i < frees.count(); i += 1 as u64) {
+        js.error(frees.at(i).pos(), "calling raw free() is forbidden; release the resource through Conn.close() (no_raw_free rule)")
+    }
+    return js
+}
+
+# 3. Sealed boundary: a `public extern` leaks the raw C ABI into the safe API.
+rule fn sealed_boundary(Program p, Type anchor) -> Judgments {
+    Judgments js = Judgments.new()
+    FnList fns = p.functions()
+    for (u64 i = 0; i < fns.count(); i += 1 as u64) {
+        Fn f = fns.at(i)
+        if f.is_extern() {
+            if f.is_public() {
+                js.error(f.pos(), "public extern function leaks the raw C ABI into the safe public API; wrap it in a checked function (sealed_boundary rule)")
+            }
+        }
+    }
+    return js
+}
+
+# 4. Dead API (warning): a *public* method of the governed type that nothing
+#    ever calls is dead surface area. Cross-references the type's own methods
+#    against the program's call sites; private helpers are exempt, since
+#    `is_public()` reports each method's real visibility.
+rule fn dead_api(Program p, Type anchor) -> Judgments {
+    Judgments js = Judgments.new()
+    FnList methods = anchor.struct_methods()
+    for (u64 i = 0; i < methods.count(); i += 1 as u64) {
+        Fn m = methods.at(i)
+        if m.is_public() {
+            ExprList uses = p.call_sites_of(m.name())
+            if uses.count() == 0 as u64 {
+                js.warn(m.pos(), "this public method is never called anywhere; dead API surface (dead_api rule)")
+            }
+        }
+    }
+    return js
+}
+
+rule Conn linear
+rule Conn no_raw_free
+rule Conn sealed_boundary
+rule Conn dead_api
+
+# ── The offending program ─────────────────────────────────────────────────────
+# Three opens, one close (two leaks); a raw free(); and a public extern above.
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Conn a = Conn.open(1)
+    Conn b = Conn.open(2)
+    Conn c = Conn.open(3)
+
+    i32 got = a.read()
+    a.close()
+
+    u0* p = malloc(8 as u64)
+    free(p)
+
+    return got + b.fd + c.fd
+}

@@ -23,6 +23,7 @@ use std::path::PathBuf;
 use crate::lexer::{LangType, Position, TypeBase};
 use crate::parser::ast::{ExprKind, Expression, FunctionBody};
 use crate::parser::{MetaKind, Program, RuleAnchor};
+use crate::symbol::module::Visibility;
 use query::QueryIndex;
 
 /// The meta-only gate: `std/meta` types and meta functions (`rule fn`) may be
@@ -170,10 +171,11 @@ pub enum ResolvedAnchor {
 }
 
 /// A builtin rule: whole-program view + resolved anchor + the declaration
-/// position (for anchor-level diagnostics) → judgments. The anchor is data the
-/// builtin consults rather than a fixed argument shape, so the same builtins
+/// position (for anchor-level diagnostics) + the module to restrict judgments to
+/// (`None` for a `public`, whole-program rule) → judgments. The anchor is data
+/// the builtin consults rather than a fixed argument shape, so the same builtins
 /// port to the Phase 2b JIT'd `fn(Program) -> Judgments` form unchanged.
-pub type RuleFn = fn(&QueryIndex<'_>, &ResolvedAnchor, Position) -> Vec<RawJudgment>;
+pub type RuleFn = fn(&QueryIndex<'_>, &ResolvedAnchor, Position, Option<&str>) -> Vec<RawJudgment>;
 
 /// Run every declared `rule` over the typed `program`, collecting judgments.
 /// Modifies nothing. Validation failures (unknown type anchor, unknown builtin)
@@ -200,6 +202,19 @@ pub fn run_rules(program: &Program) -> Vec<Judgment> {
         }
         seen.push(key);
 
+        // A private rule judges only its declaring module; a `public` rule the
+        // whole program (mirrors `public type` reach).
+        let rule_module: Option<&str> = if decl.vis == Visibility::Public {
+            None
+        } else {
+            Some(
+                program
+                    .file_modules
+                    .get(decl.pos.file_id as usize)
+                    .map_or("", String::as_str),
+            )
+        };
+
         let anchor = match &decl.anchor {
             RuleAnchor::Type(name) => match resolve_type_anchor(program, name) {
                 Some(id) => ResolvedAnchor::Type(id),
@@ -223,7 +238,7 @@ pub fn run_rules(program: &Program) -> Vec<Judgment> {
         // Resolution order: a compiler builtin first, then a user-authored
         // `rule fn`, then error.
         if let Some(rule_fn) = builtins::lookup(&decl.checker_fn) {
-            for raw in rule_fn(&query, &anchor, decl.pos) {
+            for raw in rule_fn(&query, &anchor, decl.pos, rule_module) {
                 out.push(stamp(&decl.checker_fn, raw));
             }
             continue;
@@ -267,7 +282,7 @@ pub fn run_rules(program: &Program) -> Vec<Judgment> {
                 });
                 continue;
             };
-            match jit::run_rule_fn(program, &decl.checker_fn, *id, &query) {
+            match jit::run_rule_fn(program, &decl.checker_fn, *id, &query, rule_module) {
                 Ok(raws) => {
                     for raw in raws {
                         out.push(stamp(&decl.checker_fn, raw));

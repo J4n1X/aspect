@@ -1,0 +1,35 @@
+# expected: "rule", "only_one", "not inside a function"
+# compile_args: "-I", "lib", "-I", "tests/modules"
+#-
+  The same split as meta_module_split.ap, but the rule is `public` — so the JIT
+  meta engine sees the whole program, including msvca/msvcb's in-function Config
+  constructions, and the bombproof singleton rejects them. Proves `public`
+  extends a rule's reach across modules.
+-#
+$import mcfg
+$import msvca
+$import msvcb
+
+Config g_config = Config { x = 1 }
+
+rule fn only_one(Program p, Type anchor) -> Judgments {
+    Judgments js = Judgments.new()
+    u8* name = anchor.struct_name()
+
+    ExprList in_funcs = p.local_instantiations_of(name)
+    if in_funcs.count() > 0 as u64 {
+        js.error(in_funcs.at(0 as u64).pos(), "a singleton may be constructed only in a global initializer, not inside a function")
+    }
+
+    ExprList all = p.instantiations_of(name)
+    if all.count() > 1 as u64 {
+        js.error(all.at(1 as u64).pos(), "a singleton must be constructed at most once")
+    }
+
+    return js
+}
+public rule Config only_one
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return g_config.x + a_val() + b_val()
+}

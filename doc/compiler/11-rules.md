@@ -26,7 +26,10 @@ It **modifies nothing**: it reads the fully-typed `Program` and returns
 (`src/parser/ast.rs`). `rule` is a **soft keyword**: the top-level loop
 (`do_parse_program`) detects it by lookahead (`Parser::is_rule_decl` — `rule`
 followed by `@`, or by two identifiers), so a type or global literally named
-`rule` still parses. A rule takes no `public`/`export`/attributes.
+`rule` still parses. A rule takes no `export`/attributes, but **may take
+`public`**, which governs its *reach* (`RuleDecl::vis`): a bare rule judges only
+its declaring module; `public rule` judges the whole program, mirroring `public
+type`.
 
 `RuleAnchor` is `Type(String)` or `Attribute(String)` — an enum from the start
 so `function`/`module` anchors can be added later without breaking the AST.
@@ -39,8 +42,13 @@ so `function`/`module` anchors can be added later without breaking the AST.
   `checker_fn` up in the builtin registry, then runs it and stamps the rule
   name onto each `Judgment`. Identical declarations are de-duplicated. Unknown
   type anchors and unknown checkers become `Error` judgments (the latter with a
-  Levenshtein did-you-mean). Anchor resolution is a flat, whole-program lookup
-  and does **not** honor `public type` — governance sees all (§8 of the design).
+  Levenshtein did-you-mean). Anchor *resolution* is a flat, whole-program lookup
+  and does **not** honor `public type` (a rule can name any type by name). What
+  the rule *judges* is then scoped by the rule's own visibility: a private rule's
+  query results are restricted to its declaring module (`QueryIndex::in_module`,
+  keyed off `RuleDecl::pos`'s `file_id → file_modules`); a `public` rule sees the
+  whole program. Both the builtin path (`RuleFn` takes the module filter) and the
+  JIT path (`build_ctx` filters its site snapshots) honor it.
 - **`query.rs`** — `QueryIndex::build(&Program)` walks the typed AST once to
   build Tier-1 dictionaries. Phase 2a needs two: `instantiations_of(struct_id)`
   (construction sites — `StructLiteral` and value `alloc` of the type) and

@@ -415,7 +415,12 @@ fn is_meta_function(func: &Function, file_modules: &[String]) -> bool {
             .is_some_and(|m| m == "std/meta")
 }
 
-fn build_ctx(program: &Program, anchor_id: u32, query: &QueryIndex) -> MetaCtx {
+fn build_ctx(program: &Program, anchor_id: u32, query: &QueryIndex, module: Option<&str>) -> MetaCtx {
+    // Site-bearing snapshots are restricted to the rule's module (`None` ⇒
+    // whole-program `public` rule). Name/metadata lookups (struct_names,
+    // functions, methods) stay whole-program so a module-scoped rule can still
+    // resolve a type or find a constructor's name — only the *sites* it counts
+    // are scoped.
     let mut struct_names = HashMap::new();
     let mut struct_ids = HashMap::new();
     let mut instantiations = HashMap::new();
@@ -423,24 +428,33 @@ fn build_ctx(program: &Program, anchor_id: u32, query: &QueryIndex) -> MetaCtx {
     for s in program.symbols.structs() {
         struct_names.insert(s.id, s.name.clone());
         struct_ids.insert(s.name.clone(), s.id);
-        instantiations.insert(s.id, query.instantiations_of(s.id).to_vec());
-        local_instantiations.insert(s.id, query.local_instantiations_of(s.id).to_vec());
+        instantiations.insert(s.id, query.in_module(query.instantiations_of(s.id), module));
+        local_instantiations.insert(
+            s.id,
+            query.in_module(query.local_instantiations_of(s.id), module),
+        );
     }
 
     // A function is a method iff its (mangled) name is one a struct lowered to.
-    let method_names: std::collections::HashSet<&str> = program
+    // A method's visibility lives on its `MethodSig`, not the lowered free
+    // function's proto (which is always Private for methods), so consult that
+    // map for `is_public` — otherwise every method reads as private.
+    let method_vis: HashMap<&str, Visibility> = program
         .symbols
         .structs()
-        .flat_map(|s| s.methods.values().map(|m| m.mangled_name.as_str()))
+        .flat_map(|s| s.methods.values().map(|m| (m.mangled_name.as_str(), m.vis)))
         .collect();
-    let to_info = |f: &Function| FnInfo {
-        name: f.proto.name.clone(),
-        is_public: f.proto.vis == Visibility::Public,
-        is_export: f.proto.export,
-        is_extern: matches!(f.body, FunctionBody::Extern),
-        is_method: method_names.contains(f.proto.name.as_str()),
-        param_count: f.proto.params.len() as u64,
-        pos: f.proto.pos,
+    let to_info = |f: &Function| {
+        let method_vis = method_vis.get(f.proto.name.as_str()).copied();
+        FnInfo {
+            name: f.proto.name.clone(),
+            is_public: method_vis.unwrap_or(f.proto.vis) == Visibility::Public,
+            is_export: f.proto.export,
+            is_extern: matches!(f.body, FunctionBody::Extern),
+            is_method: method_vis.is_some(),
+            param_count: f.proto.params.len() as u64,
+            pos: f.proto.pos,
+        }
     };
     let functions: Vec<FnInfo> = program.functions.iter().map(to_info).collect();
     let by_name: HashMap<&str, &FnInfo> =
@@ -468,7 +482,11 @@ fn build_ctx(program: &Program, anchor_id: u32, query: &QueryIndex) -> MetaCtx {
         struct_ids,
         functions,
         struct_methods,
-        call_sites: query.call_sites().clone(),
+        call_sites: query
+            .call_sites()
+            .iter()
+            .map(|(name, sites)| (name.clone(), query.in_module(sites, module)))
+            .collect(),
         source_files: program.source_files.clone(),
         strings: Vec::new(),
         judgments: Vec::new(),
@@ -486,6 +504,7 @@ pub fn run_rule_fn(
     checker: &str,
     anchor_id: u32,
     query: &QueryIndex,
+    module: Option<&str>,
 ) -> Result<Vec<RawJudgment>, String> {
     // Judge module: a filtered clone (meta functions only), host target, no
     // globaldce so the meta set survives.
@@ -532,7 +551,7 @@ pub fn run_rule_fn(
     }
 
     // Install the per-invocation context and seed the Program + Type handles.
-    let mut ctx = build_ctx(program, anchor_id, query);
+    let mut ctx = build_ctx(program, anchor_id, query, module);
     let prog_handle = ctx.push(HandleData::Program);
     let anchor_handle = ctx.push(HandleData::Type(anchor_id));
     CTX.with(|cell| *cell.borrow_mut() = Some(ctx));
@@ -610,5 +629,33 @@ mod tests {
         let addr = ee.get_function_address("add1").unwrap();
         let g: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute::<usize, _>(addr) };
         assert_eq!(g(5), 6);
+    }
+
+    /// A method's `is_public` must reflect its `MethodSig.vis`, not the lowered
+    /// free function's proto (always Private for methods). Regression for the
+    /// method-visibility gap: `public fn` methods read public, plain ones don't.
+    #[test]
+    fn method_visibility_reflects_method_sig() {
+        let src = "type W {\n    public i32 x\n\
+                   \x20   public fn shown(this) -> i32 { return this.x }\n\
+                   \x20   fn hidden(this) -> i32 { return this.x }\n}\n\
+                   fn main(u32 argc, u8 **argv) -> i32 { return 0 }";
+        let tokens = crate::lexer::tokenize(src.to_string()).expect("lex");
+        let program = crate::parser::Parser::new(tokens)
+            .parse_program()
+            .expect("parse");
+        let query = super::super::query::QueryIndex::build(&program);
+        let id = program.symbols.struct_id("W").expect("W interned");
+        let ctx = super::build_ctx(&program, id, &query, None);
+        let by_name = |n: &str| {
+            ctx.functions
+                .iter()
+                .find(|f| f.name == n)
+                .unwrap_or_else(|| panic!("{n} present"))
+        };
+        assert!(by_name("W$shown").is_method);
+        assert!(by_name("W$hidden").is_method);
+        assert!(by_name("W$shown").is_public, "public method reads public");
+        assert!(!by_name("W$hidden").is_public, "private method reads private");
     }
 }

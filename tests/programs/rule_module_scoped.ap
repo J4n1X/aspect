@@ -1,0 +1,17 @@
+# expected: 3
+# compile_args: "-I", "tests/modules"
+#-
+  Module-scoped governance: a bare `rule Widget singleton` is private, so it
+  judges only its declaring module (this entry file). Widget is constructed once
+  here and once inside the imported `widget_mod` — two program-wide — but the
+  private rule sees only this module's one construction and passes. Under the old
+  whole-program rule model this would wrongly error.
+-#
+$import widget_mod
+
+rule Widget singleton
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Widget w = Widget { x = 1 }
+    return w.x + make()
+}

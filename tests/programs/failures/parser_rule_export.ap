@@ -1,0 +1,15 @@
+# expected: "rule", "export"
+#-
+  A rule governs code; it has no linkage, so `export` is meaningless on it and
+  rejected at parse time. (`public`, which governs reach, is now allowed.)
+-#
+
+type Config {
+    public i32 value
+}
+
+export rule Config singleton
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

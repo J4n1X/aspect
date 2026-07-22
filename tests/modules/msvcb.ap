@@ -1,0 +1,7 @@
+$module msvcb
+$import mcfg
+
+public fn b_val() -> i32 {
+    Config c = Config { x = 7 }
+    return c.x
+}
