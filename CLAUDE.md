@@ -45,7 +45,7 @@ An active design document, `doc/plans/Three-Hook-Metasystem.md`, drives current 
 
 ## Testing new features
 
-Integration tests are corpus-generated: `generate_tests!()` (in `aspect-macros/src/generate_tests.rs`) scans `tests/programs/**/*.ap` at compile time and emits one `#[test]` per file carrying a `# expected:` annotation — adding a file IS adding a test. Every new language feature gets at least one runtime corpus program plus failure fixtures for each new diagnostic.
+Integration tests are corpus-generated: `generate_tests!()` (in `aspect-macros/src/generate_tests.rs`) scans `tests/programs/**/*.ap` at compile time and emits one `#[test]` per file carrying a `# expected:` annotation — adding a file IS adding a test. Every new language feature gets at least one runtime corpus program plus failure fixtures for each new diagnostic. For a small runtime check, prefer folding it into an existing thematically-close program (as a summed section in `main`, see `operators.ap` or `pointers.ap`) over adding a new file — this keeps the corpus from re-fragmenting into one-liners. Compile-failure fixtures are the exception: each halts compilation at its first error, so two diagnostics can never share a file — those stay one-per-file even when the trigger looks similar to a sibling fixture.
 
 - Runtime test: `# expected: <i32>` — the program is JIT-run at **both -O0 and -O2**; each must return that value and the two must agree (a disagreement is its own failure).
 - Compile-failure test: `# expected: "frag1", "frag2"` under `tests/programs/failures/`, named by stage prefix (`lexer_`, `parser_`, `type_`, `module_`, `asm_`, …); asserts every fragment appears in the error message (case-insensitive).

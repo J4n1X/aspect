@@ -1,8 +1,7 @@
-# expected: 42
-# Function pointers — three lowerings exercised:
-#   - `&func` (explicit) and bare `func` (implicit decay) into a fn-ptr value.
-#   - fn-ptr stored in a local variable; called directly through the variable.
-#   - fn-ptr passed as a parameter; called inside the callee (indirect call).
+# expected: 126
+# Function pointers — basic storage/call, an array of fn-ptrs picked by
+# runtime index, and a fn-ptr type-struct field (the foundation for vtables).
+
 fn add(i32 a, i32 b) -> i32 { return a + b }
 fn sub(i32 a, i32 b) -> i32 { return a - b }
 
@@ -10,9 +9,40 @@ fn apply(fn(i32, i32) -> i32 op, i32 x, i32 y) -> i32 {
     return op(x, y)
 }
 
+fn dbl(i32 x) -> i32 { return x * 2 }
+fn trp(i32 x) -> i32 { return x * 3 }
+fn add5(i32 x) -> i32 { return x + 5 }
+
+# A type-struct field of function-pointer type. `obj.handler(x)` falls through
+# field access (no method by that name on the type) and the indirect-call path
+# emits `build_indirect_call`.
+type Button {
+    public fn(i32) -> i32 on_click
+}
+
+fn double(i32 x) -> i32 { return x * 2 }
+
 fn main(u32 argc, u8 **argv) -> i32 {
+    # `&func` (explicit) and bare `func` (implicit decay) into a fn-ptr value;
+    # called through a local variable, and through a parameter.
     fn(i32, i32) -> i32 f = &add
     i32 r1 = f(30, 12)             # 42 via a local fn-ptr
     i32 r2 = apply(sub, 60, 18)    # 42 via a parameter (implicit decay)
-    return r1 + r2 - 42            # 42 + 42 - 42 = 42
+    i32 basicResult = r1 + r2 - 42 # 42
+
+    # An array of function pointers, picked at runtime by index. The fn-ptr
+    # type is parenthesised so the trailing `[N]` modifier attaches to the
+    # *array of fn-ptrs*, not (greedily) to the return type — `fn(...) -> T[N]`
+    # would otherwise mean "fn returning T[N]".
+    (fn(i32) -> i32)[3] table = {&dbl, &trp, &add5}
+    i32 a = table[0](10)      # 20
+    i32 b = table[1](7)       # 21
+    i32 c = table[2](-4)      # 1
+    i32 arrayResult = a + b + c   # 42
+
+    # fn-ptr struct field, called through field access.
+    Button btn = Button { on_click = &double }
+    i32 vtableResult = btn.on_click(21)   # 42
+
+    return basicResult + arrayResult + vtableResult   # 42 + 42 + 42 = 126
 }

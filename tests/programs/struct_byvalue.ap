@@ -1,6 +1,7 @@
-# expected: 42
-# Struct by-value across function boundaries: `make` returns a Point by value
-# (sret), `sum` takes one by value (byval).
+# expected: 49
+# Struct value semantics: passing/returning by value across function
+# boundaries (sret/byval), and whole-struct copy on assignment.
+
 type Point {
     public i32 x
     public i32 y
@@ -14,7 +15,21 @@ fn sum(Point p) -> i32 {              # value param via byval
     return p.x + p.y
 }
 
+type Pair {
+    public i32 a
+    public i32 b
+}
+
 fn main(u32 argc, u8 **argv) -> i32 {
+    # Struct by-value across function boundaries.
     Point p = make(30, 12)            # consume an sret return
-    return sum(p)                     # pass by value: 30 + 12 = 42
+    i32 byvalueResult = sum(p)        # pass by value: 30 + 12 = 42
+
+    # A struct value copies by value (load + store of the whole aggregate).
+    Pair q = Pair { a = 3, b = 4 }
+    Pair r = q                # whole-struct copy
+    q.a = 100                 # mutating the original must not affect the copy
+    i32 copyResult = r.a + r.b   # 3 + 4 = 7
+
+    return byvalueResult + copyResult   # 42 + 7 = 49
 }

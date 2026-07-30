@@ -1,11 +1,71 @@
-# expected: 42
-# Test pointers
+# expected: 91
+# Pointer fundamentals: basic indirection, pointer-as-condition truthiness,
+# and `null` adopting its contextual pointer type in a checked position.
+
 fn modify(i32* ptr) {
     *ptr = *ptr + 10
 }
 
+fn answer() -> i32 {
+    return 42
+}
+
 fn main(u32 argc, u8 **argv) -> i32 {
+    # Basic indirection: write through a pointer parameter.
     i32 value = 32
     modify(&value)
-    return value  # Should be 42
+    i32 basicResult = value  # 42
+
+    #-
+      Regression: a pointer used directly as a condition. `if p` / `while p`
+      tests non-null (the inverse of `!p`, which tests null). This previously
+      failed in codegen with "Cannot convert value to boolean" for every
+      pointer type — value_to_bool handled ints and floats but not pointers.
+    -#
+    i32 x = 99
+    i32 *p = &x
+    i32 count = 0
+    if p {
+        count = count + 5      # p is non-null -> taken
+    }
+    u8 *nothing = null
+    if nothing {
+        count = count + 100    # null -> not taken
+    }
+    if !nothing {
+        count = count + 2      # !null -> taken
+    }
+    # `while p` also exercises the pointer->bool path; guard it so it runs once.
+    i32 *q = &x
+    while q {
+        count = count + 0
+        q = null
+    }
+    i32 truthinessResult = count   # 7
+
+    #-
+      Regression: in a *checked* position `null` adopts the contextual
+      pointer type instead of the parser's `u8*` placeholder. Before the fix,
+      `check_expression` had no `null` arm, so `null` kept its placeholder and
+      only had to be *coercible* to the target. Since pointer coercion matches
+      on depth, `u8** p = null` (and every deeper or function-pointer target)
+      failed with a spurious "expected 'u8**' but found 'u8*'" mismatch. A
+      one-level target like `u8* p = null` happened to work only because the
+      depths already matched.
+    -#
+    u8**  two    = null       # depth 2 — the reported bug
+    u8*** three  = null       # depth 3
+    u0*   opaque = null       # opaque pointer target
+    fn() -> i32 nullFn = null # function-pointer target
+    i32 checks = 0
+    if !two    { checks = checks + 1 }
+    if !three  { checks = checks + 1 }
+    if !opaque { checks = checks + 1 }
+    if !nullFn { checks = checks + 1 }
+    if checks != 4 { return 1 }
+    # A null-initialised function pointer can be reassigned and called.
+    nullFn = answer
+    i32 nullTypedResult = nullFn()   # 42
+
+    return basicResult + truthinessResult + nullTypedResult   # 42 + 7 + 42 = 91
 }

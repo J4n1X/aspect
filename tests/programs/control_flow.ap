@@ -1,0 +1,31 @@
+# expected: 110
+# Basic control flow: while/for loops and if/else.
+
+fn max(i32 a, i32 b) -> i32 {
+    if a > b {
+        return a
+    } else {
+        return b
+    }
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    # While loop: sum 1..5, then a for loop doubling twice.
+    i32 sum = 0
+    i32 i = 1
+    while i <= 5 {
+        sum = sum + i
+        i = i + 1
+    }
+    for (i32 j = 0; j < 2; j = j + 1) {
+        sum = sum * 2
+    }
+    i32 loopResult = sum   # (1+2+3+4+5) * 2 * 2 = 15 * 4 = 60
+
+    # if/else via a max() helper.
+    i32 x = max(15, 20)
+    i32 y = max(30, 25)
+    i32 condResult = x + y   # 20 + 30 = 50
+
+    return loopResult + condResult   # 60 + 50 = 110
+}

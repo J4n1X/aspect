@@ -1,6 +1,7 @@
-# expected: 42
-# Type-struct methods: static (no `this`), instance (leading `this`),
-# `const fn` (non-mutating contract on `this`), and chained method calls.
+# expected: 84
+# Type-struct methods: static/instance/const-fn basics, chained calls, and
+# method-as-value (a static reference to an instance method as a fn-ptr).
+
 type Pair {
     public i32 a
     public i32 b
@@ -17,9 +18,45 @@ type Pair {
     }
 }
 
+# `Counter.method` (no call) names the method's underlying free function,
+# typed with the receiver as its explicit first parameter —
+# `fn(Counter*, ...) -> R` — so it drops into a fn-ptr variable or a dispatch
+# table and is invoked through the pointer with the receiver passed first.
+type Counter {
+    public i32 value
+
+    public fn bump(this, i32 by) -> i32 {      # instance method (mutating)
+        this.value = this.value + by
+        return this.value
+    }
+    public fn scaled(this, i32 factor) -> i32 {  # instance method
+        return this.value * factor
+    }
+}
+
 fn main(u32 argc, u8 **argv) -> i32 {
+    # Static factory, mutating instance call via autoref, instance call
+    # through a pointer.
     Pair p = Pair.make(10, 20)                 # static call
     p.bump(6)                                  # instance call on a value (autoref)
     Pair* pp = &p
-    return pp.sum()                            # instance call on a pointer  ⇒ 16+26 = 42
+    i32 methodsResult = pp.sum()               # instance call on a pointer  ⇒ 16+26 = 42
+
+    # Method-as-value: single fn-ptr variable, then a dispatch table. The
+    # mutation done via one method is observable through another, proving the
+    # receiver really is threaded through the indirect call.
+    Counter c = Counter { value = 0 }
+
+    fn(Counter*, i32) -> i32 f = Counter.bump
+    i32 a = f(&c, 20)                          # value 0 -> 20, returns 20
+
+    (fn(Counter*, i32) -> i32)[2] ops = { &Counter.bump, &Counter.scaled }
+    i32 b = ops[0](&c, 1)                      # bump: value 20 -> 21, returns 21
+    i32 d = ops[1](&c, 2)                      # scaled: 21 * 2 = 42
+
+    if a != 20 { return 1 }
+    if b != 21 { return 2 }
+    i32 fnptrResult = d                        # 42
+
+    return methodsResult + fnptrResult         # 42 + 42 = 84
 }

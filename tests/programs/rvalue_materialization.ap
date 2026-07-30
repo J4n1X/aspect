@@ -1,0 +1,32 @@
+# expected: 72
+# Rvalue (function-return temporary) materialisation: a struct-returning call
+# needs to land in a temporary slot before its field can be read or its
+# address taken for a further method call's `this` parameter.
+
+type Point {
+    public i32 x
+    public i32 y
+}
+
+fn makePoint(i32 a, i32 b) -> Point {
+    return Point { x = a, y = b }
+}
+
+type Pair {
+    public i32 a
+    public i32 b
+    public fn make(i32 x, i32 y) -> Pair { return Pair { a = x, b = y } }
+    public const fn sum(this) -> i32 { return this.a + this.b }
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    # Field access directly on an rvalue struct.
+    i32 fieldResult = makePoint(30, 12).x   # 30
+
+    # Method chain on an rvalue receiver — the receiver is itself an sret
+    # return and must be materialised before its address can be taken for
+    # the next method's `this` parameter.
+    i32 chainResult = Pair.make(30, 12).sum()   # 42
+
+    return fieldResult + chainResult   # 30 + 42 = 72
+}

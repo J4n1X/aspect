@@ -1,4 +1,4 @@
-# expected: 17
+# expected: 34
 # compile_args: "-I", "tests/modules"
 #-
   `public type` exports a type-struct across module boundaries: naming it
@@ -7,13 +7,22 @@
   `Secret` type may still flow through this file — returned from and passed
   back into the defining module's public functions — as long as the type is
   never named and no method is called on it here.
+
+  `public fn` is callable across the module boundary; the private helper it
+  wraps stays module-local — the same visibility gate the failure fixture
+  `module_private_fn` shows rejecting a private one.
 -#
 
 $import shapes
+$import privmod
 
 fn main(u32 argc, u8 **argv) -> i32 {
     Pair p = Pair.make(3, 4)          # static factory on an exported type
     Pair q = Pair { a = 2, b = 3 }    # struct literal
     # Secret values pass through opaquely: 7 + 5 + secret_get(secret_make(5))
-    return p.sum() + q.sum() + secret_get(secret_make(5))
+    i32 typeResult = p.sum() + q.sum() + secret_get(secret_make(5))   # 17
+
+    i32 fnResult = shared()   # 17
+
+    return typeResult + fnResult   # 17 + 17 = 34
 }

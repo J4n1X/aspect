@@ -84,7 +84,10 @@ grep -H '^# expected:' tests/programs/*.ap
 ```
 
 Programs are named after the feature they cover (`struct_*`, `module_*`, `preproc_*`,
-`asm_*`, `fnptr_*`, `value_block*`, `void_*`, …), so the listing *is* the coverage map.
+`asm_*`, `pointer_*`, `value_block*`, `void_*`, …), so the listing *is* the coverage map.
+Related small checks are grouped into one file (e.g. `operators.ap` covers arithmetic,
+bitwise, and logical operators) rather than split one-per-file — prefer extending an
+existing thematically-close program over adding a new one for a small addition.
 It is deliberately not duplicated here: a hand-maintained table drifted 44 programs
 behind the corpus, in the very document that tells you how to add a program to it.
 

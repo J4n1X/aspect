@@ -1,0 +1,55 @@
+# expected: 218
+fn main(u32 argc, u8 **argv) -> i32 {
+    # Arithmetic
+    i32 arithA = 10
+    i32 arithB = 5
+    i32 arithResult = (arithA + arithB) * 2 - 3
+    # arithResult = 27
+
+    # Bitwise AND / OR / XOR
+    i32 bitA = 12    # 1100
+    i32 bitB = 10    # 1010
+    i32 andResult = bitA & bitB    # 1000 = 8
+    i32 orResult = bitA | bitB     # 1110 = 14
+    i32 xorResult = bitA ^ bitB    # 0110 = 6
+    i32 bitwiseResult = andResult + orResult + xorResult
+    # bitwiseResult = 8 + 14 + 6 = 28
+
+    # Bitwise NOT (~)
+    i32 notX = 5
+    i32 notY = ~notX
+    # notY = ~5 = -6 (two's complement i32)
+    i32 notResult = notY + 6 + 42
+    # notResult = 0 + 42 = 42
+
+    # Logical operators (&&, ||, !) with short-circuit
+    i32 logicalResult = 0
+    i32 la = 5
+    if la > 0 && la < 10 {
+        logicalResult = logicalResult + 1
+    }
+    # logicalResult = 1
+    if la > 10 && la < 20 {
+        logicalResult = logicalResult + 100  # should not execute
+    }
+    # logicalResult = 1
+    if la > 10 || la > 0 {
+        logicalResult = logicalResult + 10
+    }
+    # logicalResult = 11
+    if la > 10 || la < 0 {
+        logicalResult = logicalResult + 100  # should not execute
+    }
+    # logicalResult = 11
+    if !0 {
+        logicalResult = logicalResult + 100
+    }
+    # logicalResult = 111
+    if !(la > 10) {
+        logicalResult = logicalResult + 10
+    }
+    # logicalResult = 121
+
+    return arithResult + bitwiseResult + notResult + logicalResult
+    # 27 + 28 + 42 + 121 = 218
+}

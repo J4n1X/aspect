@@ -1,0 +1,59 @@
+# expected: 56
+# The `export` / `public` linkage keywords across every declaration kind they
+# apply to: functions (incl. asm fn), globals (incl. struct globals), and the
+# fully-open `public export` form. In a single-file program these only change
+# linkage, not runtime behavior, so this mostly proves grammar+codegen accept
+# every combination end-to-end.
+
+export fn helper() -> i32 { return 2 }
+
+public export const i32 ANSWER = 40
+
+public fn exported_add(i32 a, i32 b) -> i32 {
+    return a + b
+}
+
+fn private_add(i32 a, i32 b) -> i32 {
+    return a + b
+}
+
+$ifdef ARCH_X86_64
+public asm fn exported_asm(i64 a: rax, i64 b: rdi) -> i64: rax {
+    "add rax, rdi"
+}
+$else
+public fn exported_asm(i64 a, i64 b) -> i64 {
+    return a + b
+}
+$endif
+
+type Test {
+    public i32 a
+    public i32 b
+}
+
+public i32 exported_a = 1
+public i32 exported_b = 6
+# These variables are for manual inspection — grab the LLVM IR and check that
+# `unused_exported_a` is always defined (externally visible) while `unused_b`
+# gets removed by DCE.
+public i32 unused_exported_a = 1
+i32 unused_b = 2
+
+public Test test = Test { a = 1, b = 2 }
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    # `public` on functions, plain and asm, doesn't change how they're called.
+    if exported_add(1, 2) != 3 { return 1 }
+    if private_add(1, 2) != 3 { return 2 }
+    if exported_asm(1, 2) != 3 { return 3 }
+    i32 fnResult = 7
+
+    # `public` on globals, scalar and struct.
+    i32 globalResult = exported_a + exported_b   # 7
+
+    # `export` and `public export`.
+    i32 exportResult = helper() + ANSWER         # 2 + 40 = 42
+
+    return fnResult + globalResult + exportResult  # 7 + 7 + 42 = 56
+}

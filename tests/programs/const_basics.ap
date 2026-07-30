@@ -1,0 +1,33 @@
+# expected: 32
+# const fundamentals: compile-time arithmetic, the cast escape hatch, and
+# `const <NamedType>*` pointee types.
+
+i32 A = 2 + 3 * 4        # 2 + 12 = 14
+i32 B = A                  # global-to-global copy: 14
+i32 C = A + B              # 14 + 14 = 28
+
+type Point { public i32 x  public i32 y }
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    # Compile-time constant arithmetic in global initializers and const locals.
+    i32 x1 = A + 5           # const local: 14 + 5 = 19
+    const i32 y1 = x1 * 2    # const local chained: 19 * 2 = 38
+    i32 arithResult = C + y1 - 66   # 28 + 38 - 66 = 0
+
+    # `const` is truly immutable, but an explicit `as` cast is the escape
+    # hatch: cast the const pointer to a mutable one, then write through it.
+    i32 x2 = 5
+    const i32* p2 = &x2
+    i32* q2 = p2 as i32*
+    *q2 = 20
+    i32 castResult = *q2     # 20
+
+    # `const <NamedType>*` parses (the scanner only fused `const` with built-in
+    # scalars before). Reading through a const pointer is fine — const forbids
+    # *writes*, not reads.
+    Point p3 = Point { x = 5, y = 7 }
+    const Point* cp3 = &p3
+    i32 namedPointeeResult = cp3.x + cp3.y   # 5 + 7 = 12
+
+    return arithResult + castResult + namedPointeeResult   # 0 + 20 + 12 = 32
+}

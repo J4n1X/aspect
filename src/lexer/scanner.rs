@@ -35,7 +35,7 @@ impl Scanner {
         let mut tokens = Vec::new();
 
         while !self.is_at_end() {
-            self.skip_whitespace();
+            self.skip_whitespace()?;
             if self.is_at_end() {
                 break;
             }
@@ -98,20 +98,19 @@ impl Scanner {
         }
     }
 
-    fn skip_whitespace(&mut self) {
+    fn skip_whitespace(&mut self) -> Result<(), LexerError> {
         while let Some(ch) = self.peek() {
             match ch {
                 ' ' | '\r' | '\t' | '\x0C' => {
                     self.advance();
                 }
                 '#' => {
-                    if self.skip_comment().is_err() {
-                        break;
-                    }
+                    self.skip_comment()?;
                 }
                 _ => break,
             }
         }
+        Ok(())
     }
 
     fn skip_comment(&mut self) -> Result<(), LexerError> {
@@ -168,7 +167,7 @@ impl Scanner {
             // `\` at line end is a continuation: splice the next line on.
             '\\' => {
                 if self.match_char('\n') {
-                    self.skip_whitespace();
+                    self.skip_whitespace()?;
                     return self.scan_token();
                 } else {
                     return Err(LexerError::UnexpectedChar('\\', start_pos));

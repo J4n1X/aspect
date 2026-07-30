@@ -1,24 +1,36 @@
-# expected: 11
-# Boolean type.
+# expected: 19
+# Boolean type and literals.
 #
 # Comparisons and logical operators yield `bool` (an i1 value stored as i8).
 # Bools can be declared, combined with && / ! , and tested in conditions.
 # Loads of bool variables carry !range !{i8 0, i8 2} in the emitted IR.
 fn main(u32 argc, u8 **argv) -> i32 {
+    # Literals `true` / `false`.
+    bool t = true
+    bool f = false
+    i32 litResult = 0
+    if t { litResult = litResult + 5 }       # taken
+    if f { litResult = litResult + 100 }     # not taken
+    if !f { litResult = litResult + 3 }      # taken
+    # litResult = 5 + 3 = 8
+
+    # Comparisons producing bool, combined with &&/!.
     i32 a = 5
     bool positive = a > 0          # true
     bool small = a < 10            # true
     bool both = positive && small  # logical-and on two bools -> true
 
-    i32 result = 0
+    i32 cmpResult = 0
     if both {
-        result = result + 1
+        cmpResult = cmpResult + 1
     }
     if !positive {
-        result = result + 100      # not executed
+        cmpResult = cmpResult + 100      # not executed
     }
     if positive {
-        result = result + 10
+        cmpResult = cmpResult + 10
     }
-    return result                  # 1 + 10 = 11
+    # cmpResult = 1 + 10 = 11
+
+    return litResult + cmpResult   # 8 + 11 = 19
 }

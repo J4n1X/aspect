@@ -1,0 +1,80 @@
+# expected: 266
+# Global variables, and global struct/array initializers that fold to LLVM
+# constants at compile time.
+
+i32 counter = 100
+
+fn increment() {
+    counter = counter + 1
+}
+
+#-
+  A module-scope global array whose initializer is a list of struct literals.
+  Every element is constant, so the whole array lowers to an LLVM ConstantArray
+  of ConstantStructs (`@pairs = global [3 x %Pair] [ %Pair { .. }, .. ]`) with no
+  runtime cost — `generate_constant_array_value` (src/codegen/globals.rs) folds
+  each element through the const-evaluator (src/codegen/const_eval.rs).
+
+  Also exercises the zero-pad path: `more` is declared `[4]` but initialised
+  with two elements, so the last two structs are zero-filled.
+-#
+
+type Pair {
+    public i32 x
+    public i32 y
+}
+
+Pair[3] pairs = { Pair { x = 1, y = 2 }, Pair { x = 3, y = 4 }, Pair { x = 5, y = 6 } }
+
+# Fewer initializers than the declared size -> trailing structs zero-padded.
+Pair[4] more = { Pair { x = 10, y = 20 }, Pair { x = 30, y = 40 } }
+
+#-
+  A global initialised with a struct literal. Every field is constant, so this
+  lowers to an LLVM ConstantStruct (`@g = global %T { ... }`) with no runtime
+  cost — the const-evaluator (src/codegen/const_eval.rs) folds the whole
+  StructLiteral.
+-#
+
+type Point {
+    public i32 x
+    public i32 y
+}
+
+Point origin = Point { x = 40, y = 2 }
+
+# Nested constant expressions in fields fold too (sizeof, arithmetic).
+type Sized {
+    public u64 bytes
+    public i32 doubled
+}
+Sized meta = Sized { bytes = sizeof(Point), doubled = 3 * 7 }
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    # Plain global read/write through a function call.
+    increment()
+    increment()
+    increment()
+    i32 varsResult = counter   # 103
+
+    # Global array-of-struct-literals, including the zero-pad tail.
+    i32 arrResult = 0
+    for (u64 i = 0; i < 3; i += 1) {
+        arrResult = arrResult + pairs[i].x + pairs[i].y
+    }
+    # 1+2 + 3+4 + 5+6 = 21
+    arrResult = arrResult + more[0].x + more[0].y + more[1].x + more[1].y
+    # 10+20 + 30+40 = 100  ->  121
+    # Zero-padded entries contribute nothing; if the pad regressed this drifts.
+    arrResult = arrResult + more[2].x + more[2].y + more[3].x + more[3].y
+    # arrResult = 121
+
+    # Single global struct literal, plus a nested const expression (sizeof).
+    i32 literalResult = origin.x + origin.y          # 42
+    if meta.bytes == 8 {
+        literalResult = literalResult + meta.doubled - 21     # + 21 - 21 = +0
+    }
+    # literalResult = 42
+
+    return varsResult + arrResult + literalResult   # 103 + 121 + 42 = 266
+}
