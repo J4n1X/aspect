@@ -1,13 +1,18 @@
 # Transforms (Hook #2) — First-Slice Plan
 
-**Status:** Slice 1 landed 2026-07-22 (the inert round engine — see §5). Slice 2
-(the `transform` / `allow coercion` surface) is still interface-first design and
-gated on the owner decisions in §6 plus a `language-designer` review. This
-plans hook #2 of the three-hook metasystem (`doc/plans/Three-Hook-Metasystem.md`
-§6, §13, §14.1, §15 Phase 1 + Phase 4), building on the rules work already
-landed (`doc/compiler/11-rules.md`, `Meta-Module-JIT-Interface.md` §10). Like
-the `std/meta` design, this frames the decisions the owner reserves — above all
-the **AST write surface** — rather than settling them.
+**Status:** Slice 1 landed 2026-07-22 (the inert round engine — see §5). **Slice
+2 — the coercion transform — landed 2026-07-28**, shipped as
+`doc/compiler/12-transforms.md` documents: `transform fn (Expr) -> Expr`
+handlers + `transform From -> To` bindings that fire at stuck coercion demand
+sites, governed by **module visibility** (`public transform` = whole-program,
+mirroring `public rule`/`public type`) rather than the `allow coercion` rule
+sketched below. The AST write surface settled on the bare `Ast.method` builder
+(the `quote` sugar is deferred — `doc/plans/Quote-Plan.md`). This plans hook #2
+of the three-hook metasystem (`doc/plans/Three-Hook-Metasystem.md` §6, §13,
+§14.1, §15 Phase 1 + Phase 4), building on the rules work already landed
+(`doc/compiler/11-rules.md`, `Meta-Module-JIT-Interface.md` §10). Sections below
+predate the implementation; where they differ (notably the `allow coercion`
+governance surface in §4.4/§6), `12-transforms.md` is authoritative.
 
 ---
 
@@ -167,10 +172,15 @@ splices it in place. The scalar-ABI trampoline pattern carries over unchanged
   non-splicing lookups there now would be dead plumbing that breaks in Slice 2. The
   obligation-recording + final-round undischarged-obligation diagnostic are
   likewise Slice 2 (they only bite once a handler can defer a site).
-- **Slice 2 — the coercion transform.** The handler registry (one-per-key), the
-  `transform From -> To { fn handle(...) }` surface, the `allow coercion` gate,
-  the minimal write primitive (build a `MethodCall`), and the judge wiring to
-  fire `Expr -> Expr` handlers at the coercion demand site. Ship `String -> u8*`.
+- **Slice 2 — the coercion transform. ✅ Landed 2026-07-28.** The handler
+  registry (one-per-key, module-gated), the `transform From -> To <handler>` +
+  `transform fn (Expr) -> Expr` surface, governance by **module visibility**
+  (not the `allow coercion` gate — that idea was dropped for consistency with
+  `public rule`/`public type`), the `Ast.method` write primitive (builds a
+  `MethodCall`), and the persistent JIT engine (`with_transform_engine`) firing
+  `Expr -> Expr` handlers at the coercion demand site. Ships `Str -> u8*` (the
+  `String` proof, self-contained). Guardrails: dead-key, const-laundering,
+  invalid-handler, duplicate-key. See `doc/compiler/12-transforms.md`.
 - **Later slices (out of scope here):** decoration (`@debug`, eager attr
   obligations, consumed attributes), the full write surface + `quote` hygiene,
   handler-synthesized *items* (registered through `ModuleSymbols::add_function`).

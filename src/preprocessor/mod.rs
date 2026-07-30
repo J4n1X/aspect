@@ -214,6 +214,7 @@ impl Preprocessor {
         if self.declares_a_meta_fn() {
             self.inject_std_meta()?;
             self.inject_rule_trampolines()?;
+            self.inject_transform_trampolines()?;
         }
         // The closing EOF inherits the last real token's position: it is what
         // the parser reports when input runs out mid-construct ("Expected '}'
@@ -326,6 +327,66 @@ impl Preprocessor {
         self.process_synthetic("<rule-trampolines>", src)
     }
 
+    /// For each coercion handler — `transform fn <name>(Expr …` — inject a
+    /// scalar-ABI trampoline `__rt_<name>(u64) -> u64`. A `(Expr) -> Expr`
+    /// handler lowers to a `byval`/`sret` ABI the engine cannot call directly;
+    /// the trampoline wraps the site handle, calls the handler, and hands back
+    /// the rewritten node's handle — so the engine calls `fn(u64) -> u64`. The
+    /// `(Expr` filter mirrors the rule trampoline's `Program` filter: a
+    /// wrong-shaped handler gets no trampoline and is caught by the key validator.
+    fn inject_transform_trampolines(&mut self) -> Result<(), PreprocessError> {
+        use crate::lexer::Keyword;
+        // (handler name, declaring module) for every `transform fn <name>(Expr …`.
+        let handlers: Vec<(String, Option<String>)> = self
+            .tokens
+            .windows(5)
+            .filter_map(|w| {
+                let is_transform = matches!(&w[0].kind, TokenKind::Identifier(n) if n == "transform");
+                let is_fn = matches!(w[1].kind, TokenKind::Keyword(Keyword::Fn));
+                let open = matches!(w[3].kind, TokenKind::OpenParen);
+                let takes_expr = matches!(&w[4].kind, TokenKind::Identifier(n) if n == "Expr");
+                match (&w[2].kind, is_transform && is_fn && open && takes_expr) {
+                    (TokenKind::Identifier(name), true) => {
+                        let module = self
+                            .file_modules
+                            .get(w[2].pos.file_id as usize)
+                            .cloned()
+                            .flatten();
+                        Some((name.clone(), module))
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+        if handlers.is_empty() {
+            return Ok(());
+        }
+        // Emit each trampoline in its handler's own module (`$module` header): a
+        // root synthetic file cannot call a handler private to another module, so
+        // the trampoline for a handler in module M must itself live in M.
+        let mut by_module: Vec<(Option<String>, Vec<String>)> = Vec::new();
+        for (name, module) in handlers {
+            match by_module.iter_mut().find(|(m, _)| *m == module) {
+                Some((_, names)) => names.push(name),
+                None => by_module.push((module, vec![name])),
+            }
+        }
+        for (module, names) in by_module {
+            let mut src = String::new();
+            if let Some(m) = &module {
+                src.push_str(&format!("$module {m}\n"));
+            }
+            for name in names {
+                src.push_str(&format!(
+                    "transform fn __rt_{name}(u64 __h) -> u64 {{\n    \
+                     return {name}(Expr.from_handle(__h)).raw()\n}}\n"
+                ));
+            }
+            self.process_synthetic("<transform-trampolines>", src)?;
+        }
+        Ok(())
+    }
+
     /// Lex an in-memory synthetic source (a compiler-generated unit like the
     /// rule trampolines) under a fresh file id and splice its tokens into the
     /// stream — the file-registry twin of [`Self::process_file`] for source that
@@ -414,16 +475,22 @@ impl Preprocessor {
         let mut at_line_start = true;
         while i < raw.len() {
             let token = &raw[i];
+            // A `$` starts a directive only at line start and only when the
+            // next token could be a directive name (`$if`/`$else` lex as
+            // `Keyword`, everything else as `Identifier` — see
+            // `process_directive_line`). Anything else — mid-line, or a
+            // line-leading `$` not shaped like a name (e.g. quote's `$(`
+            // splice) — is not a directive and falls through to ordinary-token
+            // handling below, unchanged.
+            let is_directive_start = matches!(token.kind, TokenKind::Dollar)
+                && at_line_start
+                && matches!(
+                    raw.get(i + 1).map(|t| &t.kind),
+                    Some(TokenKind::Identifier(_) | TokenKind::Keyword(_))
+                );
             match &token.kind {
                 TokenKind::Eof => break,
-                TokenKind::Dollar => {
-                    if !at_line_start {
-                        if self.conditionals.active() {
-                            return Err(PreprocessError::MidLineDirective(token.pos));
-                        }
-                        i += 1;
-                        continue;
-                    }
+                TokenKind::Dollar if is_directive_start => {
                     let line_len = raw[i..]
                         .iter()
                         .position(|t| matches!(t.kind, TokenKind::Newline | TokenKind::Eof))
@@ -497,12 +564,15 @@ impl Preprocessor {
     ) -> Result<(), PreprocessError> {
         let pos = line[0].pos;
         // `$if` / `$else` lex as keywords, not identifiers — take the name
-        // from either kind so the whole directive table is reachable.
-        let name = match line.get(1).map(|t| &t.kind) {
-            Some(TokenKind::Identifier(n)) => n.clone(),
-            Some(TokenKind::Keyword(k)) => k.to_string(),
-            _ if !self.conditionals.active() => return Ok(()),
-            _ => return Err(PreprocessError::MissingDirectiveName(pos)),
+        // from either kind so the whole directive table is reachable. The
+        // caller (`process_tokens`) only reaches here when `line[1]` is
+        // already known to be one of the two.
+        let name = match &line[1].kind {
+            TokenKind::Identifier(n) => n.clone(),
+            TokenKind::Keyword(k) => k.to_string(),
+            _ => unreachable!(
+                "process_tokens only dispatches to process_directive_line when the next token is an Identifier or Keyword"
+            ),
         };
         let rest = &line[2..];
         if matches!(
@@ -657,12 +727,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn midline_dollar_is_an_error() {
-        let err = preprocess_str("i32 x = 0 $define MAX 1\n").unwrap_err();
-        let PreprocessError::MidLineDirective(pos) = err else {
-            panic!("expected MidLineDirective, got {err:?}");
-        };
-        assert_eq!((pos.line, pos.column), (1, 11));
+    fn midline_dollar_passes_through_unchanged() {
+        // Directives are line-anchored: a mid-line `$` — even one followed by
+        // a real directive name — is not a directive and is passed through as
+        // an ordinary token instead of erroring (quote's `$(...)` splice needs
+        // exactly this).
+        let tokens = preprocess_str("i32 x = 0 $define MAX 1\n").unwrap();
+        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Dollar)));
+        assert!(tokens
+            .iter()
+            .any(|t| matches!(&t.kind, TokenKind::Identifier(n) if n == "define")));
+    }
+
+    #[test]
+    fn midline_dollar_paren_passes_through_unchanged() {
+        // The motivating case: `quote { $(site).c_str() }`'s `$(` is mid-line
+        // and not shaped like a directive name either way.
+        let tokens = preprocess_str("i32 x = 0 $(y) 1\n").unwrap();
+        let dollar_idx = tokens
+            .iter()
+            .position(|t| matches!(t.kind, TokenKind::Dollar))
+            .expect("`$` token survives");
+        assert!(matches!(tokens[dollar_idx + 1].kind, TokenKind::OpenParen));
     }
 
     #[test]
@@ -682,9 +768,24 @@ mod tests {
     }
 
     #[test]
-    fn dollar_without_a_name_is_an_error() {
-        let err = preprocess_str("$\n").unwrap_err();
-        assert!(matches!(err, PreprocessError::MissingDirectiveName(_)));
+    fn dollar_without_a_name_passes_through_unchanged() {
+        // Line-start but not name-shaped (nothing follows before the
+        // newline) — not a directive, so no preprocessor error; a bare `$`
+        // reaching the parser is its problem now, not the preprocessor's.
+        let tokens = preprocess_str("$\n").unwrap();
+        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Dollar)));
+    }
+
+    #[test]
+    fn linestart_dollar_paren_passes_through_unchanged() {
+        // A line-leading `$(` (a future multi-line quote's splice) is not
+        // name-shaped either, so it is not misread as a directive attempt.
+        let tokens = preprocess_str("$(y)\n").unwrap();
+        let dollar_idx = tokens
+            .iter()
+            .position(|t| matches!(t.kind, TokenKind::Dollar))
+            .expect("`$` token survives");
+        assert!(matches!(tokens[dollar_idx + 1].kind, TokenKind::OpenParen));
     }
 
     #[test]

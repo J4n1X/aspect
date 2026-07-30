@@ -161,6 +161,17 @@ pub enum TypeCheckError {
     #[error("{message}")]
     RoundLimitExceeded { message: String },
 
+    /// A `transform <key> <handler>` declaration is malformed: a dead or
+    /// const-removing coercion key, or a handler that is not a valid
+    /// `transform fn`. Reported before elaboration begins.
+    #[error("{message} at {position}")]
+    InvalidTransformKey { message: String, position: Position },
+
+    /// The transform engine (a JIT'd meta-only clone) failed to typecheck,
+    /// codegen, or JIT. Positionless: the message carries any inner diagnostics.
+    #[error("transform engine failed to build: {message}")]
+    TransformEngineError { message: String },
+
     #[error("Value block does not produce a value on every path — each control path must end in `return <expr>` at {0}")]
     ValueBlockMissingReturn(Position),
 

@@ -3,6 +3,7 @@ pub mod ast;
 pub mod declarations;
 pub mod errors;
 pub mod expressions;
+pub mod meta;
 pub mod program;
 pub mod statements;
 pub mod types;

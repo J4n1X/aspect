@@ -284,7 +284,24 @@ graph LR
   - **Coverage:** no `.ap` source can construct a `MethodCall` (the parser never emits one), so this is covered by exhaustive Rust unit tests (`checker/tests.rs`, the twelve `mcall_*` cases), an explicit and justified exception to the corpus-failure-fixture rule for this internal-infra slice. `09-syntax-reference.md`/`handbook.md` need no change (no user-facing syntax); `05-typechecker.md` documents the node.
   - **Future — parser migration (deferred):** migrating the parser to emit `MethodCall` (deleting `build_method_call`, gaining -O0/-O2 corpus coverage) must move the `public type` gate into the checker with it, which needs `Program::file_modules` (Phase 2a already wants this, §297) **and** `module_imports` threaded into `TypeChecker`.
 - [ ] **Metaprogramming std (`std/meta`)** — opaque-handle special structs + `extern` builtins (`Ast`/`Expr`/`Stmt`/`Fn`/`TokenTree`/`Program`/`Judgments` + `*List` with `.count()/.at()`); compiler-side arena + handle registry. Handles are `u64` at the extern boundary (never one-field structs across the Rust↔JIT seam); `MetaCtx` thread-local around each hook invocation; builtins registered via `ExecutionEngine::add_global_mapping`. Needed from Phase 2b onward. (L)
-- [ ] **`quote` / `$(…)`** — parse contract, desugar to `Ast.*` builders, **hygienic gensym** (rename identifiers *bound inside* the quote plus their in-quote uses; free identifiers deliberately resolve unhygienically — §12's v1 honesty). Desugars at hook-module compile time using the real parser; no generics required anywhere (hand-monomorphized `*List` structs match the language's style). Needed from Phase 3 onward. (L)
+- [x] **`quote` / `$(…)`**, complete through v1 scope — **landed 2026-07-28**
+  (Quote-Plan Slices B–E, `doc/plans/Quote-Plan.md`). `quote { ... }` parsed by
+  the real Aspect parser in a mode where method/field/bare-identifier
+  resolution defers instead of resolving from a receiver type; its body is
+  *always a statement sequence* (the same grammar `ValueBlock` uses), and
+  whether it's value-producing (`Ast.value_block` → `Expr`) or void
+  (`Ast.block` → `Stmt`) is a property of whether it ends in `return`, not two
+  separate grammars. Desugars to `Ast.*` calls before typecheck. **Hygiene**:
+  a local declared inside a template is renamed (a fixed, compile-time
+  `orig$hyg` substitution, not a runtime gensym — the bug it fixes is
+  *capture*, since the checker's `define_var` runs before
+  `check_initializer`, not cross-firing collision, which sibling constructed
+  scopes already prevent structurally); free identifiers still resolve
+  unhygienically (§12's v1 honesty). v1 scope: `$(expr)`, a zero-arg method
+  call, and a local declaration of an integer/bool/single-pointer-to-one type
+  — a richer template (arguments, field access, binary operators, branching,
+  a `Type` splice for a dynamic local type) is a clear "not yet supported"
+  error, not a panic, additive as later slices need it.
 
 ### Phase 1 — Round-based elaboration (replaces the obligation-solver refactor; see §14.1), no user handlers
 
@@ -295,7 +312,7 @@ loop runs exactly one round, and the corpus stays byte-for-byte green. See
 elaboration).
 
 - [x] Obligation/handler registry type + rounds driver loop as a library function (`src/typechecker/elaborate.rs`: `elaborate_program`, `HandlerRegistry`, `Obligation`, `Elaboration`) used by `build_program` *and* the test harness; bounded-rounds flag (`--max-rounds`, default `DEFAULT_MAX_ROUNDS = 16`). (M)
-- [~] Thread the registry into the checker + count rewrites per round: the `rewrites` counter and the `try_repair` consultation are wired at the **coercion** demand site (`check_expression`'s `_` arm). `UndefinedFunction` / `UnknownField` land with their repair handlers in Phase 4 (§4.2 "and later"; `check_call`/`resolve_field` must first be refactored to carry the `&mut` node — wiring inert non-splicing lookups there now would break under Phase 4). Actual mid-pass firing is Phase 4. (M)
+- [x] Thread the registry into the checker + count rewrites per round: the `rewrites` counter and the `try_repair` consultation are wired at the **coercion** demand site (`check_expression`'s `_` arm), and now **fire** (the coercion path landed — see Phase 4). `UndefinedFunction` / `UnknownField` still land later (§4.2 "and later"; `check_call`/`resolve_field` must first be refactored to carry the `&mut` node). (M)
 - [x] **Poison/`Unresolved` sentinel type** (`TypeBase::Unresolved` / `LangType::UNRESOLVED`) + codegen `unreachable!` arms + cascade-suppression guards (`types_coercible`, `resolve_field`). Present but never stamped while inert. (M)
 - [x] Idempotence guard test `typecheck_is_idempotent_on_recheck` (integration tests): check → clone → re-check with a fresh `TypeChecker` → `assert_eq!`, over a feature-diverse set (methods/`MethodCall` lowering, value blocks, enums, fn-ptr vtables, attributes, stdlib import). (S)
 - [x] Regression: full suite green at -O0/-O2 (behaviourally a no-op with no handlers registered).
@@ -339,9 +356,21 @@ attribute-anchored rule fns. See `doc/compiler/11-rules.md` and
 
 ### Phase 4 — Transforms
 
-- [ ] On the Phase 1 rounds engine: **decoration** obligations collected eagerly from attr sites each round (always fire, consume the attr), **repair** obligations fire at the checker's failure sites; bounded rounds (§14.1). (L)
-- [ ] `transform From -> To` (coercion, governance-gated) and `transform @attr(NodeKind) -> NodeKind` (decoration). (M)
-- [ ] Ship `@debug(stmt)` (decoration) and vtable synthesis (repair/synthesis) as the two proofs. (M–L)
+**Coercion path landed 2026-07-28** (language-designer: Approved with changes,
+folded in). `transform fn (Expr) -> Expr` handlers + `transform From -> To`
+bindings fire at stuck coercion demand sites on the Phase 1 rounds engine;
+governance is by module visibility (`public transform` = whole-program, like
+`public rule`/`public type`), not the earlier `allow coercion` rule. The write
+surface is the bare `Ast.method` builder (`quote` deferred). Persistent JIT
+engine built once via `with_transform_engine` (IoC keeps the `ExecutionEngine`
+alive across the round loop). Guardrails: dead-key, const-laundering, invalid
+handler, and duplicate-key rejection. See `doc/compiler/12-transforms.md` and
+`doc/plans/Transforms-Plan.md`.
+
+- [x] `transform From -> To` (coercion) on the Phase 1 rounds engine, governed by module visibility. (M)
+- [x] **Meta globals** (`meta u32 x`) — compile-time mutable handler state (realizes §13's "intra-compilation state"). Landed 2026-07-28: in-language global retained in the persistent transform engine, `globaldce`-stripped from the artifact, transform-scoped by the meta gate. v1 is scalar-only and transform-reach; cross-hook (rules read, unified persistent engine) and `meta fn` helpers are follow-ons. See `doc/compiler/12-transforms.md` §Meta globals. (S–M)
+- [ ] **Decoration** obligations collected eagerly from attr sites each round (always fire, consume the attr); the `transform @attr` key parses but does not fire yet. (L)
+- [ ] Ship `@debug(stmt)` (decoration) and vtable synthesis (repair/synthesis) as proofs. (M–L)
 
 ### Phase 5 — Tier-2 query API + honest linters
 

@@ -1,5 +1,6 @@
 use crate::lexer::{Keyword, LangType, Position, TokenKind};
 use crate::parser::expressions::Parser;
+use crate::parser::meta::MetaItem;
 use crate::parser::{ParserError, Statement, StatementKind};
 use crate::symbol::module::Visibility;
 use aspect_macros::parse_rule;
@@ -68,105 +69,16 @@ impl Parser {
             let kind = self.parse_kind_modifier()?;
             let is_extern = matches!(&kind, Some((Keyword::Extern, _)));
 
-            // `rule <anchor> <fn>` — a soft keyword: a type or global literally
-            // named `rule` still parses (`rule x = …`), so a rule is detected by
-            // lookahead (`Self::is_rule_decl`), before the item gates below.
-            // `public` governs reach (whole-program vs the declaring module,
-            // like `public type`); `export`/linkage make no sense on a rule.
-            if self.is_rule_decl() {
-                Self::reject_attrs(&attrs, "a rule declaration")?;
-                if export {
-                    return Err(ParserError::UnexpectedToken(
-                        "a rule cannot be export".to_string(),
-                        vis_pos,
-                    ));
+            // Metaprogramming declarations (`rule`/`transform` in any form) are
+            // parsed out-of-line (`parser/meta.rs`) so this loop stays about
+            // ordinary items. A `None` means the cursor is not at a meta decl.
+            if let Some(item) = self.try_parse_meta_item(&attrs, vis, export, vis_pos, &kind)? {
+                match item {
+                    MetaItem::Rule(r) => rules.push(r),
+                    MetaItem::Transform(t) => transforms.push(t),
+                    MetaItem::Function(f) => functions.push(f),
+                    MetaItem::Global(g) => global_vars.push(g),
                 }
-                if let Some((kw, kw_pos)) = &kind {
-                    return Err(ParserError::UnexpectedToken(
-                        format!("a rule cannot be {kw}"),
-                        *kw_pos,
-                    ));
-                }
-                rules.push(self.parse_rule_decl(vis)?);
-                skip_nl!();
-                continue;
-            }
-
-            // `rule fn` — a rule-checker function (Phase 2b). `rule` is a soft
-            // keyword; `rule fn` is unambiguous because `fn` is a keyword (never
-            // a global of a type named `rule`). std/meta is in scope in its
-            // body, it may not be called from ordinary code, and it is codegen'd
-            // into the JIT-only judge module. (`expansion fn` / `transform fn`
-            // will join it as the other two hooks land.)
-            if self.is_rule_fn() {
-                Self::reject_attrs(&attrs, "a rule function")?;
-                if vis == Visibility::Public || export {
-                    return Err(ParserError::UnexpectedToken(
-                        "a rule function cannot be public or export".to_string(),
-                        vis_pos,
-                    ));
-                }
-                if let Some((kw, kw_pos)) = &kind {
-                    return Err(ParserError::UnexpectedToken(
-                        format!("a rule function cannot be {kw}"),
-                        *kw_pos,
-                    ));
-                }
-                self.advance(); // consume the `rule` soft keyword
-                let mut func =
-                    self.parse_function(false, Visibility::Private, false, Vec::new())?;
-                func.proto.meta_kind = Some(crate::parser::MetaKind::Rule);
-                functions.push(func);
-                skip_nl!();
-                continue;
-            }
-
-            // `transform fn <name>(Expr) -> Expr` — an obligation handler run
-            // during elaboration. `transform` is a soft keyword; `transform fn
-            // <name>` is distinguished from a `transform fn(...) -> ...` fn-ptr
-            // coercion key by the identifier after `fn`. The handler is
-            // private-implementation; visibility lives on the binding below.
-            if self.is_transform_fn() {
-                Self::reject_attrs(&attrs, "a transform function")?;
-                if vis == Visibility::Public || export {
-                    return Err(ParserError::UnexpectedToken(
-                        "a transform function cannot be public or export — visibility lives on the `transform <key> <fn>` binding".to_string(),
-                        vis_pos,
-                    ));
-                }
-                if let Some((kw, kw_pos)) = &kind {
-                    return Err(ParserError::UnexpectedToken(
-                        format!("a transform function cannot be {kw}"),
-                        *kw_pos,
-                    ));
-                }
-                self.advance(); // consume the `transform` soft keyword
-                let mut func =
-                    self.parse_function(false, Visibility::Private, false, Vec::new())?;
-                func.proto.meta_kind = Some(crate::parser::MetaKind::Transform);
-                functions.push(func);
-                skip_nl!();
-                continue;
-            }
-
-            // `transform <key> <handler>` — bind a handler to a coercion
-            // (`From -> To`) or attribute (`@name`) key. `public` governs reach
-            // (like a rule); `export`/linkage make no sense on a transform.
-            if self.is_transform_decl() {
-                Self::reject_attrs(&attrs, "a transform declaration")?;
-                if export {
-                    return Err(ParserError::UnexpectedToken(
-                        "a transform cannot be export".to_string(),
-                        vis_pos,
-                    ));
-                }
-                if let Some((kw, kw_pos)) = &kind {
-                    return Err(ParserError::UnexpectedToken(
-                        format!("a transform cannot be {kw}"),
-                        *kw_pos,
-                    ));
-                }
-                transforms.push(self.parse_transform_decl(vis)?);
                 skip_nl!();
                 continue;
             }
@@ -361,134 +273,6 @@ impl Parser {
             kind = Some((next, next_pos));
             self.advance();
         }
-    }
-
-    /// Lookahead-only detector for the soft keyword `rule`. A rule is
-    /// `rule <Type|@attr> <fn>`; a value global is at most `Type name [= …]`
-    /// (two identifiers). So a leading `rule` begins a declaration iff the next
-    /// token is `@` (attribute anchor) or it is followed by *two* identifiers
-    /// (`rule T f`) — a type literally named `rule` in `rule x = …` stays a
-    /// global. Consumes nothing.
-    fn is_rule_decl(&self) -> bool {
-        let TokenKind::Identifier(name) = &self.peek().kind else {
-            return false;
-        };
-        if name != "rule" {
-            return false;
-        }
-        let kind_at = |n: usize| self.tokens.get(self.current + n).map(|t| &t.kind);
-        if matches!(kind_at(1), Some(TokenKind::At)) {
-            return true;
-        }
-        matches!(kind_at(1), Some(TokenKind::Identifier(_)))
-            && matches!(kind_at(2), Some(TokenKind::Identifier(_)))
-    }
-
-    /// Lookahead-only detector for the `rule fn` soft keyword: the identifier
-    /// `rule` immediately before the `fn` keyword. Distinct from a `rule
-    /// <anchor> <checker>` declaration (`rule` before `@` or two identifiers)
-    /// and from a global of a type named `rule`. Consumes nothing.
-    fn is_rule_fn(&self) -> bool {
-        matches!(&self.peek().kind, TokenKind::Identifier(n) if n == "rule")
-            && matches!(
-                self.tokens.get(self.current + 1).map(|t| &t.kind),
-                Some(TokenKind::Keyword(Keyword::Fn))
-            )
-    }
-
-    /// Parse `rule <anchor> <checker_fn>` with the cursor on the `rule` soft
-    /// keyword (guaranteed by [`Self::is_rule_decl`]). The anchor is a
-    /// type-struct name or an `@attribute`; `checker_fn` names a builtin rule.
-    #[parse_rule]
-    fn parse_rule_decl(&mut self, vis: Visibility) -> Result<crate::parser::RuleDecl, ParserError> {
-        use crate::parser::{RuleAnchor, RuleDecl};
-        let pos = pos!();
-        self.advance(); // the `rule` soft keyword (not a real keyword)
-        let anchor = if self.check(&TokenKind::At) {
-            self.advance();
-            RuleAnchor::Attribute(ident!())
-        } else {
-            RuleAnchor::Type(ident!())
-        };
-        let checker_fn = ident!();
-        term!();
-        Ok(RuleDecl {
-            anchor,
-            checker_fn,
-            vis,
-            pos,
-        })
-    }
-
-    /// Lookahead-only detector for `transform fn <name>`: the identifier
-    /// `transform`, the `fn` keyword, then an identifier (the handler name). The
-    /// trailing identifier distinguishes a handler descriptor from a `transform
-    /// fn(...) -> ...` fn-pointer coercion key (where `(` follows `fn`). Consumes
-    /// nothing.
-    fn is_transform_fn(&self) -> bool {
-        matches!(&self.peek().kind, TokenKind::Identifier(n) if n == "transform")
-            && matches!(
-                self.tokens.get(self.current + 1).map(|t| &t.kind),
-                Some(TokenKind::Keyword(Keyword::Fn))
-            )
-            && matches!(
-                self.tokens.get(self.current + 2).map(|t| &t.kind),
-                Some(TokenKind::Identifier(_))
-            )
-    }
-
-    /// Lookahead-only detector for a `transform <key> <handler>` binding: the
-    /// identifier `transform` followed by an `@` (attribute key) or a
-    /// type-starting token (coercion `From -> To` key). Checked after
-    /// [`Self::is_transform_fn`], which claims `transform fn <name>`; `transform`
-    /// is otherwise reserved at item position. Consumes nothing.
-    fn is_transform_decl(&self) -> bool {
-        if !matches!(&self.peek().kind, TokenKind::Identifier(n) if n == "transform") {
-            return false;
-        }
-        matches!(
-            self.tokens.get(self.current + 1).map(|t| &t.kind),
-            Some(
-                TokenKind::At
-                    | TokenKind::LangType(_)
-                    | TokenKind::Identifier(_)
-                    | TokenKind::OpenParen
-                    | TokenKind::Keyword(Keyword::Const)
-                    | TokenKind::Keyword(Keyword::Fn)
-            )
-        )
-    }
-
-    /// Parse `transform <key> <handler_fn>` with the cursor on the `transform`
-    /// soft keyword (guaranteed by [`Self::is_transform_decl`]). The key is an
-    /// `@attribute` or a coercion `<from> -> <to>`; `parse_type` on the from-type
-    /// greedily eats a fn-pointer type's own `->`, so the arrow that survives is
-    /// always the key separator.
-    #[parse_rule]
-    fn parse_transform_decl(
-        &mut self,
-        vis: Visibility,
-    ) -> Result<crate::parser::TransformDecl, ParserError> {
-        use crate::parser::{TransformDecl, TransformKey};
-        let pos = pos!();
-        self.advance(); // the `transform` soft keyword
-        let key = if self.check(&TokenKind::At) {
-            self.advance();
-            TransformKey::Attribute(ident!())
-        } else {
-            let from = self.parse_type()?;
-            token!(Arrow);
-            let to = self.parse_type()?;
-            TransformKey::Coerce { from, to }
-        };
-        let handler_fn = ident!();
-        term!();
-        Ok(TransformDecl {
-            key,
-            handler_fn,
-            vis,
-            pos,
-        })
     }
 
     /// Collect the `(name, file_id, visibility)` of every `<kw> <Name>`

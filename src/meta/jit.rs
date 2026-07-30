@@ -17,14 +17,18 @@ use std::ffi::{CStr, CString};
 use std::path::PathBuf;
 
 use inkwell::context::Context;
+use inkwell::execution_engine::ExecutionEngine;
 use inkwell::module::Linkage;
 use inkwell::OptimizationLevel;
 
 use crate::codegen::CodeGenerator;
-use crate::lexer::Position;
-use crate::parser::{Function, FunctionBody, MetaKind, Program};
+use crate::lexer::{LangType, Position, TypeBase};
+use crate::parser::ast::{ExprKind, Expression, Statement, StatementKind};
+use crate::parser::{Function, FunctionBody, MetaKind, Program, TransformDecl, TransformKey};
 use crate::symbol::module::Visibility;
 use crate::target::TargetSpec;
+use crate::typechecker::elaborate::{HandlerAddr, HandlerRegistry};
+use crate::typechecker::TypeChecker;
 
 use super::{query::QueryIndex, RawJudgment};
 
@@ -40,6 +44,19 @@ enum HandleData {
     /// rest of the `Expr` surface is degenerate until `QueryIndex` retains nodes.
     ExprList(Vec<Position>),
     Expr(Position),
+    /// A real, owned AST node — what the transform write surface (`Ast.*`)
+    /// builds and hands back. Unlike `Expr(Position)` (a read-only site handle),
+    /// this carries the node itself so a rewrite can be spliced into the program.
+    ExprNode(Expression),
+    /// A real, owned `Statement` — the `Stmt`-handle analog of `ExprNode`,
+    /// built by `Ast.return_stmt`/`.expr_stmt`/`.vardecl` and consumed by
+    /// `StmtList.push`/`Ast.value_block`/`.block`.
+    StmtNode(Statement),
+    /// A mutable, chaining builder list of `StmtNode` handles — `StmtList`'s
+    /// construction-side backing (`StmtList.new`/`.push`), distinct from
+    /// `Stmt.children()`'s read-only `StmtList` (unimplemented; no producer
+    /// exists yet either).
+    StmtNodeList(Vec<u64>),
     Pos(Position),
     /// A function and its metadata (a method's name is the mangled `Type$method`).
     Fn(FnInfo),
@@ -81,6 +98,12 @@ struct MetaCtx {
     /// Strings handed back as `u8*`, kept alive for the invocation.
     strings: Vec<CString>,
     judgments: Vec<RawJudgment>,
+    /// The firing's demand-site position — set only for a transform firing
+    /// (`fire_transform`, from `site.pos`; a no-op default for rules, which
+    /// never construct AST). Builders with no operand to inherit a position
+    /// from (`Ast.var`, `Ast.value_block`/`.block`) stamp this onto what they
+    /// build, so a bad rewrite re-checks pointing at user source.
+    demand_pos: Position,
 }
 
 impl MetaCtx {
@@ -89,6 +112,13 @@ impl MetaCtx {
             return None;
         }
         self.arena.get((handle - 1) as usize)
+    }
+
+    fn get_mut(&mut self, handle: u64) -> Option<&mut HandleData> {
+        if handle == 0 {
+            return None;
+        }
+        self.arena.get_mut((handle - 1) as usize)
     }
 
     /// Intern a node/reference and return its 1-based handle (`0` = null).
@@ -101,6 +131,25 @@ impl MetaCtx {
         let cs = CString::new(s).unwrap_or_default();
         self.strings.push(cs);
         self.strings.last().expect("just pushed").as_ptr().cast()
+    }
+
+    /// A context with no query snapshot — all the transform write path needs is
+    /// the handle arena and the string keep-alive. Rules use [`build_ctx`].
+    fn empty() -> Self {
+        MetaCtx {
+            arena: Vec::new(),
+            instantiations: HashMap::new(),
+            local_instantiations: HashMap::new(),
+            struct_names: HashMap::new(),
+            struct_ids: HashMap::new(),
+            functions: Vec::new(),
+            struct_methods: HashMap::new(),
+            call_sites: HashMap::new(),
+            source_files: Vec::new(),
+            strings: Vec::new(),
+            judgments: Vec::new(),
+            demand_pos: Position::new(0, 0),
+        }
     }
 }
 
@@ -176,12 +225,221 @@ extern "C" fn meta_expr_pos(handle: u64) -> u64 {
     with_ctx(|c| {
         let pos = match c.get(handle) {
             Some(HandleData::Expr(p)) => Some(*p),
+            Some(HandleData::ExprNode(e)) => Some(e.pos),
             _ => None,
         };
         match pos {
             Some(p) => c.push(HandleData::Pos(p)),
             None => 0,
         }
+    })
+}
+
+/// Build a zero-arg method call `base.<name>()` around an existing node. The
+/// transform write primitive: the elaboration round splices the result at the
+/// demand site, and the checker's `MethodCall` lowering resolves it next round.
+extern "C" fn meta_ast_method(base: u64, name: *const u8) -> u64 {
+    let name = read_cstr(name);
+    with_ctx(|c| {
+        let Some(HandleData::ExprNode(base_node)) = c.get(base) else {
+            return 0;
+        };
+        let base_node = base_node.clone();
+        let pos = base_node.pos;
+        let node = Expression::new(
+            ExprKind::MethodCall {
+                base: Box::new(base_node),
+                name,
+                args: Vec::new(),
+            },
+            LangType::UNRESOLVED,
+            pos,
+        );
+        c.push(HandleData::ExprNode(node))
+    })
+}
+
+/// Build a bare variable reference `name` — the constructed-AST counterpart
+/// of a template's free (unhygienic) identifier or a hygiene-renamed binder.
+/// No operand to inherit a position from, so it stamps the firing's
+/// demand-site position (`doc/plans/Quote-Plan.md` §2).
+extern "C" fn meta_ast_var(name: *const u8) -> u64 {
+    let name = read_cstr(name);
+    with_ctx(|c| {
+        let pos = c.demand_pos;
+        c.push(HandleData::ExprNode(Expression::new(
+            ExprKind::Variable(name),
+            LangType::UNRESOLVED,
+            pos,
+        )))
+    })
+}
+
+/// Build `return <e>` around an existing expression node.
+extern "C" fn meta_ast_return(expr: u64) -> u64 {
+    with_ctx(|c| {
+        let Some(HandleData::ExprNode(e)) = c.get(expr) else {
+            return 0;
+        };
+        let e = e.clone();
+        let pos = e.pos;
+        c.push(HandleData::StmtNode(Statement::new(StatementKind::Return(Some(e)), pos)))
+    })
+}
+
+/// Build an expression-statement around an existing expression node — a
+/// side-effecting statement, its value discarded.
+extern "C" fn meta_ast_expr_stmt(expr: u64) -> u64 {
+    with_ctx(|c| {
+        let Some(HandleData::ExprNode(e)) = c.get(expr) else {
+            return 0;
+        };
+        let e = e.clone();
+        let pos = e.pos;
+        c.push(HandleData::StmtNode(Statement::new(StatementKind::Expression(e), pos)))
+    })
+}
+
+/// Start a fresh, empty `StmtList` builder — construction-side, distinct from
+/// `Stmt.children()`'s read-only `StmtList` (both are the same Aspect type;
+/// which `HandleData` variant backs a given handle is what the builtins
+/// dispatch on).
+extern "C" fn meta_stmtlist_new() -> u64 {
+    with_ctx(|c| c.push(HandleData::StmtNodeList(Vec::new())))
+}
+
+/// Append `stmt` to `list` in place — chaining: returns `list` unchanged, not
+/// a new handle, matching the shipped `Ast.method`-style fluent surface.
+extern "C" fn meta_stmtlist_push(list: u64, stmt: u64) -> u64 {
+    with_ctx(|c| {
+        if !matches!(c.get(stmt), Some(HandleData::StmtNode(_))) {
+            return 0;
+        }
+        match c.get_mut(list) {
+            Some(HandleData::StmtNodeList(v)) => {
+                v.push(stmt);
+                list
+            }
+            _ => 0,
+        }
+    })
+}
+
+/// Build a value-producing `ValueBlock` from a `StmtList` builder — the
+/// `quote` desugar's target for a body ending in `return <expr>`
+/// (`doc/plans/Quote-Plan.md` §2). No natural operand to inherit a position
+/// from, so it stamps the firing's demand-site position; each statement
+/// inside keeps its own.
+/// Build `<type> <name> = <init>` — v1 restricts `<type>` to an integer,
+/// bool, or a single pointer to one (`kind_tag` the frozen `TypeKind` ABI
+/// position: `SInt`=0, `UInt`=1, `Bool`=4 — the only ones `desugar_quotes`
+/// ever sends; anything else is rejected before this builtin is reached).
+extern "C" fn meta_ast_vardecl(kind_tag: i32, size_bits: i32, pointer_depth: i32, name: *const u8, init: u64) -> u64 {
+    let name = read_cstr(name);
+    with_ctx(|c| {
+        let Some(HandleData::ExprNode(init_node)) = c.get(init) else {
+            return 0;
+        };
+        let init_node = init_node.clone();
+        let base = match kind_tag {
+            0 => TypeBase::SInt,
+            1 => TypeBase::UInt,
+            4 => TypeBase::Bool,
+            _ => return 0,
+        };
+        let var_type = LangType::new(base, size_bits as u32, pointer_depth as u32, false);
+        let pos = init_node.pos;
+        c.push(HandleData::StmtNode(Statement::new(
+            StatementKind::VarDecl {
+                var_type,
+                name,
+                initializer: Some(init_node),
+            },
+            pos,
+        )))
+    })
+}
+
+/// Resolve a `StmtList` builder handle to its owned statements, in order, or
+/// `None` if `list` isn't one or any entry isn't a `StmtNode` (a malformed
+/// handle — the desugar pass never constructs one, so this is defensive).
+fn resolve_stmt_list(c: &MetaCtx, list: u64) -> Option<Vec<Statement>> {
+    let HandleData::StmtNodeList(handles) = c.get(list)? else {
+        return None;
+    };
+    handles
+        .iter()
+        .map(|&h| match c.get(h) {
+            Some(HandleData::StmtNode(s)) => Some(s.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+extern "C" fn meta_ast_value_block(list: u64) -> u64 {
+    with_ctx(|c| {
+        let Some(stmts) = resolve_stmt_list(c, list) else {
+            return 0;
+        };
+        let pos = c.demand_pos;
+        c.push(HandleData::ExprNode(Expression::new(
+            ExprKind::ValueBlock(stmts),
+            LangType::UNRESOLVED,
+            pos,
+        )))
+    })
+}
+
+/// Build a void `{ stmt* }` from a `StmtList` builder — a void quote's
+/// lowering target (a body *not* ending in `return <expr>`). `StatementKind::Block`,
+/// **not** `ExprKind::ValueBlock` (unconditionally value-producing, so it has
+/// no void form) — the same node an ordinary `{ }` block *statement*
+/// produces, with that node's `return`-binding semantics (the enclosing
+/// function, not "the innermost value block").
+extern "C" fn meta_ast_block(list: u64) -> u64 {
+    with_ctx(|c| {
+        let Some(stmts) = resolve_stmt_list(c, list) else {
+            return 0;
+        };
+        let pos = c.demand_pos;
+        c.push(HandleData::StmtNode(Statement::new(StatementKind::Block(stmts), pos)))
+    })
+}
+
+/// `Stmt.kind()`'s backing — the only read-side `Stmt`/`Expr`/`Type` accessor
+/// implemented so far (the rest of that Tier-1 query surface is declared in
+/// `meta.ap` but has no Rust binding yet). Added to let a `rule fn` verify
+/// what a constructed void quote actually built (`StatementKind::Block`, not
+/// `ExprKind::ValueBlock` under a different handle kind — `doc/plans/Quote-Plan.md`
+/// §2's `Ast.block` correction) — the `StmtKind` Aspect enum's declared order
+/// is the frozen ABI (`Meta-Module-JIT-Interface.md` §7).
+extern "C" fn meta_stmt_kind(handle: u64) -> i32 {
+    with_ctx(|c| {
+        let Some(HandleData::StmtNode(s)) = c.get(handle) else {
+            return -1;
+        };
+        match &s.kind {
+            StatementKind::VarDecl { .. } => 0,
+            StatementKind::VarAssign { .. } => 1,
+            StatementKind::DerefAssign { .. } => 2,
+            StatementKind::FieldAssign { .. } => 3,
+            StatementKind::Return(_) => 4,
+            StatementKind::If { .. } => 5,
+            StatementKind::While { .. } => 6,
+            StatementKind::For { .. } => 7,
+            StatementKind::Block(_) => 8,
+            StatementKind::Expression(_) => 9,
+            StatementKind::Break => 10,
+            StatementKind::Continue => 11,
+        }
+    })
+}
+
+/// `Stmt.pos()`'s backing, mirroring `meta_expr_pos` exactly.
+extern "C" fn meta_stmt_pos(handle: u64) -> u64 {
+    with_ctx(|c| match c.get(handle) {
+        Some(HandleData::StmtNode(s)) => c.push(HandleData::Pos(s.pos)),
+        _ => 0,
     })
 }
 
@@ -379,6 +637,17 @@ fn extern_bindings() -> Vec<(&'static str, usize)> {
         ("meta_exprlist_count", meta_exprlist_count as *const () as usize),
         ("meta_exprlist_at", meta_exprlist_at as *const () as usize),
         ("meta_expr_pos", meta_expr_pos as *const () as usize),
+        ("meta_ast_method", meta_ast_method as *const () as usize),
+        ("meta_ast_var", meta_ast_var as *const () as usize),
+        ("meta_ast_return", meta_ast_return as *const () as usize),
+        ("meta_ast_expr_stmt", meta_ast_expr_stmt as *const () as usize),
+        ("meta_ast_value_block", meta_ast_value_block as *const () as usize),
+        ("meta_ast_vardecl", meta_ast_vardecl as *const () as usize),
+        ("meta_ast_block", meta_ast_block as *const () as usize),
+        ("meta_stmtlist_new", meta_stmtlist_new as *const () as usize),
+        ("meta_stmtlist_push", meta_stmtlist_push as *const () as usize),
+        ("meta_stmt_kind", meta_stmt_kind as *const () as usize),
+        ("meta_stmt_pos", meta_stmt_pos as *const () as usize),
         ("meta_pos_line", meta_pos_line as *const () as usize),
         ("meta_pos_column", meta_pos_column as *const () as usize),
         ("meta_pos_file", meta_pos_file as *const () as usize),
@@ -404,6 +673,28 @@ fn extern_bindings() -> Vec<(&'static str, usize)> {
         ("meta_judgment_info", meta_judgment_info as *const () as usize),
         ("meta_judgments_count", meta_judgments_count as *const () as usize),
     ]
+}
+
+/// Bind every implemented `meta_*` builtin to its Rust address, and every other
+/// declared-but-unimplemented `meta_*` extern to a null stub so MCJIT can
+/// relocate the (never-called) wrappers that reference it. Shared by the rule
+/// judge and the transform engine — both JIT the same meta surface.
+fn bind_meta_externs(cg: &CodeGenerator, ee: &ExecutionEngine) {
+    let bindings = extern_bindings();
+    let bound: std::collections::HashSet<&str> = bindings.iter().map(|(n, _)| *n).collect();
+    for (name, addr) in &bindings {
+        if let Some(f) = cg.get_function(name) {
+            ee.add_global_mapping(&f, *addr);
+        }
+    }
+    let stub = meta_unimplemented as *const () as usize;
+    for f in cg.module().get_functions() {
+        let name = f.get_name().to_string_lossy().into_owned();
+        if name.starts_with("meta_") && f.count_basic_blocks() == 0 && !bound.contains(name.as_str())
+        {
+            ee.add_global_mapping(&f, stub);
+        }
+    }
 }
 
 /// A function that belongs in the judge module: a `rule fn` (any hook) or a
@@ -490,6 +781,9 @@ fn build_ctx(program: &Program, anchor_id: u32, query: &QueryIndex, module: Opti
         source_files: program.source_files.clone(),
         strings: Vec::new(),
         judgments: Vec::new(),
+        // Rules never construct AST, so this is never read; a placeholder
+        // matching `MetaCtx::empty()`'s default.
+        demand_pos: Position::new(0, 0),
     }
 }
 
@@ -530,25 +824,7 @@ pub fn run_rule_fn(
         .module()
         .create_jit_execution_engine(OptimizationLevel::None)
         .map_err(|e| format!("judge JIT engine setup failed: {e}"))?;
-    let bindings = extern_bindings();
-    let bound: std::collections::HashSet<&str> = bindings.iter().map(|(n, _)| *n).collect();
-    for (name, addr) in &bindings {
-        if let Some(f) = cg.get_function(name) {
-            ee.add_global_mapping(&f, *addr);
-        }
-    }
-    // Every *other* declared `meta_*` extern (the read surface not yet
-    // implemented) is bound to a null stub so MCJIT can relocate the wrappers
-    // that reference it — those wrappers are never called, but the symbol must
-    // resolve for finalization.
-    let stub = meta_unimplemented as *const () as usize;
-    for f in cg.module().get_functions() {
-        let name = f.get_name().to_string_lossy().into_owned();
-        if name.starts_with("meta_") && f.count_basic_blocks() == 0 && !bound.contains(name.as_str())
-        {
-            ee.add_global_mapping(&f, stub);
-        }
-    }
+    bind_meta_externs(&cg, &ee);
 
     // Install the per-invocation context and seed the Program + Type handles.
     let mut ctx = build_ctx(program, anchor_id, query, module);
@@ -590,7 +866,7 @@ pub fn is_valid_checker(func: &Function, program: &Program) -> bool {
         program
             .symbols
             .struct_id(name)
-            .map(|id| crate::lexer::TypeBase::Struct(id))
+            .map(crate::lexer::TypeBase::Struct)
     };
     let is = |t: &crate::lexer::LangType, name: &str| {
         t.pointer_depth == 0 && Some(t.base) == struct_ty(name)
@@ -599,6 +875,129 @@ pub fn is_valid_checker(func: &Function, program: &Program) -> bool {
         && is(&func.proto.params[0].0, "Program")
         && is(&func.proto.params[1].0, "Type")
         && is(&func.proto.return_type, "Judgments")
+}
+
+/// Build the transform engine's JIT'd meta module once, resolve every coercion
+/// handler's trampoline address, then run `body` (the whole elaboration round
+/// loop) with the resulting registry while the engine stays alive.
+///
+/// Inversion of control resolves the lifetime knot: the JIT'd code a handler
+/// address points at is live only while the `ExecutionEngine` is, so the round
+/// loop runs *inside* this call, never after it returns.
+///
+/// # Errors
+/// Returns a message if the meta clone fails to typecheck, codegen, or JIT, or a
+/// handler trampoline cannot be resolved.
+pub fn with_transform_engine<R>(
+    program: &mut Program,
+    decls: &[TransformDecl],
+    target: &TargetSpec,
+    body: impl FnOnce(&mut Program, HandlerRegistry) -> R,
+) -> Result<R, String> {
+    // Meta-only clone: retain meta functions + std/meta, drop user code so it
+    // typechecks and codegens standalone. The handler must be JIT-ready before
+    // round 1 — the real program's meta fns are not yet type-stamped, and it is
+    // full of unresolved demand sites mid-elaboration.
+    let mut judge = program.clone();
+    let file_modules = program.file_modules.clone();
+    judge.functions.retain(|f| is_meta_function(f, &file_modules));
+    // Keep `meta` globals: they are the handlers' persistent state, and this
+    // engine lives across the whole round loop, so the value survives firings.
+    // (Ordinary globals are user runtime state the meta clone never touches.)
+    judge.global_vars.retain(|g| g.is_meta);
+
+    let mut checker = TypeChecker::new().with_target(target.clone());
+    checker.check_program(&mut judge).map_err(|errs| {
+        errs.iter()
+            .map(|e| checker.format_error(e))
+            .collect::<Vec<_>>()
+            .join("; ")
+    })?;
+
+    let context = Context::create();
+    let mut cg = CodeGenerator::new(&context, "transform-judge", &TargetSpec::host())
+        .map_err(|e| format!("transform judge codegen setup failed: {e}"))?;
+    cg.generate(&judge)
+        .map_err(|e| format!("transform judge codegen failed: {e}"))?;
+
+    // The judge calls each handler through its scalar-ABI trampoline; it must be
+    // externally linked so the JIT can resolve its address.
+    for decl in decls {
+        if let Some(f) = cg.get_function(&format!("__rt_{}", decl.handler_fn)) {
+            f.set_linkage(Linkage::External);
+        }
+    }
+
+    let ee = cg
+        .module()
+        .create_jit_execution_engine(OptimizationLevel::None)
+        .map_err(|e| format!("transform judge JIT engine setup failed: {e}"))?;
+    bind_meta_externs(&cg, &ee);
+
+    let mut entries = Vec::new();
+    for decl in decls {
+        let TransformKey::Coerce { from, to } = &decl.key else {
+            continue; // attribute keys parse but do not fire yet
+        };
+        let tramp = format!("__rt_{}", decl.handler_fn);
+        let addr = ee.get_function_address(&tramp).map_err(|e| {
+            format!("transform handler '{}' could not be JIT-compiled: {e}", decl.handler_fn)
+        })?;
+        entries.push(HandlerAddr {
+            from: *from,
+            to: *to,
+            addr,
+            module: file_modules
+                .get(decl.pos.file_id as usize)
+                .cloned()
+                .unwrap_or_default(),
+            is_public: decl.vis == Visibility::Public,
+        });
+    }
+
+    // `cg` and `ee` stay alive across this call — `body` fires handlers whose
+    // code lives in `ee`'s JIT memory. The `&mut Program` is threaded through so
+    // the round loop's mutation and the engine build never borrow it at once.
+    Ok(body(program, HandlerRegistry::from_entries(entries)))
+}
+
+/// Fire a coercion handler at `addr` on the demand-site node `site`, returning
+/// the rewritten node (or `None` if the handler produced nothing usable). Seeds
+/// the site as the sole handle, calls the scalar trampoline `fn(u64) -> u64`,
+/// and reads back the returned `ExprNode`.
+#[must_use]
+pub fn fire_transform(addr: usize, site: &Expression) -> Option<Expression> {
+    let mut ctx = MetaCtx::empty();
+    ctx.demand_pos = site.pos;
+    let site_handle = ctx.push(HandleData::ExprNode(site.clone()));
+    CTX.with(|cell| *cell.borrow_mut() = Some(ctx));
+    let result = {
+        let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute::<usize, _>(addr) };
+        let out = f(site_handle);
+        with_ctx(|c| match c.get(out) {
+            Some(HandleData::ExprNode(e)) => Some(e.clone()),
+            _ => None,
+        })
+    };
+    CTX.with(|cell| *cell.borrow_mut() = None);
+    result
+}
+
+/// Whether `func` is a `transform fn` with the coercion handler signature
+/// `(Expr) -> Expr`. Mirrors [`is_valid_checker`] for the transform hook.
+#[must_use]
+pub fn is_valid_transform(func: &Function, program: &Program) -> bool {
+    if func.proto.meta_kind != Some(MetaKind::Transform) {
+        return false;
+    }
+    let expr = program
+        .symbols
+        .struct_id("Expr")
+        .map(crate::lexer::TypeBase::Struct);
+    let is_expr = |t: &LangType| t.pointer_depth == 0 && Some(t.base) == expr;
+    func.proto.params.len() == 1
+        && is_expr(&func.proto.params[0].0)
+        && is_expr(&func.proto.return_type)
 }
 
 #[cfg(test)]

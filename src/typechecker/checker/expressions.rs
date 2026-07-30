@@ -345,6 +345,13 @@ impl TypeChecker {
             // top of `synth_expression`), so the node is never a `MethodCall`
             // by the time control reaches here.
             ExprKind::MethodCall { .. } => unreachable!("MethodCall resolved before the match"),
+
+            // Desugared to `Ast.*`/`meta_ast_*` calls before typecheck
+            // (`src/meta/quote.rs`) — a meta fn's body never reaches the
+            // checker with one of these still in it.
+            ExprKind::Quote { .. } | ExprKind::Splice(_) => {
+                unreachable!("Quote/Splice is lowered before typecheck")
+            }
         }
     }
 
@@ -824,9 +831,10 @@ impl TypeChecker {
                 // handler before erroring.
                 if !types_coercible(&found, target)
                     && let Some(rewrite) =
-                        self.try_repair(&Obligation::Coerce { from: found, to: *target })
+                        self.try_repair(&Obligation::Coerce { from: found, to: *target }, expr)
                 {
-                    *expr = rewrite; // re-checked next round; obligation discharged
+                    *expr = rewrite; // spliced; re-checked next round
+                    self.rewrites += 1; // drives the driver to re-run to a fixpoint
                     return;
                 }
                 self.assert_coercible(found, target, pos);
@@ -834,17 +842,21 @@ impl TypeChecker {
         }
     }
 
-    /// Consult a transform handler to repair a stuck demand site, returning a
-    /// rewritten node if a handler claims the obligation. Returns `None` when
-    /// none does, and the caller falls back to erroring.
-    fn try_repair(&mut self, obl: &Obligation) -> Option<Expression> {
+    /// Consult a transform handler to repair a stuck demand `site`, returning a
+    /// rewritten node if a handler claims the obligation. A module-scoped handler
+    /// fires only for sites in its own module; a `public` one anywhere. Returns
+    /// `None` when none claims it, and the caller falls back to erroring.
+    fn try_repair(&mut self, obl: &Obligation, site: &Expression) -> Option<Expression> {
         if self.handlers.is_empty() {
             return None;
         }
-        // No handler dispatch yet; the registry is never populated, so this is
-        // currently unreachable.
-        let _ = obl;
-        None
+        let Obligation::Coerce { from, to } = obl;
+        let site_module = self
+            .file_modules
+            .get(site.pos.file_id as usize)
+            .map_or("", String::as_str);
+        let addr = self.handlers.lookup(from, to, site_module)?.addr;
+        crate::meta::jit::fire_transform(addr, site)
     }
 
     /// Emit a `TypeMismatch` unless `found` is coercible to `target`; otherwise

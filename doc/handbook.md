@@ -36,7 +36,7 @@ It is referenced throughout rather than duplicated.
 13. [Standard library tour](#13-standard-library-tour)
 14. [Idioms and patterns](#14-idioms-and-patterns)
 15. [Common pitfalls](#15-common-pitfalls)
-16. [Attributes and rules](#16-attributes-and-rules)
+16. [Attributes, rules, and transforms](#16-attributes-rules-and-transforms)
 17. [Where to go next](#17-where-to-go-next)
 
 ---
@@ -1561,13 +1561,14 @@ Aspect:
 
 ---
 
-## 16. Attributes and rules
+## 16. Attributes, rules, and transforms
 
-Aspect has the first slice of a *metasystem* — machinery for a program to
-describe and constrain itself. Two pieces are usable today: **attributes**
-(inert markers) and **rules** (post-typecheck governance). Both are small and
-deliberately conservative; the fuller story (user-written transforms and
-expansions) is future work.
+Aspect has a growing *metasystem* — machinery for a program to describe,
+constrain, and rewrite itself. Three pieces are usable today: **attributes**
+(inert markers), **rules** (post-typecheck governance), and **transforms**
+(typed-AST rewriting that repairs stuck coercions). All are deliberately
+conservative; the fuller story (pre-parse `expansion fn` and the `quote`
+construction sugar) is future work.
 
 ### Attributes — `@name`
 
@@ -1614,9 +1615,14 @@ rule @debug   audit          # list every @debug site (a report, not an error)
 - A rule whose anchor names an unknown type, or whose checker is unknown, is a
   build error (with a did-you-mean for a near-miss checker name).
 
-Rules are **whole-program**: a rule sees every site regardless of module, and
-`$import`-ing a module imports its rules — importing a module means accepting
-its governance.
+Rules are **module-scoped by default**: a bare `rule` judges only sites in its
+own module. Prefix it with `public` to govern the whole program — the same
+visibility model as `public type`:
+
+```aspect
+rule Config singleton          # only this module's Config constructions
+public rule Config singleton   # every Config construction, program-wide
+```
 
 `rule` is a *soft keyword*: a type, global, or local literally named `rule`
 still works (`rule r = rule { … }` is a variable of type `rule`). A rule
@@ -1647,9 +1653,144 @@ JIT-compiled, and emits judgments — `error` fails the build, `warn` is a note.
 `std/meta` is injected automatically — no `$import` — whenever a `rule fn` is
 present; build with `-I lib` so the compiler can find it.
 
-> This is an early slice of the metasystem. The other two hooks — `expansion fn`
-> (pre-parse syntax) and `transform fn` (typed-AST rewriting) — and the AST
-> *construction* surface (`quote`) are future work. The design lives in
+### Transforms — `transform <key> <handler>`
+
+A **transform** repairs a *stuck coercion*. When built-in coercion of a value
+from one type to another fails at a demand site (a call argument, an
+assignment, a `return`), the checker consults any transform bound to that
+`from -> to` key; the transform's handler rewrites the site, and the program is
+re-checked. This lets a library opt a type into an implicit conversion it
+controls — without loosening the type system for everyone.
+
+```aspect
+type Str {
+    public u8* ptr
+    public fn c_str(this) -> u8* { return this.ptr }
+}
+
+# The handler: given the demand site, build `site.c_str()`.
+transform fn to_cstr(Expr site) -> Expr { return quote { return $(site).c_str() } }
+
+# The binding: when a `Str` is wanted as a `u8*` and coercion fails, fire it.
+transform Str -> u8* to_cstr
+
+extern fn strlen(u8* s) -> u64
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Str s = Str { ptr = "hello" }
+    return strlen(s) as i32          # `strlen(s)` becomes `strlen(s.c_str())` → 5
+}
+```
+
+- The **handler** is a `transform fn` — a meta function with signature
+  `(Expr) -> Expr`. It reads the demand site as an `Expr` and returns a
+  replacement, built with `quote { ... }` (below) or, bare, the `Ast.*`
+  constructors it desugars to (`Ast.method(site, "name")` wraps `site` as
+  `site.name()`). Like a `rule fn`, it runs JIT-compiled and never reaches the
+  artifact; `std/meta` (which provides `Expr`/`Ast`) is injected
+  automatically — build with `-I lib`.
+- The **binding** `transform <from> -> <to> <handler>` fires the handler at a
+  stuck `from -> to` coercion. It takes optional `public`: a bare transform
+  governs only its own module, `public` the whole program (like `public type`
+  and `public rule`). A `transform fn` itself takes neither `public` nor
+  `export` — visibility lives on the binding.
+- Elaboration re-checks to a **fixpoint**: the rewritten site is checked again,
+  and any coercion it introduces may itself fire a transform. A handler that
+  never discharges its obligation (e.g. returns the site unchanged) is caught by
+  a round cap (`--max-rounds`, default 16) rather than looping forever.
+- Guardrails, all reported before elaboration: a key that already coerces
+  implicitly is **dead** (rejected); a key that only removes `const` is rejected
+  (const removal stays an explicit `as`); a handler that is not a valid
+  `transform fn` is rejected; and two handlers claiming one key with overlapping
+  reach are rejected. A stuck coercion with *no* binding stays an ordinary type
+  error.
+
+An attribute key (`transform @attr <handler>`) parses today but does not fire
+yet — like attribute-anchored rule fns, its firing is a later slice.
+
+### `quote { ... }` — the AST-construction sugar
+
+Building a replacement one `Ast.*` call at a time gets unwieldy fast — nested
+construction requires nesting builder calls, which stops reading like the code
+it builds. `quote { ... }` is sugar for exactly that nesting:
+
+```aspect
+transform fn to_cstr(Expr site) -> Expr { return quote { return $(site).c_str() } }
+```
+
+is the same rewrite as the bare `Ast.method(site, "c_str")` form above — `quote`
+desugars to it before typecheck, so nothing about how the handler runs changes.
+
+- **A quote's body is always a statement sequence** — the same `{ stmt* }`
+  grammar a value-block uses, parsed by the ordinary Aspect parser (real
+  syntax errors at real positions, not a foreign template language). `return`
+  is what makes it *value-producing*; a body not ending in `return <expr>` is
+  *void* (below). Legal only inside a meta fn (`rule fn` / `transform fn`); a
+  `quote` in ordinary code is a meta-scope error, the same class as calling a
+  `rule fn` from ordinary code.
+- **`$(expr)`** is a splice hole: `expr` is ordinary handler-side Aspect (it
+  runs in the handler, not the template) and must evaluate to `Expr` — a
+  splice of the wrong type is an ordinary type error, positioned at the
+  splice, exactly as if you'd passed it to `Ast.method` by hand.
+- **A local variable can be declared inside a template** —
+  `quote { u8* __v = $(site).c_str() return __v }` builds a two-statement
+  value-block. The declared name is renamed under the hood so it can never
+  capture a same-named variable at the splice site (hygiene, below) — reading
+  or writing it *inside the template* still uses the name you wrote.
+- **v1 scope**, beyond `$(expr)`, a zero-argument method call
+  (`$(x).name()`), and a local `VarDecl`: an integer, bool, or a single
+  pointer to one only for a declared local's type (no struct/array locals, no
+  `Type` splice for a dynamic type yet). A richer template (field access,
+  binary operators, branching, a method call with arguments) is a clear "not
+  yet supported" error, not a panic; the rest of the `Ast.*` table lands as
+  later slices need it. See [`doc/plans/Quote-Plan.md`](../plans/Quote-Plan.md)
+  for the staging.
+- **Hygiene.** A template-declared local is renamed so it can't capture a
+  same-named variable from wherever the constructed AST gets spliced —
+  without it, `quote { u8* __v = $(site).c_str() return __v }` spliced at a
+  demand site that happens to also be named `__v` would have the *template's*
+  `__v` shadow the *demand site's* `__v` starting at its own declaration
+  (visible before its initializer is even checked), corrupting the rewrite.
+  Free identifiers (anything not declared inside the template) are **not**
+  renamed — they resolve wherever the constructed AST ends up, unhygienically,
+  by design.
+- **Void quotes.** A body not ending in `return <expr>` — e.g.
+  `quote { $(subject) }`, one expression-statement — builds a statement
+  sequence with no value, for contexts that want a `Stmt` rather than an
+  `Expr`. Nothing in the language consumes one yet (that needs the decoration
+  hook, not yet built), so this is currently more a statement of what the
+  grammar already supports than something you'd reach for today.
+
+### Meta globals — `meta <type> <name>`
+
+A **meta global** is compile-time-only mutable state a metaprogram can carry
+across invocations — the memory a transform needs to, say, count how often it
+fired:
+
+```aspect
+meta u32 fired = 0
+
+transform fn pick(Expr site) -> Expr {
+    fired = fired + 1                       # persists across firings
+    if fired == 1 as u32 { return Ast.method(site, "first") }
+    return Ast.method(site, "second")
+}
+```
+
+- Declared at the top level with a `meta` modifier. v1 allows an **integer or
+  bool** type only; it defaults to zero and takes no `public`/`export`.
+- It exists only during compilation and never reaches the runtime artifact.
+- **Readable and writable only inside a `transform fn`.** Naming one from
+  ordinary code, a global initializer, or (for now) a `rule fn` is a meta-scope
+  error — in v1 the live value lives only in the transform engine, so a rule
+  couldn't see it anyway. Cross-hook access is a later slice.
+- **Mutation order across firings is unspecified.** Use meta globals for
+  order-insensitive aggregates (counts, accumulation), not for assigning stable
+  per-site ids.
+
+> This is a growing metasystem. The remaining hook — `expansion fn` (pre-parse
+> syntax) — is future work, as are `quote`'s hygiene and statement/block forms.
+> The design lives in
 > [`doc/plans/Three-Hook-Metasystem.md`](../doc/plans/Three-Hook-Metasystem.md).
 
 ---

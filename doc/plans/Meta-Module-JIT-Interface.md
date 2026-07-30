@@ -278,9 +278,13 @@ append (never reorder).
 
 - **Construction API** (`Ast.*` builders: `meta_expr_binary`, `meta_stmt_return`,
   …). The write side. Rules never construct; only expansions/transforms do.
-- **`quote { … }` / `$(…)`.** Special parser + desugar treatment; the
-  implementation approach is unsettled (owner's call), so no builders are
-  specified until it is.
+- ~~`quote { … }` / `$(…)`.~~ **Landed 2026-07-28** (Quote-Plan Slices B/C):
+  special parser + desugar treatment, exactly as anticipated here — `quote`
+  parsed by the real parser in a mode that defers method/field dispatch,
+  desugared to `Ast.*` calls before typecheck. v1 scope is expression quotes
+  only (`$(expr)` + a zero-arg method call); hygiene and statement/block
+  quotes remain deferred. See `doc/plans/Quote-Plan.md` and
+  `doc/compiler/12-transforms.md` ("The `quote` sugar").
 - **Mutation / in-place rewrite** (transforms). Handle **garbage collection** or
   lifetime *enforcement* (v1 leaves dangling-handle use as UB). Per-handler
   **watchdog** and **libc import allow-list** (§ metasystem "v1 honesty").

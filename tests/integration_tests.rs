@@ -52,6 +52,30 @@ fn parse_and_typecheck(
             .join("\n")
     })?;
 
+    // The meta-scope gate always runs before elaboration (mirrors
+    // `build_program`): a meta-surface misuse is a clean error rather than a
+    // mid-elaboration engine failure (or, for a `quote` left un-desugared in
+    // ordinary code, an internal panic — `quote` needs no `transform`/`rule`
+    // declaration to parse, so this can't be gated on `program.transforms`
+    // being non-empty the way it used to be).
+    let gate: Vec<String> = aspect::meta::check_meta_gate(&program)
+        .iter()
+        .map(|j| aspect::meta::format_judgment(j, &program.source_files))
+        .collect();
+    if !gate.is_empty() {
+        return Err(gate.join("\n"));
+    }
+
+    // Desugar `quote { ... }` templates into `Ast.*` builder calls before the
+    // checker ever sees a meta function's body (mirrors `build_program`).
+    aspect::meta::quote::desugar_quotes(&mut program).map_err(|errors| {
+        errors
+            .iter()
+            .map(|e| aspect::lexer::format_diagnostic(&program.source_files, e, e.position()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
+
     // Elaborate to a fixpoint, mirroring `build_program` so the corpus exercises
     // the same path production does.
     let elaboration = aspect::typechecker::elaborate_program(
@@ -163,12 +187,15 @@ fn run_at_opt(
         .generate(&program)
         .map_err(|e| format!("Code generation failed at -O{opt_level}: {e}"))?;
 
-    // Run the optimizer to catch codegen issues that only surface there.
-    if opt_level > 0 {
-        codegen
-            .optimize(opt_level, true)
-            .map_err(|e| format!("Optimization failed at -O{opt_level}: {e}"))?;
-    }
+    // Run the optimizer unconditionally, mirroring production (`build_codegen`):
+    // even at -O0 it runs `globaldce`, which strips unreachable compile-time-only
+    // meta code (`transform fn`/`rule fn` bodies + the injected std/meta surface).
+    // Left in, that code references unresolvable `meta_*` externs at JIT
+    // finalization. `globaldce` deletes only unreachable symbols, so the live -O0
+    // lowering under test is unchanged.
+    codegen
+        .optimize(opt_level, true)
+        .map_err(|e| format!("Optimization failed at -O{opt_level}: {e}"))?;
 
     let mut argv: Vec<&str> = Vec::with_capacity(args.len() + 1);
     argv.push(source_path);
@@ -215,13 +242,19 @@ fn typecheck_is_idempotent_on_recheck() {
     // import.
     let cases: &[(&str, &[&str])] = &[
         ("tests/programs/methods.ap", &[]),
-        ("tests/programs/method_chain.ap", &[]),
+        ("tests/programs/rvalue_materialization.ap", &[]),
         ("tests/programs/value_block.ap", &[]),
         ("tests/programs/enum_basic.ap", &[]),
-        ("tests/programs/fnptr_vtable.ap", &[]),
+        ("tests/programs/function_pointers.ap", &[]),
         ("tests/programs/encapsulation.ap", &[]),
         ("tests/programs/attributes_inert.ap", &[]),
         ("tests/programs/stdlib_check.ap", &["-I", "lib"]),
+        // A settled coercion transform: the argument is already rewritten to
+        // `.c_str()`, so a bare re-check (no handlers) must leave it untouched.
+        ("tests/programs/transform_coerce.ap", &["-I", "lib"]),
+        // Same, with a quote-constructed value-block (a VarDecl binder) as
+        // the settled rewrite.
+        ("tests/programs/transform_hygiene.ap", &["-I", "lib"]),
     ];
     for (path, args) in cases {
         let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();

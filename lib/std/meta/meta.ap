@@ -166,6 +166,54 @@ public type ExprList {
     public fn at(this, u64 i) -> Expr { return Expr.from_handle(meta_exprlist_at(this.handle, i)) }
 }
 
+# ── AST construction (the transform write surface) ───────────────────────────
+# The only write primitive a transform handler has: build new AST from a demand
+# site. `Ast` is a namespace (no state) — its builders return fresh `Expr`/
+# `Stmt`s that the elaboration round splices in and re-checks. `quote` is the
+# ergonomic sugar over these builders (`src/meta/quote.rs`); this is the bare
+# form it desugars to.
+public type Ast {
+    # `site.<name>()` — wrap `site` as the receiver of a zero-arg method call.
+    # The coercion transform's staple: `Ast.method(site, "c_str")` rewrites a
+    # `String` demand site into `site.c_str()`.
+    public fn method(Expr base, u8* name) -> Expr {
+        return Expr.from_handle(meta_ast_method(base.raw(), name))
+    }
+    # A bare variable reference — a quote template's binder (hygiene-renamed)
+    # or free identifier (resolved wherever the constructed AST is spliced).
+    public fn var(u8* name) -> Expr {
+        return Expr.from_handle(meta_ast_var(name))
+    }
+    # `return <e>` — only legal as a quote body's last statement.
+    public fn return_stmt(Expr e) -> Stmt {
+        return Stmt.from_handle(meta_ast_return(e.raw()))
+    }
+    # `<e>` as a statement — side-effecting, its value discarded.
+    public fn expr_stmt(Expr e) -> Stmt {
+        return Stmt.from_handle(meta_ast_expr_stmt(e.raw()))
+    }
+    # A value-producing `{ stmt* }` from a built `StmtList` — a value quote's
+    # lowering target (a body ending in `return <expr>`).
+    public fn value_block(StmtList stmts) -> Expr {
+        return Expr.from_handle(meta_ast_value_block(stmts.raw()))
+    }
+    # `<type> <name> = <init>` — a quote template's `VarDecl` binder. `kind`
+    # is a `TypeKind` tag as a raw `i32` (v1: `SInt`=0/`UInt`=1/`Bool`=4 only
+    # — an integer, bool, or a single pointer to one; `desugar_quotes` rejects
+    # anything else before this is ever called, so this stays a thin,
+    # machine-generated-call wrapper rather than an ergonomic hand-written one).
+    public fn vardecl(i32 kind, i32 size_bits, i32 pointer_depth, u8* name, Expr init) -> Stmt {
+        return Stmt.from_handle(meta_ast_vardecl(kind, size_bits, pointer_depth, name, init.raw()))
+    }
+    # A void `{ stmt* }` from a built `StmtList` — a void quote's lowering
+    # target (a body *not* ending in `return <expr>`). A `Stmt`, not an
+    # `Expr` — `value_block`'s `ValueBlock` is unconditionally
+    # value-producing, so a void body needs the other node.
+    public fn block(StmtList stmts) -> Stmt {
+        return Stmt.from_handle(meta_ast_block(stmts.raw()))
+    }
+}
+
 # ── Statement ────────────────────────────────────────────────────────────────
 public type Stmt {
     u64 handle
@@ -187,8 +235,17 @@ public type StmtList {
     public fn from_handle(u64 h) -> StmtList { return StmtList { handle = h } }
     public fn raw(this) -> u64 { return this.handle }
 
+    # Read side: `Stmt.children()`'s flattened nested-statement list.
     public fn count(this) -> u64 { return meta_stmtlist_count(this.handle) }
     public fn at(this, u64 i) -> Stmt { return Stmt.from_handle(meta_stmtlist_at(this.handle, i)) }
+
+    # Construction side: a fresh, empty, mutable builder — `quote`'s desugar
+    # target for a body's statement sequence. `push` chains: it mutates and
+    # returns the same list, not a copy.
+    public fn new() -> StmtList { return StmtList.from_handle(meta_stmtlist_new()) }
+    public fn push(this, Stmt s) -> StmtList {
+        return StmtList.from_handle(meta_stmtlist_push(this.handle, s.raw()))
+    }
 }
 
 # ── Function ─────────────────────────────────────────────────────────────────
@@ -308,6 +365,15 @@ extern fn meta_expr_child(u64 h, u64 i)  -> u64
 extern fn meta_exprlist_count(u64 h)     -> u64
 extern fn meta_exprlist_at(u64 h, u64 i) -> u64
 
+# Construction: build a `site.<name>()` method call around an existing node.
+extern fn meta_ast_method(u64 base, u8* name) -> u64
+extern fn meta_ast_var(u8* name)              -> u64
+extern fn meta_ast_return(u64 e)              -> u64
+extern fn meta_ast_expr_stmt(u64 e)           -> u64
+extern fn meta_ast_value_block(u64 list)      -> u64
+extern fn meta_ast_vardecl(i32 kind, i32 size_bits, i32 pointer_depth, u8* name, u64 init) -> u64
+extern fn meta_ast_block(u64 list) -> u64
+
 extern fn meta_stmt_kind(u64 h)          -> i32
 extern fn meta_stmt_pos(u64 h)           -> u64
 extern fn meta_stmt_attrs(u64 h)         -> u64
@@ -315,6 +381,8 @@ extern fn meta_stmt_as_expr(u64 h)       -> u64
 extern fn meta_stmt_children(u64 h)      -> u64
 extern fn meta_stmtlist_count(u64 h)     -> u64
 extern fn meta_stmtlist_at(u64 h, u64 i) -> u64
+extern fn meta_stmtlist_new()            -> u64
+extern fn meta_stmtlist_push(u64 list, u64 stmt) -> u64
 
 extern fn meta_fn_name(u64 h)              -> u8*
 extern fn meta_fn_is_public(u64 h)         -> bool

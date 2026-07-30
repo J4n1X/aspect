@@ -16,12 +16,13 @@
 pub mod builtins;
 pub mod jit;
 pub mod query;
+pub mod quote;
 mod walk;
 
 use std::path::PathBuf;
 
 use crate::lexer::{LangType, Position, TypeBase};
-use crate::parser::ast::{ExprKind, Expression, FunctionBody};
+use crate::parser::ast::{ExprKind, Expression, FunctionBody, Statement, StatementKind};
 use crate::parser::{MetaKind, Program, RuleAnchor};
 use crate::symbol::module::Visibility;
 use query::QueryIndex;
@@ -69,7 +70,7 @@ pub fn check_meta_gate(program: &Program) -> Vec<Judgment> {
                 rule: "meta-scope".to_string(),
                 message: format!(
                     "ordinary function '{name}' uses a std/meta type in its signature; \
-                     std/meta types are usable only inside a `rule fn`"
+                     std/meta types are usable only inside a meta function (`rule fn` / `transform fn`)"
                 ),
             });
         }
@@ -88,13 +89,118 @@ pub fn check_meta_gate(program: &Program) -> Vec<Judgment> {
                     rule: "meta-scope".to_string(),
                     message: format!(
                         "ordinary function '{name}' calls the meta function '{callee}'; \
-                         meta functions run only inside the rule engine"
+                         meta functions run only inside the metaprogramming engine"
                     ),
+                });
+            }
+
+            // A `quote { ... }` template carries no symbol reference (unlike a
+            // meta-fn call or a meta-global read/write above), so it needs its
+            // own scan rather than falling out of `MetaCalls`. Still parsed
+            // (`ExprKind::Quote`) but not yet desugared at this point — the
+            // quote/desugar pass runs only over `meta_kind.is_some()` bodies —
+            // so one left in ordinary code is exactly this gate's job to catch.
+            let mut quotes = QuoteRefs { found: Vec::new() };
+            for stmt in body {
+                walk::walk_stmt(stmt, &mut quotes);
+            }
+            for pos in quotes.found {
+                out.push(Judgment {
+                    severity: Severity::Error,
+                    pos,
+                    rule: "meta-scope".to_string(),
+                    message: "`quote` is usable only inside a meta function \
+                              (`rule fn` / `transform fn`)"
+                        .to_string(),
                 });
             }
         }
     }
+
+    // `meta` globals are readable/writable only inside a `transform fn`. A
+    // reference from ordinary code, a `rule fn`, or a global initializer would
+    // either leak an undefined symbol into the artifact or read a fresh (wrong)
+    // value, so it is a meta-scope error. (Cross-hook read access is a later
+    // phase; today only the persistent transform engine holds the live value.)
+    let meta_globals: std::collections::HashSet<&str> = program
+        .global_vars
+        .iter()
+        .filter(|g| g.is_meta)
+        .map(|g| g.name.as_str())
+        .collect();
+    if !meta_globals.is_empty() {
+        let mut flag = |name: String, pos: Position| {
+            out.push(Judgment {
+                severity: Severity::Error,
+                pos,
+                rule: "meta-scope".to_string(),
+                message: format!("meta global '{name}' is accessible only inside a `transform fn`"),
+            });
+        };
+        for func in &program.functions {
+            if func.proto.meta_kind == Some(MetaKind::Transform)
+                || module_of(func.proto.pos.file_id) == "std/meta"
+            {
+                continue;
+            }
+            if let FunctionBody::Aspect(body) = &func.body {
+                let mut refs = MetaGlobalRefs {
+                    meta_globals: &meta_globals,
+                    found: Vec::new(),
+                };
+                for stmt in body {
+                    walk::walk_stmt(stmt, &mut refs);
+                }
+                for (name, pos) in refs.found {
+                    flag(name, pos);
+                }
+            }
+        }
+        // A meta global reference in an *ordinary* global's initializer — never
+        // reached by the function walk above.
+        for g in &program.global_vars {
+            if g.is_meta {
+                continue;
+            }
+            if let Some(init) = &g.initializer {
+                let mut refs = MetaGlobalRefs {
+                    meta_globals: &meta_globals,
+                    found: Vec::new(),
+                };
+                walk::walk_expr(init, &mut refs);
+                for (name, pos) in refs.found {
+                    flag(name, pos);
+                }
+            }
+        }
+    }
     out
+}
+
+/// Collects references to `meta` globals — reads (a `Variable` expression) and
+/// writes (a `VarAssign` naming one; the assignment target is not an expression
+/// node, so `visit_expr` alone would miss a pure write).
+struct MetaGlobalRefs<'a> {
+    meta_globals: &'a std::collections::HashSet<&'a str>,
+    found: Vec<(String, Position)>,
+}
+
+impl walk::Visitor for MetaGlobalRefs<'_> {
+    fn visit_expr(&mut self, expr: &Expression) {
+        if let ExprKind::Variable(name) = &expr.kind
+            && self.meta_globals.contains(name.as_str())
+        {
+            self.found.push((name.clone(), expr.pos));
+        }
+    }
+
+    fn visit_stmt(&mut self, stmt: &Statement) {
+        if let StatementKind::VarAssign { name, .. } = &stmt.kind
+            && self.meta_globals.contains(name.as_str())
+        {
+            self.found.push((name.clone(), stmt.pos));
+        }
+    }
 }
 
 /// Collects, over a function body, every call to a meta function. Used by the
@@ -110,6 +216,22 @@ impl walk::Visitor for MetaCalls<'_> {
             && self.meta_fns.contains(name.as_str())
         {
             self.found.push((name.clone(), expr.pos));
+        }
+    }
+}
+
+/// Collects, over a function body, every `quote { ... }` template. Used by the
+/// meta-only gate to flag `quote` sitting in ordinary code — unlike a meta-fn
+/// call or a meta-global reference, a `Quote` node carries no name to look up,
+/// so it needs its own scan rather than folding into `MetaCalls`.
+struct QuoteRefs {
+    found: Vec<Position>,
+}
+
+impl walk::Visitor for QuoteRefs {
+    fn visit_expr(&mut self, expr: &Expression) {
+        if matches!(expr.kind, ExprKind::Quote { .. }) {
+            self.found.push(expr.pos);
         }
     }
 }
@@ -326,10 +448,10 @@ fn resolve_type_anchor(program: &Program, name: &str) -> Option<u32> {
         return Some(id);
     }
     let ty = program.symbols.resolve_alias(name)?;
-    if ty.pointer_depth == 0 {
-        if let TypeBase::Struct(id) = ty.base {
-            return Some(id);
-        }
+    if ty.pointer_depth == 0
+        && let TypeBase::Struct(id) = ty.base
+    {
+        return Some(id);
     }
     None
 }

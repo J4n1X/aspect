@@ -264,6 +264,12 @@ pub(crate) fn const_eval<'ctx>(
         // `IndirectCall` before codegen; one reaching here means the checker
         // was bypassed.
         ExprKind::MethodCall { .. } => unreachable!("MethodCall is lowered by the typechecker"),
+        // Both are desugared to `Ast.*`/`meta_ast_*` calls before typecheck
+        // (`src/meta/quote.rs`); one reaching codegen means that pass was
+        // bypassed.
+        ExprKind::Quote { .. } | ExprKind::Splice(_) => {
+            unreachable!("Quote/Splice is lowered before typecheck")
+        }
     }
 }
 

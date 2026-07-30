@@ -79,7 +79,8 @@ pub(super) fn walk_expr(expr: &Expression, v: &mut impl Visitor) {
         | ExprKind::UnaryNot(inner)
         | ExprKind::BitwiseNot(inner)
         | ExprKind::Cast { expr: inner, .. }
-        | ExprKind::FieldAccess { base: inner, .. } => walk_expr(inner, v),
+        | ExprKind::FieldAccess { base: inner, .. }
+        | ExprKind::Splice(inner) => walk_expr(inner, v),
         ExprKind::FunctionCall { args, .. } => args.iter().for_each(|a| walk_expr(a, v)),
         ExprKind::IndirectCall { callee, args } => {
             walk_expr(callee, v);
@@ -94,7 +95,9 @@ pub(super) fn walk_expr(expr: &Expression, v: &mut impl Visitor) {
         }
         ExprKind::Alloc { count, .. } => walk_expr(count, v),
         ExprKind::ListInitializer(items) => items.iter().for_each(|x| walk_expr(x, v)),
-        ExprKind::ValueBlock(stmts) => stmts.iter().for_each(|s| walk_stmt(s, v)),
+        ExprKind::ValueBlock(stmts) | ExprKind::Quote { body: stmts } => {
+            stmts.iter().for_each(|s| walk_stmt(s, v));
+        }
         ExprKind::Literal(_)
         | ExprKind::Variable(_)
         | ExprKind::EnumValue { .. }

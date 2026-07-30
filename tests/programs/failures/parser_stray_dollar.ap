@@ -1,0 +1,10 @@
+# expected: "unexpected token", "$"
+# Directives are line-anchored, so a mid-line `$` is never a directive — the
+# preprocessor passes it through unchanged (it's only meaningful inside a
+# `quote { ... }` template, as a splice hole). Outside quote-mode it's just a
+# stray token, so this is now a parser error rather than a preprocessor one.
+i32 x = 0 $define MAX_SIZE 1024
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return x
+}

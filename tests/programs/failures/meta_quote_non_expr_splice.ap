@@ -1,0 +1,23 @@
+# expected: "type mismatch", "i32"
+# compile_args: "-I", "lib"
+#-
+  A splice's content must evaluate to the `Expr` handle type — here the
+  handler splices a plain `i32` literal instead of `site`. `quote` has no
+  bespoke type-checker for this: `lower` desugars the splice straight into
+  `Ast.method`'s first argument, so a non-`Expr` splice is an ordinary
+  arg-type mismatch at that call, positioned at the splice.
+-#
+type Str {
+    public u8* ptr
+    public fn c_str(this) -> u8* { return this.ptr }
+}
+
+transform fn to_cstr(Expr site) -> Expr { return quote { return $(1).c_str() } }
+transform Str -> u8* to_cstr
+
+extern fn strlen(u8* s) -> u64
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Str s = Str { ptr = "hello" }
+    return strlen(s) as i32
+}

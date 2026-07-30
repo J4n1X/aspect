@@ -24,12 +24,6 @@ pub enum PreprocessError {
     #[error("cannot read '{path}': {reason}")]
     Unreadable { path: PathBuf, reason: String },
 
-    #[error("preprocessor directives must start a line: `$` at {0}")]
-    MidLineDirective(Position),
-
-    #[error("expected a directive name after `$` at {0}")]
-    MissingDirectiveName(Position),
-
     #[error("unknown preprocessor directive `${name}` at {pos}{}", .suggestion.as_deref().map(|s| format!("; did you mean `${s}`?")).unwrap_or_default())]
     UnknownDirective {
         name: String,

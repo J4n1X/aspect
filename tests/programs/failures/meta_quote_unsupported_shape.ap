@@ -1,0 +1,16 @@
+# expected: "quote does not yet support", "binary operator"
+# compile_args: "-I", "lib"
+#-
+  This slice's `lower` implements only `$(expr)` and a zero-arg method call;
+  a binary operator inside a template is additive, later work (`Ast.binary`,
+  `doc/plans/Quote-Plan.md` §2) — until then it is a clear compile error at
+  the unsupported node, not a panic.
+-#
+transform fn t(Expr site) -> Expr {
+    return quote { return $(site) + $(site) }
+}
+transform i32 -> u8* t
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

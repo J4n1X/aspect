@@ -1,0 +1,22 @@
+# expected: "type mismatch", "i32"
+# compile_args: "-I", "lib"
+#-
+  The handler rewrites the site to `s.wrong()`, which resolves to `i32` — still
+  not the `u8*` the demand site wants. Because `i32 -> u8*` has no handler, the
+  rewrite is not re-claimed: it settles and surfaces as an ordinary type error at
+  the rewritten site. An ill-typed rewrite is caught, not silently accepted.
+-#
+type Str {
+    public i32 n
+    public fn wrong(this) -> i32 { return this.n }
+}
+
+transform fn to_wrong(Expr site) -> Expr { return Ast.method(site, "wrong") }
+transform Str -> u8* to_wrong
+
+extern fn strlen(u8* s) -> u64
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Str s = Str { n = 3 }
+    return strlen(s) as i32
+}

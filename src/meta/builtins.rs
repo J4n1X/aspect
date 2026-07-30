@@ -1,6 +1,6 @@
-//! The builtin rule registry (Phase 2a). A name here is what `rule <anchor>
-//! <fn>` resolves against; a later phase will let it name a user-authored
-//! Aspect function instead (same surface syntax, different resolution).
+//! The builtin rule registry. A name here is checked first when resolving
+//! `rule <anchor> <fn>`; if it misses, resolution falls back to a
+//! user-authored `rule fn` of the same name (see `check_rules` in `mod.rs`).
 
 use crate::lexer::Position;
 

@@ -474,6 +474,7 @@ impl Parser {
             pos,
             vis,
             export,
+            is_meta: false,
             attrs,
         })
     }

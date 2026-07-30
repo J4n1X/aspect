@@ -395,8 +395,11 @@ program ::= (newline* top-decl newline*)*
 
 vis-linkage ::= ('public' | 'export')*         # each at most once, either order
 top-decl ::= attr* item-decl
-           | rule-decl                          # governance rule; no attrs/vis/linkage
+           | 'public'? rule-decl                 # governance rule; no attrs/export
            | rule-fn-decl                        # a rule-checker function (metaprogramming)
+           | 'public'? transform-decl            # coercion/attribute handler binding
+           | transform-fn-decl                   # a transform handler function
+           | meta-global-decl                    # compile-time mutable state
 item-decl ::= 'public'? extern-fn-decl
            | vis-linkage asm-fn-decl
            | vis-linkage fn-decl
@@ -464,10 +467,40 @@ rule-fn-decl ::= 'rule' 'fn' ident '(' param-list ')' return-ann? newline* block
 # `rule <T> <fn>` declaration must be `(Program, Type) -> Judgments`.
 # `rule` is a *soft* keyword — a type or global literally named `rule` still
 # parses (`rule x = …`); a rule is detected by lookahead (`rule` followed by
-# `@`, or by two identifiers). A rule takes no `public`/`export`/attributes and
-# is always whole-program. `<checker-fn>` names a compiler builtin (Phase 2a:
-# `singleton`, `audit`); a later phase lets it name a user function. Rules are
-# post-typecheck judgments that only diagnose — see the metasystem design doc.
+# `@`, or by two identifiers). A rule binding takes optional `public` (never
+# `export`/attributes): a bare rule governs only its declaring module, `public`
+# the whole program (mirrors `public type`). A `public rule fn` is an error —
+# visibility lives on the binding, not the checker fn. `<checker-fn>` names a
+# compiler builtin (`singleton`, `audit`) or a user `rule fn`.
+
+transform-decl    ::= 'transform' transform-key ident term   # `transform <key> <handler-fn>`
+transform-key     ::= '@' ident                              # attribute site (parses; inert)
+                    | type '->' type                         # coercion `<from> -> <to>`
+transform-fn-decl ::= 'transform' 'fn' ident '(' param-list ')' return-ann? newline* block
+# `transform fn` — a metaprogramming obligation handler with signature
+# `(Expr) -> Expr`. `transform` is a soft keyword; a `transform <key> <handler>`
+# binding is told from a `transform fn <name>` handler by the token after
+# `transform` (`fn` → handler, else → binding). The from-type's `parse_type`
+# greedily eats a fn-pointer type's own `->`, so the surviving arrow is always
+# the key separator. A binding takes optional `public` (module-scoped by
+# default, whole-program with `public`); a `transform fn` takes neither
+# `public` nor `export`. The handler is JIT-compiled and consulted at a stuck
+# coercion demand site during round-based elaboration; it rewrites the site (via
+# the `Ast.*` builders) and never reaches the artifact. A coercion key that
+# already coerces implicitly (dead), one that only removes `const`, a handler
+# that is not a valid `transform fn`, and two handlers claiming one key with
+# overlapping reach are all errors. The attribute key parses but does not fire
+# yet. See `doc/compiler/12-transforms.md`.
+
+meta-global-decl ::= 'meta' scalar-type ident ('=' const-expr)? term
+# `meta` global — compile-time-only mutable state for metaprograms. `meta` is a
+# soft keyword, told from a global of a user type named `meta` by the following
+# token: a scalar built-in type (`LangType`) means a meta global, an identifier
+# means an ordinary global of type `meta`. v1 restricts the type to an integer
+# or bool (the store is a scalar); it takes no `public`/`export`/attributes
+# (whole-compilation state, not a module symbol) and defaults to zero when the
+# initializer is omitted. Readable/writable only inside a `transform fn`
+# (meta-scope gate); stripped from the artifact. See `doc/compiler/12-transforms.md`.
 
 attr ::= '@' ident ('(' (expr (',' expr)*)? ')')?  # inert metadata attached to the
                                                    # following item, struct member, or
@@ -719,11 +752,16 @@ primary-expr ::= integer-literal
                | sizeof-expr
                | list-initializer
                | value-block
+               | quote-expr
 
 sizeof-expr ::= 'sizeof' '(' type ')'    # compile-time u64 byte size
 
 list-initializer ::= '{' (expr (',' expr)*)? '}'   # array literals
 value-block      ::= '{' stmt* '}'                 # block as an expression; see below
+quote-expr       ::= 'quote' '{' stmt* '}'         # AST-construction template; see below.
+                                                   # Same grammar as value-block. Inside,
+                                                   # '$(' expr ')' is a splice hole (ordinary
+                                                   # Aspect, not template content).
 
 arg-list ::= /* empty */ | expr (',' expr)*
 ```
@@ -760,6 +798,39 @@ i32 clamped = {
   *statement* position is always a plain block statement, never a value block.
 - Value blocks execute statements, so they are never compile-time constants:
   global initializers cannot use them.
+
+**Quote templates.** `quote { ... }` is an AST-construction sugar, legal only
+inside a meta fn (`rule fn` / `transform fn`) — a `quote` in ordinary code is a
+meta-scope error, not a parse error. `quote` is a soft keyword: recognized only
+when no real struct is named `quote` (a real `type quote { ... }` keeps its
+struct-literal form, same precedent as the `rule`/`transform`/`meta` soft
+keywords). The body is *always a statement sequence* — literally the same
+`parse_block_statement` a `{ }` block statement uses — parsed by the *real*
+statement/expression parser, in a mode (`quote_depth > 0`) where three things
+change:
+
+- `$(expr)` is a splice hole — `expr` is ordinary handler-side Aspect (parsed
+  with quote-mode suspended), not template content, and must evaluate to the
+  `Expr` handle type. Outside a `quote`, `$` in expression position is not a
+  valid primary expression.
+- `base.name` / `base.name(args)` cannot resolve method-vs-field from a
+  receiver type — the template has none — so both defer unconditionally to
+  the checker instead of resolving at parse time.
+- A bare identifier cannot resolve against the handler's own scope either (it
+  may name a template-local binder or a free identifier resolved wherever the
+  constructed AST is spliced), so it also defers.
+
+Whether the body is **value-producing** or **void** is a property of its
+content: the last statement being `return <expr>` makes it value-producing
+(desugars to an `Expr`); anything else — a bare expression-statement, a local
+declaration with no trailing `return`, an empty body — makes it void
+(desugars to a `Stmt`). Before typecheck, `quote { ... }` is desugared into
+ordinary Aspect calling the `Ast.*` builders (`src/meta/quote.rs`); a local
+`u8* x = $(e)`-shaped declaration inside a template is renamed under the hood
+so it can't capture a same-named identifier at the splice site. See
+[`doc/compiler/12-transforms.md`](12-transforms.md) ("The `quote` sugar") and
+[`doc/plans/Quote-Plan.md`](../plans/Quote-Plan.md) for the full design and
+what template shapes are and aren't implemented yet.
 
 **Notes:**
 

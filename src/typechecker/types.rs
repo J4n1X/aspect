@@ -63,7 +63,7 @@ pub fn types_coercible(from: &LangType, to: &LangType) -> bool {
         {
             return false;
         }
-        return !(decayed_from.is_const && !decayed_to.is_const);
+        return !decayed_from.is_const || decayed_to.is_const;
     }
 
     // Non-pointer numeric types: widening (or equal) within same family only

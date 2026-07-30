@@ -1,0 +1,15 @@
+# expected: "meta global", "transform fn"
+# compile_args: "-I", "lib"
+#-
+  A `meta` global is compile-time-only state; ordinary runtime code cannot read
+  or write it (it is stripped from the artifact), so a reference from `main` is a
+  meta-scope error.
+-#
+meta u32 fired = 0
+
+transform fn t(Expr site) -> Expr { fired = fired + 1 return site }
+transform i32 -> u8* t
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return fired as i32
+}

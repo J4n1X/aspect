@@ -1,0 +1,16 @@
+# expected: "meta global", "transform fn"
+# compile_args: "-I", "lib"
+#-
+  An ordinary global's initializer runs in the artifact, so it cannot read a
+  compile-time `meta` global either — the gate covers global initializers, not
+  just function bodies.
+-#
+meta u32 fired = 0
+u32 leak = fired
+
+transform fn t(Expr site) -> Expr { fired = fired + 1 return site }
+transform i32 -> u8* t
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

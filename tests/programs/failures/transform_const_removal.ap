@@ -1,0 +1,13 @@
+# expected: "removes const", "explicit"
+# compile_args: "-I", "lib"
+#-
+  A coercion key that differs only by dropping `const` would make const removal
+  implicit — exactly what the type system forbids. Rejected before elaboration so
+  a transform can never launder away const.
+-#
+transform fn launder(Expr site) -> Expr { return site }
+transform const u8* -> u8* launder
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

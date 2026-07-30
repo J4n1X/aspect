@@ -1,0 +1,27 @@
+# expected: 5
+# compile_args: "-I", "lib"
+#-
+  The coercion transform, end to end. A `Str` value flows into a `u8*`-wanting
+  `strlen`; built-in coercion `Str -> u8*` fails, so the registered transform
+  fires and rewrites the argument to `s.c_str()` — written as
+  `quote { return $(site).c_str() }`. A quote's body is always a statement
+  sequence (`return` makes it value-producing), which desugars to a
+  `StmtList`-built value-block wrapping the same `Ast.method(site, "c_str")`
+  builder call the bare form used before `quote` shipped. The elaboration
+  round re-checks the rewrite — now `u8*` — reaches a fixpoint, and the
+  program runs: strlen("hello") = 5.
+-#
+type Str {
+    public u8* ptr
+    public fn c_str(this) -> u8* { return this.ptr }
+}
+
+transform fn to_cstr(Expr site) -> Expr { return quote { return $(site).c_str() } }
+transform Str -> u8* to_cstr
+
+extern fn strlen(u8* s) -> u64
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Str s = Str { ptr = "hello" }
+    return strlen(s) as i32
+}

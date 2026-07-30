@@ -1,4 +1,4 @@
-# expected: "meta function", "rule engine"
+# expected: "meta function", "metaprogramming engine"
 # compile_args: "-I", "lib"
 #-
   A meta function may not be called from ordinary code — only the rule engine

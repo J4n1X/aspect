@@ -132,6 +132,8 @@ pub struct Expression {
 | `SizeOf(LangType)` | Compile-time size, stamped `u64` | `sizeof(Point)` |
 | `Null` | The untyped null pointer | `null` |
 | `ValueBlock(Vec<Statement>)` | Block in expression position, valued by its inner `return` | `{ return 7 }` |
+| `Quote { body: Vec<Statement> }` | AST-construction template, legal only inside a meta fn; always a statement sequence (same shape as `ValueBlock`), value-producing iff it ends in `return`; desugared to `Ast.*` builder calls before typecheck (never reaches the checker or codegen) | `quote { return $(site).c_str() }` |
+| `Splice(Box<Expression>)` | A splice hole inside a `quote` template — ordinary handler-side Aspect evaluating to an `Expr` handle, not template content | `$(site)` |
 
 ### LiteralValue
 

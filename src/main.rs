@@ -308,6 +308,48 @@ fn parse_program_from(path: &Path, preproc: &PreprocArgs) -> Result<Program> {
 fn build_program(path: &Path, preproc: &PreprocArgs) -> Result<Program> {
     let mut program = parse_program_from(path, preproc)?;
 
+    // The meta-scope gate always runs before elaboration: a misuse of the meta
+    // surface in ordinary code is then a clean `meta-scope` error rather than a
+    // mid-elaboration engine failure (or, for a `quote` left un-desugared in
+    // ordinary code, an internal panic — `quote` needs no `transform`/`rule`
+    // declaration anywhere in the file to parse, so this can't be gated on
+    // `program.transforms`/`.rules` being non-empty the way it used to be).
+    let mut gate = String::new();
+    for judgment in aspect::meta::check_meta_gate(&program) {
+        let _ = writeln!(
+            gate,
+            "{}",
+            aspect::meta::format_judgment(&judgment, &program.source_files)
+        );
+    }
+    if !gate.is_empty() {
+        anyhow::bail!(
+            "Meta-scope check failed for '{}':\n{}",
+            path.display(),
+            gate.trim_end()
+        );
+    }
+
+    // Desugar `quote { ... }` templates into `Ast.*` builder calls before the
+    // checker ever sees a meta function's body (Quote-Plan Slice C) — the
+    // gate above already guarantees any surviving `Quote` is legitimately
+    // inside a meta function, not stray ordinary code.
+    aspect::meta::quote::desugar_quotes(&mut program).map_err(|errors| {
+        let mut msg = String::new();
+        for error in &errors {
+            let _ = writeln!(
+                msg,
+                "{}",
+                aspect::lexer::format_diagnostic(&program.source_files, error, error.position())
+            );
+        }
+        anyhow::anyhow!(
+            "Quote desugaring failed for '{}':\n{}",
+            path.display(),
+            msg.trim_end()
+        )
+    })?;
+
     // Re-check to a fixpoint so transforms can rewrite the AST; the final
     // round's checker formats diagnostics.
     let elaboration = aspect::typechecker::elaborate_program(

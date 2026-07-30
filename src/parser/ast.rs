@@ -131,6 +131,28 @@ pub enum ExprKind {
     /// `ListInitializer` at parse time: a brace expression that parses as a
     /// comma-separated list *is* a list; anything else re-parses as statements.
     ValueBlock(Vec<Statement>),
+    /// `quote { stmt* }` — an AST-construction template, parsed by the real
+    /// statement parser in quote-mode (`Parser::quote_depth`), the same
+    /// `'{' stmt* '}'` grammar a `ValueBlock` uses (literally
+    /// `parse_block_statement`). Value-producing iff the last statement is
+    /// `Return(Some(_))`; otherwise void — see `src/meta/quote.rs`'s
+    /// `lower_body`, which is also where "value" lowers to an `Expr`
+    /// (`Ast.value_block`) and "void" to a `Stmt` (`Ast.block`, *not* another
+    /// `ValueBlock` — that variant is unconditionally value-producing).
+    /// Legal only inside a meta fn; desugared to `Ast.*`/`meta_ast_*` builder
+    /// calls before typecheck, so it never reaches the checker or codegen.
+    /// Kept out of the frozen `meta_expr_kind` ABI enum in
+    /// `lib/std/meta/meta.ap` — a handler can never observe one through the
+    /// handle API.
+    Quote { body: Vec<Statement> },
+    /// `$(expr)` — a splice hole inside a `quote` template. `expr` is
+    /// ordinary handler-side Aspect (parsed with quote-mode suspended), not
+    /// template content; it must evaluate to the `Expr` handle type. Lowered
+    /// to its inner expression verbatim (`lower(Splice(e)) = e`), after
+    /// recursively desugaring `e` itself — `$(quote { ... })` parses (a
+    /// nested quote inside a splice), so `e` can still contain an
+    /// undesugared `Quote`. Same ABI exclusion as `Quote`.
+    Splice(Box<Expression>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -344,6 +366,12 @@ pub struct GlobalVar {
     /// Foreign linkage (`export` gives external linkage); see
     /// [`FunctionProto::export`]. Orthogonal to `vis`; the two compose.
     pub export: bool,
+    /// A `meta` global — compile-time-only mutable state, readable/writable only
+    /// inside a `transform fn` (enforced by the meta-scope gate). It lives in the
+    /// persistent transform judge module (so its value survives across firings)
+    /// and is stripped from the artifact by `globaldce` like any unused meta
+    /// symbol. `false` for an ordinary global.
+    pub is_meta: bool,
     /// Leading attributes in source order (outside-in, leftmost applied last).
     pub attrs: Vec<Attribute>,
     pub pos: Position,

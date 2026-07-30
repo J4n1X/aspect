@@ -1,0 +1,12 @@
+# Module fixture: a public coercion transform. Loaded only via $import (no
+# `# expected:` line). A `public transform` reaches the whole program, so a
+# demand site in an importing module fires this handler.
+$module coerce_pub
+
+public type CStr {
+    public u8* ptr
+    public fn c_str(this) -> u8* { return this.ptr }
+}
+
+transform fn cstr_pub(Expr site) -> Expr { return Ast.method(site, "c_str") }
+public transform CStr -> u8* cstr_pub
