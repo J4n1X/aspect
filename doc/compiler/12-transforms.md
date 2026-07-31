@@ -1,8 +1,10 @@
 # Transforms (`src/typechecker/elaborate.rs`, `src/meta/jit.rs`)
 
 Transforms are the second hook of the three-hook metasystem — **typed-AST
-rewriting that repairs stuck coercions**. This document covers the shipped
-slice: the coercion path. The full design is
+rewriting**. Two modes ship: **repair** (a coercion handler rewrites a stuck
+`from -> to` demand site) and **decoration** (an attribute handler rewrites a
+statement it is tagged on — see [Decoration](#decoration-transform-attr)). The
+full design is
 [`doc/plans/Three-Hook-Metasystem.md`](../plans/Three-Hook-Metasystem.md) and
 [`doc/plans/Transforms-Plan.md`](../plans/Transforms-Plan.md); the `std/meta`
 handle ABI is [`doc/plans/Meta-Module-JIT-Interface.md`](../plans/Meta-Module-JIT-Interface.md).
@@ -204,20 +206,103 @@ Recorded design decision (not yet exercised): when cross-hook access lands,
 **rules are read-only** on meta globals — a rule may read an aggregate to enforce
 a cap but not mutate compile-time state (preserving "rules only diagnose").
 
+## Decoration (`transform @attr`)
+
+The second transform mode. Instead of repairing a stuck coercion, a decoration
+handler rewrites a **statement carrying an attribute** it claims:
+`transform @log log_it` binds the handler `transform fn log_it(Stmt) -> Stmt` to
+the `@log` attribute, and every statement tagged `@log` is rewritten in place. A
+binding takes optional `public` for whole-program reach, like a coercion binding.
+
+### Where it runs — the eager pre-pass
+
+Coercion fires *inside* the checker at a stuck demand site; decoration is seeded
+**eagerly**. `run_rounds` runs `fire_decorations` before each round's checker: it
+walks every function body (recursing into nested block/if/loop bodies), and for
+each statement carrying a claimed attribute fires the handler, splices the
+result, and **consumes** that attribute. Consumption mutates the persistent
+`Program` — the checker is fresh each round but never reads `Statement.attrs`, so
+a re-check cannot re-fire it. A round is quiescent when neither the pre-pass nor
+the checker rewrote anything (`deco_rewrites == 0 && checker.rewrites() == 0`).
+
+The pre-pass runs *before* the round's checker, so a round-1 handler sees an
+untyped AST. The shipped value-threading form reads only structure
+(`value_expr`), so this is sound; a future **type-directed** decoration (choosing
+a rewrite from the subject's resolved type, like the plan's `@debug` picking
+`__dbg_i32` vs `__dbg_str`) would need the pass reordered after a typing pass — a
+boundary this slice deliberately stops short of.
+
+### The handler + write surface
+
+A decoration handler is `transform fn (Stmt) -> Stmt`, told from a coercion
+handler by its signature and checked by `is_valid_decoration`. Its read/rebuild
+primitives (`src/meta/jit.rs`, exposed on `Stmt` in `lib/std/meta/meta.ap`):
+
+- `Stmt.value_expr()` — the statement's value expression: a `VarDecl`
+  initializer, an assignment right-hand side, a `return` operand, or an
+  expression statement. The **null handle** for a valueless statement.
+- `Stmt.with_value_expr(Expr)` — the same statement (kind, position) with that
+  value replaced.
+
+The staple shape threads the value through a **zero-arg method** — the one call
+form `quote` builds today:
+
+```aspect
+transform fn log_it(Stmt node) -> Stmt {
+    Expr amount = node.value_expr()
+    return node.with_value_expr(quote { return $(amount).logged() })
+}
+transform @log log_it
+```
+
+rewrites `Amount x = e` into `Amount x = { return e.logged() }`, where
+`Amount.logged()` runs a side effect and returns the value so the binding keeps
+its type. Because the handler returns a fresh node with no attributes of its own,
+the **engine** owns attribute lifetime: after each firing it transplants the
+surviving attributes onto the spliced statement.
+
+### Stacked attributes, order, determinism
+
+One attribute fires per statement per round, **innermost first** — the rightmost
+in the source-order `attrs` vector, since `@a @b x` applies `b` first (§13,
+outside-in). So `@a @b x` settles over two rounds (`b`, then `a`), each carrying
+the survivor forward. Firing order across *different* statements is unspecified
+(a handler's `meta` global is for order-insensitive aggregates, as with
+coercion); a run is deterministic.
+
+### Consume-hides-from-rules
+
+A decoration that consumes `@x` removes it from the AST before `QueryIndex` is
+built (post-typecheck), so a `rule @x` anchored on the same attribute would not
+see decorated sites. Give a decoration and a rule that must both observe a site
+distinct attributes.
+
+### Failure
+
+A value-threading handler applied to a statement with **no** value expression
+(`value_expr()` returns null, so nothing usable is built) is a positioned
+`DecorationFailed` at the decorated statement — a clean diagnostic, not a
+mid-elaboration crash.
+
 ## Validation (before elaboration)
 
-`validate_transforms` rejects, with a positioned `InvalidTransformKey`:
+`validate_transforms` rejects, with a positioned `InvalidTransformKey`. For a
+coercion key:
 
 - a **dead** key (`types_coercible(from, to)` already holds — the handler could
   never fire);
 - a key that only **removes `const`** (const removal must stay an explicit
   `as`, never an implicit transform);
-- a **handler that is not a valid `transform fn`** (`(Expr) -> Expr`); and
-- **two handlers claiming one key** with overlapping reach (one key, one
-  handler — ambiguity, not first-wins).
+- a **handler that is not `(Expr) -> Expr`**.
 
-A stuck coercion with *no* binding is left alone: it stays an ordinary
-`TypeMismatch`.
+For an attribute key: a **handler that is not `(Stmt) -> Stmt`**
+(`is_valid_decoration`). And for either kind: **two handlers claiming one key**
+with overlapping reach (one key, one handler — ambiguity, not first-wins) and an
+**undefined** handler.
+
+A stuck coercion with *no* binding is left alone (an ordinary `TypeMismatch`); an
+attribute with no claiming handler stays inert (an unclaimed attribute is not an
+error).
 
 ## Gate ordering
 
@@ -257,15 +342,28 @@ only deletes unreachable symbols), so this holds at every level.
   non-`Expr` splice, an unsupported template shape (a binary operator), and
   the "forgot `return`" footgun (a legal void quote surfacing an ordinary
   `Stmt`-vs-`Expr` mismatch, not a bespoke diagnostic).
+- Decoration: `tests/programs/transform_decorate.ap` (`@log` threads two
+  bindings through `logged` → 125), `transform_decorate_stacked.ap` (stacked
+  `@log @trace`, proving survivor transplant → 20), and
+  `transform_decorate_public_cross_module.ap` (public reach). Failures
+  (`failures/transform_decorate_*.ap`): an `@attr` handler that is `(Expr) ->
+  Expr` not `(Stmt) -> Stmt`, a duplicate `@attr` handler, and a value-threading
+  handler on a valueless statement (`DecorationFailed`). The idempotence guard
+  includes the settled decoration program.
 
 ## Explicitly deferred
 
-- The **attribute key** (`transform @attr <handler>`) parses but does not fire.
+- **Function decoration** (`transform @attr(fn) -> fn`) — statement decoration
+  fires; the function-body form is a distinct key.
+- **Type-directed decoration** — a handler choosing its rewrite from the
+  subject's resolved type. The eager pre-pass runs *before* the round's checker
+  (untyped AST), so this needs the pass reordered after a typing pass.
 - `Type` splices (`$(expr.type())`, needed for a non-literal `Ast.vardecl`
   type), branching inside a template (`if`/`while`/`for`, nested `Block`),
   and the richer `Ast.*` construction surface (`.method_args`/`.call`/
   `.field`/`.binary`/`.int_lit`/…) that later template shapes need
-  ([`doc/plans/Quote-Plan.md`](../plans/Quote-Plan.md) §6).
+  ([`doc/plans/Quote-Plan.md`](../plans/Quote-Plan.md) §6) — so a decoration
+  today threads through a **zero-arg method**, not an arbitrary recorder call.
 - A per-firing-unique rename (the original `meta_gensym` design) — not needed
   for hygiene (a fixed rename suffices, above), but may become necessary if a
   future hook splices a `Stmt` without a `ValueBlock`/`Block`'s scope

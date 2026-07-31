@@ -1,0 +1,112 @@
+#-
+  ===========================================================================
+  A MONEY DIALECT - what Aspect's two working metasystem hooks actually buy.
+
+  Aspect's core is deliberately small: no built-in money type, no implicit
+  conversions, no ownership checker. This file adds a *safe money dialect* on
+  top of that core WITHOUT touching the compiler - entirely with library-level
+  metaprogramming. Two hooks, pointed in opposite directions:
+
+    HOOK #2  TRANSFORM (a "cast rule")  --  EXTENDS the language.
+      A Money value flows implicitly into any raw-cents API. Call sites read
+      like domain code instead of being littered with `.raw()`. The cast is
+      scoped to this module - it is NOT a language-wide implicit conversion.
+
+    HOOK #3  RULES  --  RESTRICT the language.
+      One rule, JIT-compiled over the whole program, forbids releasing money
+      through the raw allocator. A second rule, anchored on an ATTRIBUTE,
+      records every sanctioned money entry point in a compile-time audit log.
+
+  Extension and restriction are the same mechanism aimed two ways - that is
+  the whole thesis of the three-hook design. Run it and read the return value
+  (and the compile-time audit line on stderr):
+
+      cargo run -- interpret doc/examples/money_dialect.ap -I lib
+
+  Expected result: 150  (150 cents of change), plus one "audited" warning.
+  ===========================================================================
+-#
+
+# --- The domain type --------------------------------------------------------
+
+type Money {
+    i64 cents
+
+    # The one blessed place a Money is born: dollars and cents fold into a
+    # single scaled total, so no un-scaled amount can ever leak in.
+    public fn of(i64 dollars, i64 rem) -> Money {
+        return Money { cents = dollars * 100 + rem }
+    }
+    public fn raw(this) -> i64 { return this.cents }
+}
+
+# --- HOOK #2: the cast rule -------------------------------------------------
+# A Money landing where raw `i64` cents are wanted is auto-unwrapped to
+# `.raw()`. The ledger below speaks cents and knows nothing of Money; without
+# this transform, every ledger call would need an explicit `.raw()`. This is
+# the shipped transform mode - a governed, module-scoped implicit coercion.
+
+transform fn to_cents(Expr site) -> Expr { return quote { return $(site).raw() } }
+transform Money -> i64 to_cents
+
+# --- The raw ledger: speaks cents, oblivious to Money -----------------------
+
+fn credit(i64 balance, i64 amount) -> i64 { return balance + amount }
+fn debit(i64 balance, i64 amount)  -> i64 { return balance - amount }
+
+# The raw allocator exists in this module's world; the ledger never touches it,
+# and the no_raw_release rule below is what guarantees nothing else does either.
+extern fn free(u0* p) -> u0
+
+# --- HOOK #3: governance rules ----------------------------------------------
+
+# (a) Type-anchored, ENFORCED. Money is released only through the ledger, never
+#     the raw C allocator. The rule discovers every `free` call site in the
+#     whole program and fails the build on any of them. It passes here because
+#     nothing frees - uncomment the marked line in main() to watch it reject.
+rule fn no_raw_release(Program p, Type anchor) -> Judgments {
+    Judgments js = Judgments.new()
+    ExprList frees = p.call_sites_of("free")
+    for (u64 i = 0; i < frees.count(); i += 1 as u64) {
+        js.error(frees.at(i).pos(), "money is never released through raw free(); route it through the ledger (no_raw_release rule)")
+    }
+    return js
+}
+rule Money no_raw_release
+
+# (b) Attribute-anchored, REPORTED. Every function tagged `@audited` is recorded
+#     in the compile-time audit log - a warning per carrier that never fails the
+#     build. This is how an attribute earns its keep in the shipped metasystem:
+#     as a rule anchor the governance layer reads.
+rule @audited audit
+
+# --- The application --------------------------------------------------------
+
+@audited
+fn settle(Money price, Money paid) -> i64 {
+    # `price` and `paid` are Money; `credit`/`debit` want raw i64 cents. The
+    # cast rule fires at each call site - not one `.raw()` in sight.
+    i64 balance = credit(0, paid)   # Money paid  -> cents, implicitly
+    return debit(balance, price)    # Money price -> cents, implicitly
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Money price = Money.of(3, 50)   # $3.50 -> 350 cents
+    Money paid  = Money.of(5, 0)    # $5.00 -> 500 cents
+
+    # free(0 as u0*)                # <-- uncomment: the no_raw_release rule fails the build here
+
+    i64 change = settle(price, paid)   # 500 - 350 = 150 cents of change
+    return change as i32               # 150
+}
+
+#-
+  NEXT CHAPTER. The `@audited` attribute above is a *rule* anchor: it only
+  judges, at compile time. A transform *attribute* instead injects runtime
+  behavior - and that mode (decoration) now fires. A tagged binding is rewritten
+  to thread its value through a method that records it: see the working, tested
+  `@log` example in tests/programs/transform_decorate.ap. The money-specific
+  `@journal` (auto-recording every movement to an audit trail, impossible to
+  forget) is one write-surface slice away - the walkthrough, and exactly what's
+  left, is in the companion doc/examples/journal_attribute.md.
+-#

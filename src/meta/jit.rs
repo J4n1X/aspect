@@ -27,7 +27,7 @@ use crate::parser::ast::{ExprKind, Expression, Statement, StatementKind};
 use crate::parser::{Function, FunctionBody, MetaKind, Program, TransformDecl, TransformKey};
 use crate::symbol::module::Visibility;
 use crate::target::TargetSpec;
-use crate::typechecker::elaborate::{HandlerAddr, HandlerRegistry};
+use crate::typechecker::elaborate::{DecorationAddr, DecorationRegistry, HandlerAddr, HandlerRegistry};
 use crate::typechecker::TypeChecker;
 
 use super::{query::QueryIndex, RawJudgment};
@@ -443,6 +443,76 @@ extern "C" fn meta_stmt_pos(handle: u64) -> u64 {
     })
 }
 
+/// The "value expression" a statement carries — the decoration write surface's
+/// read primitive (`Stmt.value_expr()`): a `VarDecl` initializer, `VarAssign`/
+/// `DerefAssign`/`FieldAssign` right-hand side, `Return` operand, or an
+/// expression statement. A valueless statement (`if`/`while`/`for`/`block`/
+/// `break`/`continue`, or an uninitialized `VarDecl`) yields the null handle, so
+/// a value-threading handler applied there fails cleanly (`DecorationFailed`).
+extern "C" fn meta_stmt_value_expr(handle: u64) -> u64 {
+    with_ctx(|c| {
+        let Some(HandleData::StmtNode(s)) = c.get(handle) else {
+            return 0;
+        };
+        let value = match &s.kind {
+            StatementKind::VarDecl { initializer: Some(e), .. }
+            | StatementKind::Return(Some(e))
+            | StatementKind::Expression(e) => Some(e.clone()),
+            StatementKind::VarAssign { value, .. }
+            | StatementKind::DerefAssign { value, .. }
+            | StatementKind::FieldAssign { value, .. } => Some(value.clone()),
+            _ => None,
+        };
+        match value {
+            Some(e) => c.push(HandleData::ExprNode(e)),
+            None => 0,
+        }
+    })
+}
+
+/// Rebuild a statement with its value expression replaced — the decoration
+/// write surface's rebuild primitive (`Stmt.with_value_expr(e)`). Same kind and
+/// position, new value; the engine overwrites `attrs` on the spliced result, so
+/// they are not carried here. The null handle is returned for a valueless
+/// statement or a bad `expr` handle, which surfaces as `DecorationFailed`.
+extern "C" fn meta_stmt_with_value_expr(handle: u64, expr: u64) -> u64 {
+    with_ctx(|c| {
+        let Some(HandleData::ExprNode(new_value)) = c.get(expr) else {
+            return 0;
+        };
+        let new_value = new_value.clone();
+        let Some(HandleData::StmtNode(s)) = c.get(handle) else {
+            return 0;
+        };
+        let mut rebuilt = s.clone();
+        let ok = match &mut rebuilt.kind {
+            StatementKind::VarDecl { initializer: init @ Some(_), .. } => {
+                *init = Some(new_value);
+                true
+            }
+            StatementKind::Return(ret @ Some(_)) => {
+                *ret = Some(new_value);
+                true
+            }
+            StatementKind::Expression(e) => {
+                *e = new_value;
+                true
+            }
+            StatementKind::VarAssign { value, .. }
+            | StatementKind::DerefAssign { value, .. }
+            | StatementKind::FieldAssign { value, .. } => {
+                *value = new_value;
+                true
+            }
+            _ => false,
+        };
+        if !ok {
+            return 0;
+        }
+        c.push(HandleData::StmtNode(rebuilt))
+    })
+}
+
 extern "C" fn meta_pos_line(handle: u64) -> u64 {
     with_ctx(|c| match c.get(handle) {
         Some(HandleData::Pos(p)) => p.line as u64,
@@ -648,6 +718,8 @@ fn extern_bindings() -> Vec<(&'static str, usize)> {
         ("meta_stmtlist_push", meta_stmtlist_push as *const () as usize),
         ("meta_stmt_kind", meta_stmt_kind as *const () as usize),
         ("meta_stmt_pos", meta_stmt_pos as *const () as usize),
+        ("meta_stmt_value_expr", meta_stmt_value_expr as *const () as usize),
+        ("meta_stmt_with_value_expr", meta_stmt_with_value_expr as *const () as usize),
         ("meta_pos_line", meta_pos_line as *const () as usize),
         ("meta_pos_column", meta_pos_column as *const () as usize),
         ("meta_pos_file", meta_pos_file as *const () as usize),
@@ -892,7 +964,7 @@ pub fn with_transform_engine<R>(
     program: &mut Program,
     decls: &[TransformDecl],
     target: &TargetSpec,
-    body: impl FnOnce(&mut Program, HandlerRegistry) -> R,
+    body: impl FnOnce(&mut Program, HandlerRegistry, DecorationRegistry) -> R,
 ) -> Result<R, String> {
     // Meta-only clone: retain meta functions + std/meta, drop user code so it
     // typechecks and codegens standalone. The handler must be JIT-ready before
@@ -934,31 +1006,45 @@ pub fn with_transform_engine<R>(
         .map_err(|e| format!("transform judge JIT engine setup failed: {e}"))?;
     bind_meta_externs(&cg, &ee);
 
-    let mut entries = Vec::new();
+    // Resolve every handler's trampoline address, routing coercion handlers to
+    // the coercion registry and attribute handlers to the decoration registry.
+    let mut coerce_entries = Vec::new();
+    let mut deco_entries = Vec::new();
     for decl in decls {
-        let TransformKey::Coerce { from, to } = &decl.key else {
-            continue; // attribute keys parse but do not fire yet
-        };
         let tramp = format!("__rt_{}", decl.handler_fn);
         let addr = ee.get_function_address(&tramp).map_err(|e| {
             format!("transform handler '{}' could not be JIT-compiled: {e}", decl.handler_fn)
         })?;
-        entries.push(HandlerAddr {
-            from: *from,
-            to: *to,
-            addr,
-            module: file_modules
-                .get(decl.pos.file_id as usize)
-                .cloned()
-                .unwrap_or_default(),
-            is_public: decl.vis == Visibility::Public,
-        });
+        let module = file_modules
+            .get(decl.pos.file_id as usize)
+            .cloned()
+            .unwrap_or_default();
+        let is_public = decl.vis == Visibility::Public;
+        match &decl.key {
+            TransformKey::Coerce { from, to } => coerce_entries.push(HandlerAddr {
+                from: *from,
+                to: *to,
+                addr,
+                module,
+                is_public,
+            }),
+            TransformKey::Attribute(attr) => deco_entries.push(DecorationAddr {
+                attr: attr.clone(),
+                addr,
+                module,
+                is_public,
+            }),
+        }
     }
 
     // `cg` and `ee` stay alive across this call — `body` fires handlers whose
     // code lives in `ee`'s JIT memory. The `&mut Program` is threaded through so
     // the round loop's mutation and the engine build never borrow it at once.
-    Ok(body(program, HandlerRegistry::from_entries(entries)))
+    Ok(body(
+        program,
+        HandlerRegistry::from_entries(coerce_entries),
+        DecorationRegistry::from_entries(deco_entries),
+    ))
 }
 
 /// Fire a coercion handler at `addr` on the demand-site node `site`, returning
@@ -981,6 +1067,47 @@ pub fn fire_transform(addr: usize, site: &Expression) -> Option<Expression> {
     };
     CTX.with(|cell| *cell.borrow_mut() = None);
     result
+}
+
+/// Fire a decoration handler at `addr` on the tagged statement `stmt`, returning
+/// the rewritten statement (or `None` if the handler produced nothing usable —
+/// e.g. a value-threading handler on a valueless statement). The `Stmt`-handle
+/// twin of [`fire_transform`]: seeds the statement, calls the scalar trampoline
+/// `fn(u64) -> u64`, and reads back the returned `StmtNode`. `demand_pos` is set
+/// so a builder with no operand to inherit from stamps the decorated site.
+#[must_use]
+pub fn fire_decoration(addr: usize, stmt: &Statement) -> Option<Statement> {
+    let mut ctx = MetaCtx::empty();
+    ctx.demand_pos = stmt.pos;
+    let stmt_handle = ctx.push(HandleData::StmtNode(stmt.clone()));
+    CTX.with(|cell| *cell.borrow_mut() = Some(ctx));
+    let result = {
+        let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute::<usize, _>(addr) };
+        let out = f(stmt_handle);
+        with_ctx(|c| match c.get(out) {
+            Some(HandleData::StmtNode(s)) => Some(s.clone()),
+            _ => None,
+        })
+    };
+    CTX.with(|cell| *cell.borrow_mut() = None);
+    result
+}
+
+/// Whether `func` is a `transform fn` with the decoration handler signature
+/// `(Stmt) -> Stmt`. Mirrors [`is_valid_transform`] for the attribute-key hook.
+#[must_use]
+pub fn is_valid_decoration(func: &Function, program: &Program) -> bool {
+    if func.proto.meta_kind != Some(MetaKind::Transform) {
+        return false;
+    }
+    let stmt = program
+        .symbols
+        .struct_id("Stmt")
+        .map(crate::lexer::TypeBase::Struct);
+    let is_stmt = |t: &LangType| t.pointer_depth == 0 && Some(t.base) == stmt;
+    func.proto.params.len() == 1
+        && is_stmt(&func.proto.params[0].0)
+        && is_stmt(&func.proto.return_type)
 }
 
 /// Whether `func` is a `transform fn` with the coercion handler signature

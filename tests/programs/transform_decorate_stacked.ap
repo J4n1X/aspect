@@ -1,0 +1,34 @@
+# expected: 20
+# compile_args: "-I", "lib"
+#-
+  Stacked decorations. `@log @trace x = e` fires one attribute per round,
+  innermost (rightmost) first: round 1 rewrites through `@trace`, carrying the
+  surviving `@log` onto the spliced statement; round 2 fires `@log` on the
+  result. Both side effects run (trace_total = 10, log_total = 10), so the sum is
+  20 — proving the engine transplants surviving attrs after each firing rather
+  than dropping them with the rebuilt statement.
+-#
+i64 log_total = 0
+i64 trace_total = 0
+
+type Amount {
+    public i64 v
+    public fn logged(this) -> Amount { log_total = log_total + this.v; return Amount { v = this.v } }
+    public fn traced(this) -> Amount { trace_total = trace_total + this.v; return Amount { v = this.v } }
+}
+
+transform fn log_it(Stmt node) -> Stmt {
+    Expr a = node.value_expr()
+    return node.with_value_expr(quote { return $(a).logged() })
+}
+transform fn trace_it(Stmt node) -> Stmt {
+    Expr a = node.value_expr()
+    return node.with_value_expr(quote { return $(a).traced() })
+}
+transform @log log_it
+transform @trace trace_it
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    @log @trace Amount x = Amount { v = 10 }
+    return (log_total + trace_total) as i32
+}

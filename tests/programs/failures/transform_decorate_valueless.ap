@@ -1,0 +1,18 @@
+# expected: "@log", "no value expression"
+# compile_args: "-I", "lib"
+#-
+  A value-threading decoration applied to a statement with no value expression
+  (here a `while` loop) fails cleanly: `value_expr()` yields the null handle, the
+  handler builds nothing usable, and the engine reports a positioned
+  DecorationFailed rather than crashing mid-elaboration.
+-#
+transform fn log_it(Stmt node) -> Stmt {
+    Expr amount = node.value_expr()
+    return node.with_value_expr(quote { return $(amount).nope() })
+}
+transform @log log_it
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    @log while (false) { }
+    return 0
+}

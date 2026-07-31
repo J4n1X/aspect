@@ -181,9 +181,18 @@ splices it in place. The scalar-ABI trampoline pattern carries over unchanged
   `Expr -> Expr` handlers at the coercion demand site. Ships `Str -> u8*` (the
   `String` proof, self-contained). Guardrails: dead-key, const-laundering,
   invalid-handler, duplicate-key. See `doc/compiler/12-transforms.md`.
-- **Later slices (out of scope here):** decoration (`@debug`, eager attr
-  obligations, consumed attributes), the full write surface + `quote` hygiene,
-  handler-synthesized *items* (registered through `ModuleSymbols::add_function`).
+- **Slice 3 — decoration. ✅ Landed 2026-07-31.** Eager attr-seeded `(Stmt) ->
+  Stmt` handlers (`transform @attr <handler>`) fire on tagged statements via a
+  pre-pass in `run_rounds` (`fire_decorations`), consuming the attribute and
+  transplanting survivors; `Stmt.value_expr()`/`.with_value_expr()` write
+  surface; module-visibility governance. Proof `@log` (`transform_decorate.ap`).
+  See `doc/compiler/12-transforms.md` §Decoration.
+- **Later slices (out of scope):** type-directed decoration (`@debug` picking a
+  printer from the resolved type — needs the pre-pass after a typing pass) and
+  the arg-bearing write surface it wants; function decoration
+  (`transform @attr(fn)`); handler-synthesized *items* (registered through
+  `ModuleSymbols::add_function`), which also needs the parser→`MethodCall`
+  migration so user code can call synthesized methods.
 
 ---
 

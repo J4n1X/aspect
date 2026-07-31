@@ -1,0 +1,15 @@
+# expected: "already has a handler", "one key, one handler"
+# compile_args: "-I", "lib"
+#-
+  Two decoration handlers claiming the same `@log` attribute in reach is
+  ambiguous — the later binding is rejected. One key, one handler, mirroring
+  coercion keys and rules.
+-#
+transform fn a(Stmt node) -> Stmt { return node }
+transform fn b(Stmt node) -> Stmt { return node }
+transform @log a
+transform @log b
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

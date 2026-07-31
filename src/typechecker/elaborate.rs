@@ -7,6 +7,7 @@ use super::checker::TypeChecker;
 use super::errors::TypeCheckError;
 use super::types::types_coercible;
 use crate::lexer::LangType;
+use crate::parser::ast::{Attribute, FunctionBody, Statement, StatementKind};
 use crate::parser::{Program, TransformDecl, TransformKey};
 use crate::target::TargetSpec;
 
@@ -71,6 +72,53 @@ impl HandlerRegistry {
     }
 }
 
+/// A resolved decoration handler: the attribute name it claims, its JIT'd
+/// trampoline address, and its reach (`is_public`, else scoped to `module`).
+/// `addr` is valid only while [`with_transform_engine`] is on the stack, like
+/// [`HandlerAddr`].
+///
+/// [`with_transform_engine`]: crate::meta::jit::with_transform_engine
+#[derive(Debug, Clone)]
+pub struct DecorationAddr {
+    pub attr: String,
+    pub addr: usize,
+    pub module: String,
+    pub is_public: bool,
+}
+
+/// Decoration handlers keyed by attribute name. Empty for a program with no
+/// attribute transforms, in which case the eager decoration pre-pass is skipped.
+#[derive(Debug, Clone, Default)]
+pub struct DecorationRegistry {
+    entries: Vec<DecorationAddr>,
+}
+
+impl DecorationRegistry {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn from_entries(entries: Vec<DecorationAddr>) -> Self {
+        Self { entries }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The handler claiming `attr` visible from `module`, if any — a public
+    /// handler everywhere, a private one only within its own module.
+    #[must_use]
+    pub fn lookup(&self, attr: &str, module: &str) -> Option<&DecorationAddr> {
+        self.entries
+            .iter()
+            .find(|e| e.attr == attr && (e.is_public || e.module == module))
+    }
+}
+
 /// Demand-site type matching for a handler key: same shape, ignoring `is_const`
 /// so a `const T` site still fires a `T -> …` transform (const *removal* is
 /// blocked at key-registration time, not here).
@@ -114,28 +162,30 @@ pub fn elaborate_program(
     target: TargetSpec,
     max_rounds: usize,
 ) -> Elaboration {
-    let coerce_decls: Vec<TransformDecl> = program
-        .transforms
-        .iter()
-        .filter(|d| matches!(d.key, TransformKey::Coerce { .. }))
-        .cloned()
-        .collect();
-
-    // No coercion transforms: the fast path — one registry-less round loop.
-    if coerce_decls.is_empty() {
-        return run_rounds(program, &target, max_rounds, HandlerRegistry::new());
+    // No transforms of any kind: the fast path — one registry-less round loop.
+    if program.transforms.is_empty() {
+        return run_rounds(
+            program,
+            &target,
+            max_rounds,
+            HandlerRegistry::new(),
+            DecorationRegistry::new(),
+        );
     }
 
-    // Reject dead / const-laundering keys and invalid handlers before building.
-    if let Err(errs) = validate_transforms(program, &coerce_decls) {
+    // Reject dead / const-laundering / wrong-shaped keys before building.
+    let decls = program.transforms.clone();
+    if let Err(errs) = validate_transforms(program, &decls) {
         return failed(program, target, errs);
     }
 
     // Build the engine and run the rounds inside its lifetime (the JIT'd handler
     // code is live only while `with_transform_engine` is on the stack). The
-    // `&mut Program` is threaded through the closure to keep a single borrow.
-    match crate::meta::jit::with_transform_engine(program, &coerce_decls, &target, |program, registry| {
-        run_rounds(program, &target, max_rounds, registry)
+    // `&mut Program` is threaded through the closure to keep a single borrow;
+    // coercion handlers fire inside the checker, decoration handlers in the
+    // eager pre-pass.
+    match crate::meta::jit::with_transform_engine(program, &decls, &target, |program, handlers, decorations| {
+        run_rounds(program, &target, max_rounds, handlers, decorations)
     }) {
         Ok(elab) => elab,
         Err(message) => failed(
@@ -147,22 +197,49 @@ pub fn elaborate_program(
 }
 
 /// Re-check with a fresh [`TypeChecker`] each round until a round rewrites
-/// nothing (the fixpoint) or `max_rounds` is exceeded.
+/// nothing (the fixpoint) or `max_rounds` is exceeded. Each round first runs the
+/// eager decoration pre-pass (which rewrites attributed statements in place),
+/// then the checker (whose coercion path fires the `handlers` registry); a round
+/// is quiescent when neither rewrote anything.
 fn run_rounds(
     program: &mut Program,
     target: &TargetSpec,
     max_rounds: usize,
-    registry: HandlerRegistry,
+    handlers: HandlerRegistry,
+    decorations: DecorationRegistry,
 ) -> Elaboration {
     let mut round = 0;
     loop {
         round += 1;
+        // Eager pre-pass: seed and fire decoration obligations from attribute
+        // sites, consuming each fired attr so a fresh-checker re-check cannot
+        // re-fire it. A handler that produces nothing usable is a hard,
+        // positioned error (deterministic across rounds, so report it now).
+        let deco_rewrites = if decorations.is_empty() {
+            0
+        } else {
+            match fire_decorations(program, &decorations) {
+                Ok(n) => n,
+                Err(errs) => {
+                    let checker = TypeChecker::new()
+                        .with_target(target.clone())
+                        .with_source_files(program.source_files.clone());
+                    return Elaboration {
+                        checker,
+                        result: Err(errs),
+                        rounds: round,
+                    };
+                }
+            }
+        };
+
         let mut checker = TypeChecker::new()
             .with_target(target.clone())
-            .with_handlers(registry.clone());
+            .with_handlers(handlers.clone());
         let result = checker.check_program(program);
-        // A round that rewrote nothing is the fixpoint; its result is final.
-        if checker.rewrites() == 0 {
+        // A round in which neither the pre-pass nor the checker rewrote anything
+        // is the fixpoint; its result is final.
+        if deco_rewrites == 0 && checker.rewrites() == 0 {
             return Elaboration {
                 checker,
                 result,
@@ -186,74 +263,196 @@ fn run_rounds(
     }
 }
 
-/// Validate every coercion transform declaration before the engine is built: a
-/// key that already coerces implicitly is dead (could never fire), a key that
-/// only removes `const` would make const-removal implicit, and the named handler
-/// must be a `transform fn` with signature `(Expr) -> Expr`.
+/// The index of the innermost claimed attribute on `attrs` — the highest index a
+/// decoration handler reaches, since `attrs` is source order (outside-in), so
+/// the rightmost is applied first. `None` if none is claimed.
+fn claimed_attr(attrs: &[Attribute], reg: &DecorationRegistry, module: &str) -> Option<usize> {
+    attrs
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, a)| reg.lookup(&a.name, module).is_some())
+        .map(|(i, _)| i)
+}
+
+/// Fire one decoration per attributed statement, program-wide, splicing each
+/// handler's result in place. Returns how many fired (0 ⇒ quiescent), or the
+/// positioned failures if any handler produced nothing usable. One attr per
+/// statement per round (innermost first), so stacked attributes settle over
+/// successive rounds.
+fn fire_decorations(
+    program: &mut Program,
+    reg: &DecorationRegistry,
+) -> Result<usize, Vec<TypeCheckError>> {
+    let file_modules = program.file_modules.clone();
+    let mut count = 0;
+    let mut errs = Vec::new();
+    for func in &mut program.functions {
+        if let FunctionBody::Aspect(body) = &mut func.body {
+            fire_in_stmts(body, reg, &file_modules, &mut count, &mut errs);
+        }
+    }
+    if errs.is_empty() {
+        Ok(count)
+    } else {
+        Err(errs)
+    }
+}
+
+/// Recurse a statement list, firing the innermost claimed decoration on each
+/// statement (and inside nested block/if/loop bodies first, so the deterministic
+/// traversal order is fixed). Each firing consumes its attr and transplants the
+/// survivors onto the spliced result — the handler's output is a fresh node with
+/// no attrs of its own, so the engine owns attribute lifetime, not the handler.
+fn fire_in_stmts(
+    stmts: &mut [Statement],
+    reg: &DecorationRegistry,
+    file_modules: &[String],
+    count: &mut usize,
+    errs: &mut Vec<TypeCheckError>,
+) {
+    for stmt in stmts.iter_mut() {
+        match &mut stmt.kind {
+            StatementKind::Block(body) => fire_in_stmts(body, reg, file_modules, count, errs),
+            StatementKind::If { then_block, else_block, .. } => {
+                fire_in_stmts(then_block, reg, file_modules, count, errs);
+                if let Some(eb) = else_block {
+                    fire_in_stmts(eb, reg, file_modules, count, errs);
+                }
+            }
+            StatementKind::While { body, .. } | StatementKind::For { body, .. } => {
+                fire_in_stmts(body, reg, file_modules, count, errs);
+            }
+            _ => {}
+        }
+
+        let module = file_modules
+            .get(stmt.pos.file_id as usize)
+            .map_or("", String::as_str);
+        let Some(idx) = claimed_attr(&stmt.attrs, reg, module) else {
+            continue;
+        };
+        let attr = stmt.attrs[idx].name.clone();
+        let addr = reg.lookup(&attr, module).expect("claimed_attr found it").addr;
+        let mut survivors = stmt.attrs.clone();
+        survivors.remove(idx);
+        match crate::meta::jit::fire_decoration(addr, stmt) {
+            Some(mut rewritten) => {
+                rewritten.attrs = survivors;
+                *stmt = rewritten;
+                *count += 1;
+            }
+            None => errs.push(TypeCheckError::DecorationFailed {
+                message: format!(
+                    "transform `@{attr}` produced no replacement for this statement (a value-threading handler cannot decorate a statement with no value expression)"
+                ),
+                position: stmt.pos,
+            }),
+        }
+    }
+}
+
+/// Validate every transform declaration before the engine is built. Coercion
+/// keys: a dead (already-coercible) key, a const-removing key, or a handler that
+/// is not `(Expr) -> Expr`. Attribute keys: a duplicate `@attr` in reach, or a
+/// handler that is not `(Stmt) -> Stmt`. Both reject an undefined handler.
 fn validate_transforms(program: &Program, decls: &[TransformDecl]) -> Result<(), Vec<TypeCheckError>> {
     let mut errs = Vec::new();
     for (i, decl) in decls.iter().enumerate() {
-        let TransformKey::Coerce { from, to } = &decl.key else {
-            continue;
-        };
-        // Two handlers claiming the same key with overlapping reach is ambiguous
-        // — reject the later one rather than silently letting the first win.
-        if let Some(prev) = decls[..i].iter().find(|p| {
-            let TransformKey::Coerce { from: pf, to: pt } = &p.key else {
-                return false;
-            };
-            ty_matches(pf, from)
-                && ty_matches(pt, to)
-                && reach_overlaps(program, p, decl)
-        }) {
-            errs.push(TypeCheckError::InvalidTransformKey {
-                message: format!(
-                    "transform key '{from} -> {to}' already has a handler ('{}') in reach — one key, one handler",
-                    prev.handler_fn
-                ),
-                position: decl.pos,
-            });
-            continue;
-        }
-        if types_coercible(from, to) {
-            errs.push(TypeCheckError::InvalidTransformKey {
-                message: format!(
-                    "transform key '{from} -> {to}' is dead: '{from}' already coerces to '{to}' implicitly, so the handler could never fire"
-                ),
-                position: decl.pos,
-            });
-            continue;
-        }
-        if from.base == to.base
-            && from.size_bits == to.size_bits
-            && from.pointer_depth == to.pointer_depth
-            && from.array_size == to.array_size
-            && from.is_const
-            && !to.is_const
-        {
-            errs.push(TypeCheckError::InvalidTransformKey {
-                message: format!(
-                    "transform key '{from} -> {to}' removes const — const removal must stay explicit (an `as` cast), never an implicit transform"
-                ),
-                position: decl.pos,
-            });
-            continue;
-        }
-        match program.functions.iter().find(|f| f.proto.name == decl.handler_fn) {
-            None => errs.push(TypeCheckError::InvalidTransformKey {
-                message: format!("transform handler '{}' is not defined", decl.handler_fn),
-                position: decl.pos,
-            }),
-            Some(f) if !crate::meta::jit::is_valid_transform(f, program) => {
-                errs.push(TypeCheckError::InvalidTransformKey {
-                    message: format!(
-                        "transform handler '{}' must be a `transform fn` with signature `(Expr) -> Expr`",
-                        decl.handler_fn
-                    ),
-                    position: decl.pos,
-                });
+        match &decl.key {
+            TransformKey::Coerce { from, to } => {
+                // Two handlers claiming the same key with overlapping reach is
+                // ambiguous — reject the later one, not silently first-wins.
+                if let Some(prev) = decls[..i].iter().find(|p| {
+                    let TransformKey::Coerce { from: pf, to: pt } = &p.key else {
+                        return false;
+                    };
+                    ty_matches(pf, from)
+                        && ty_matches(pt, to)
+                        && reach_overlaps(program, p, decl)
+                }) {
+                    errs.push(TypeCheckError::InvalidTransformKey {
+                        message: format!(
+                            "transform key '{from} -> {to}' already has a handler ('{}') in reach — one key, one handler",
+                            prev.handler_fn
+                        ),
+                        position: decl.pos,
+                    });
+                    continue;
+                }
+                if types_coercible(from, to) {
+                    errs.push(TypeCheckError::InvalidTransformKey {
+                        message: format!(
+                            "transform key '{from} -> {to}' is dead: '{from}' already coerces to '{to}' implicitly, so the handler could never fire"
+                        ),
+                        position: decl.pos,
+                    });
+                    continue;
+                }
+                if from.base == to.base
+                    && from.size_bits == to.size_bits
+                    && from.pointer_depth == to.pointer_depth
+                    && from.array_size == to.array_size
+                    && from.is_const
+                    && !to.is_const
+                {
+                    errs.push(TypeCheckError::InvalidTransformKey {
+                        message: format!(
+                            "transform key '{from} -> {to}' removes const — const removal must stay explicit (an `as` cast), never an implicit transform"
+                        ),
+                        position: decl.pos,
+                    });
+                    continue;
+                }
+                match program.functions.iter().find(|f| f.proto.name == decl.handler_fn) {
+                    None => errs.push(TypeCheckError::InvalidTransformKey {
+                        message: format!("transform handler '{}' is not defined", decl.handler_fn),
+                        position: decl.pos,
+                    }),
+                    Some(f) if !crate::meta::jit::is_valid_transform(f, program) => {
+                        errs.push(TypeCheckError::InvalidTransformKey {
+                            message: format!(
+                                "transform handler '{}' must be a `transform fn` with signature `(Expr) -> Expr`",
+                                decl.handler_fn
+                            ),
+                            position: decl.pos,
+                        });
+                    }
+                    Some(_) => {}
+                }
             }
-            Some(_) => {}
+            TransformKey::Attribute(attr) => {
+                // One handler per `@attr` per reach, like a coercion key.
+                if let Some(prev) = decls[..i].iter().find(|p| {
+                    matches!(&p.key, TransformKey::Attribute(pa) if pa == attr)
+                        && reach_overlaps(program, p, decl)
+                }) {
+                    errs.push(TypeCheckError::InvalidTransformKey {
+                        message: format!(
+                            "transform key '@{attr}' already has a handler ('{}') in reach — one key, one handler",
+                            prev.handler_fn
+                        ),
+                        position: decl.pos,
+                    });
+                    continue;
+                }
+                match program.functions.iter().find(|f| f.proto.name == decl.handler_fn) {
+                    None => errs.push(TypeCheckError::InvalidTransformKey {
+                        message: format!("transform handler '{}' is not defined", decl.handler_fn),
+                        position: decl.pos,
+                    }),
+                    Some(f) if !crate::meta::jit::is_valid_decoration(f, program) => {
+                        errs.push(TypeCheckError::InvalidTransformKey {
+                            message: format!(
+                                "transform handler '{}' bound to attribute key '@{attr}' must be a `transform fn` with signature `(Stmt) -> Stmt`",
+                                decl.handler_fn
+                            ),
+                            position: decl.pos,
+                        });
+                    }
+                    Some(_) => {}
+                }
+            }
         }
     }
     if errs.is_empty() {

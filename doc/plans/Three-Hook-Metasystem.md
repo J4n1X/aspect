@@ -356,8 +356,10 @@ attribute-anchored rule fns. See `doc/compiler/11-rules.md` and
 
 ### Phase 4 — Transforms
 
-**Coercion path landed 2026-07-28** (language-designer: Approved with changes,
-folded in). `transform fn (Expr) -> Expr` handlers + `transform From -> To`
+**Coercion path landed 2026-07-28; decoration path landed 2026-07-31**, both
+language-designer Approved with changes. Repair (coercion) and decoration
+(attribute) are the two shipped transform modes; the `quote` write sugar landed
+2026-07-28. `transform fn (Expr) -> Expr` handlers + `transform From -> To`
 bindings fire at stuck coercion demand sites on the Phase 1 rounds engine;
 governance is by module visibility (`public transform` = whole-program, like
 `public rule`/`public type`), not the earlier `allow coercion` rule. The write
@@ -369,8 +371,8 @@ handler, and duplicate-key rejection. See `doc/compiler/12-transforms.md` and
 
 - [x] `transform From -> To` (coercion) on the Phase 1 rounds engine, governed by module visibility. (M)
 - [x] **Meta globals** (`meta u32 x`) — compile-time mutable handler state (realizes §13's "intra-compilation state"). Landed 2026-07-28: in-language global retained in the persistent transform engine, `globaldce`-stripped from the artifact, transform-scoped by the meta gate. v1 is scalar-only and transform-reach; cross-hook (rules read, unified persistent engine) and `meta fn` helpers are follow-ons. See `doc/compiler/12-transforms.md` §Meta globals. (S–M)
-- [ ] **Decoration** obligations collected eagerly from attr sites each round (always fire, consume the attr); the `transform @attr` key parses but does not fire yet. (L)
-- [ ] Ship `@debug(stmt)` (decoration) and vtable synthesis (repair/synthesis) as proofs. (M–L)
+- [x] **Decoration** obligations collected eagerly from attr sites each round (always fire, consume the attr). **Landed 2026-07-31** (language-designer: Approved with changes, folded in): the `transform @attr <handler>` key fires a `transform fn (Stmt) -> Stmt` handler via an eager pre-pass in `run_rounds` (`fire_decorations`), consuming the attribute and transplanting survivors; governance by module visibility. Write surface: `Stmt.value_expr()`/`.with_value_expr()`, so a decoration threads a binding's value through a zero-arg method. Proof `@log` (`transform_decorate.ap`). See `doc/compiler/12-transforms.md` §Decoration. (L)
+- [ ] Ship `@debug(stmt)` (type-directed decoration — picks the printer from the subject's resolved type) and vtable synthesis (repair/synthesis) as proofs. `@debug` needs the pre-pass reordered after a typing pass **and** an arg-bearing / literal write surface; **function decoration** (`transform @attr(fn)`) is a distinct key. (M–L)
 
 ### Phase 5 — Tier-2 query API + honest linters
 

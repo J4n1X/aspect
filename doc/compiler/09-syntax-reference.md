@@ -474,23 +474,24 @@ rule-fn-decl ::= 'rule' 'fn' ident '(' param-list ')' return-ann? newline* block
 # compiler builtin (`singleton`, `audit`) or a user `rule fn`.
 
 transform-decl    ::= 'transform' transform-key ident term   # `transform <key> <handler-fn>`
-transform-key     ::= '@' ident                              # attribute site (parses; inert)
+transform-key     ::= '@' ident                              # attribute (decoration)
                     | type '->' type                         # coercion `<from> -> <to>`
 transform-fn-decl ::= 'transform' 'fn' ident '(' param-list ')' return-ann? newline* block
-# `transform fn` — a metaprogramming obligation handler with signature
-# `(Expr) -> Expr`. `transform` is a soft keyword; a `transform <key> <handler>`
-# binding is told from a `transform fn <name>` handler by the token after
-# `transform` (`fn` → handler, else → binding). The from-type's `parse_type`
-# greedily eats a fn-pointer type's own `->`, so the surviving arrow is always
-# the key separator. A binding takes optional `public` (module-scoped by
-# default, whole-program with `public`); a `transform fn` takes neither
-# `public` nor `export`. The handler is JIT-compiled and consulted at a stuck
-# coercion demand site during round-based elaboration; it rewrites the site (via
-# the `Ast.*` builders) and never reaches the artifact. A coercion key that
-# already coerces implicitly (dead), one that only removes `const`, a handler
-# that is not a valid `transform fn`, and two handlers claiming one key with
-# overlapping reach are all errors. The attribute key parses but does not fire
-# yet. See `doc/compiler/12-transforms.md`.
+# `transform fn` — a metaprogramming obligation handler: `(Expr) -> Expr` for a
+# coercion key, `(Stmt) -> Stmt` for an attribute (decoration) key. `transform`
+# is a soft keyword; a `transform <key> <handler>` binding is told from a
+# `transform fn <name>` handler by the token after `transform` (`fn` → handler,
+# else → binding). The from-type's `parse_type` greedily eats a fn-pointer type's
+# own `->`, so the surviving arrow is always the key separator. A binding takes
+# optional `public` (module-scoped by default, whole-program with `public`); a
+# `transform fn` takes neither `public` nor `export`. The handler is
+# JIT-compiled: a coercion handler is consulted at a stuck coercion demand site;
+# a decoration handler fires eagerly on every statement carrying its attribute
+# (an eager pre-pass, consuming the attribute). Both rewrite via the `Ast.*`
+# builders and never reach the artifact. Errors: a dead / const-removing coercion
+# key, a coercion handler that is not `(Expr) -> Expr` or a decoration handler
+# that is not `(Stmt) -> Stmt`, and two handlers claiming one key in reach. An
+# unclaimed attribute stays inert. See `doc/compiler/12-transforms.md`.
 
 meta-global-decl ::= 'meta' scalar-type ident ('=' const-expr)? term
 # `meta` global — compile-time-only mutable state for metaprograms. `meta` is a

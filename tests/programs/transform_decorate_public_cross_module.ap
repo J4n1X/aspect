@@ -1,0 +1,14 @@
+# expected: 7
+# compile_args: "-I", "lib", "-I", "tests/modules"
+#-
+  A `public transform @log` declared in `log_pub` reaches the whole program: the
+  root module's `@log`-tagged binding fires the imported handler, threading the
+  value through `logged` (which records 7). Proves attribute decorations honor
+  the same public/private reach as coercion transforms and rules.
+-#
+$import log_pub
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    @log Amount a = Amount { v = 7 }
+    return log_total as i32
+}

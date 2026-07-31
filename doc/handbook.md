@@ -1705,8 +1705,52 @@ fn main(u32 argc, u8 **argv) -> i32 {
   reach are rejected. A stuck coercion with *no* binding stays an ordinary type
   error.
 
-An attribute key (`transform @attr <handler>`) parses today but does not fire
-yet — like attribute-anchored rule fns, its firing is a later slice.
+#### Decoration — `transform @attr <handler>`
+
+The other transform mode. Instead of repairing a stuck coercion, a **decoration**
+rewrites a statement carrying an attribute it claims. Its handler is a
+`transform fn (Stmt) -> Stmt`, and it fires **eagerly** on every tagged
+statement (not on a type error), consuming the attribute so it fires once.
+
+```aspect
+i64 log_total = 0
+
+type Amount {
+    public i64 v
+    public fn logged(this) -> Amount { log_total = log_total + this.v; return Amount { v = this.v } }
+}
+
+# Rewrite `Amount x = e` into `Amount x = { return e.logged() }`.
+transform fn log_it(Stmt node) -> Stmt {
+    Expr amount = node.value_expr()
+    return node.with_value_expr(quote { return $(amount).logged() })
+}
+transform @log log_it
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    @log Amount fee = Amount { v = 25 }     # fires log_it: records 25, keeps `fee`
+    return log_total as i32                 # 25
+}
+```
+
+- `Stmt.value_expr()` reads the statement's value (a `VarDecl` initializer, an
+  assignment RHS, a `return` operand, or an expression statement);
+  `Stmt.with_value_expr(e)` rebuilds it with that value replaced. The handler
+  threads the value through a **zero-arg method** — the one call form `quote`
+  builds today.
+- `public transform @attr` reaches the whole program; a bare one is
+  module-scoped. Two handlers claiming one `@attr` in reach is rejected.
+- Stacked attributes (`@a @b x`) fire innermost first, one per round; each firing
+  carries the surviving attributes forward.
+- A value-threading handler on a statement with **no** value (an `if`/`while`/
+  `for`/block) is a clean error, not a crash. An `@attr` with **no** handler
+  stays inert. Distinct from a `rule @attr` (which only judges): a decoration
+  consumes the attribute, so a rule anchored on the same name won't see decorated
+  sites — give the two different attributes.
+
+Deferred: **function** decoration (`transform @attr(fn)`), **type-directed**
+decoration (choosing a rewrite from the subject's resolved type, like a `@debug`
+that prints per type), and the arg-bearing write surface a richer recorder needs.
 
 ### `quote { ... }` — the AST-construction sugar
 
@@ -1757,9 +1801,9 @@ desugars to it before typecheck, so nothing about how the handler runs changes.
 - **Void quotes.** A body not ending in `return <expr>` — e.g.
   `quote { $(subject) }`, one expression-statement — builds a statement
   sequence with no value, for contexts that want a `Stmt` rather than an
-  `Expr`. Nothing in the language consumes one yet (that needs the decoration
-  hook, not yet built), so this is currently more a statement of what the
-  grammar already supports than something you'd reach for today.
+  `Expr`. A decoration handler (`transform @attr`, above) returns a `Stmt`, so a
+  void quote is one way to build its result; the value-threading form uses a
+  value quote (`return`) instead so the rewritten binding keeps its value.
 
 ### Meta globals — `meta <type> <name>`
 

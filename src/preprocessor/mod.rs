@@ -327,32 +327,38 @@ impl Preprocessor {
         self.process_synthetic("<rule-trampolines>", src)
     }
 
-    /// For each coercion handler — `transform fn <name>(Expr …` — inject a
-    /// scalar-ABI trampoline `__rt_<name>(u64) -> u64`. A `(Expr) -> Expr`
-    /// handler lowers to a `byval`/`sret` ABI the engine cannot call directly;
-    /// the trampoline wraps the site handle, calls the handler, and hands back
-    /// the rewritten node's handle — so the engine calls `fn(u64) -> u64`. The
-    /// `(Expr` filter mirrors the rule trampoline's `Program` filter: a
-    /// wrong-shaped handler gets no trampoline and is caught by the key validator.
+    /// For each transform handler — `transform fn <name>(Expr …` (coercion) or
+    /// `transform fn <name>(Stmt …` (decoration) — inject a scalar-ABI trampoline
+    /// `__rt_<name>(u64) -> u64`. The handler lowers to a `byval`/`sret` ABI the
+    /// engine cannot call directly; the trampoline wraps the single handle, calls
+    /// the handler, and hands back the result handle — so the engine calls
+    /// `fn(u64) -> u64`. Both `Expr` and `Stmt` handles share `from_handle`/`raw`,
+    /// so only the wrapper type differs. A handler that takes neither gets no
+    /// trampoline and is caught by the key validator.
     fn inject_transform_trampolines(&mut self) -> Result<(), PreprocessError> {
         use crate::lexer::Keyword;
-        // (handler name, declaring module) for every `transform fn <name>(Expr …`.
-        let handlers: Vec<(String, Option<String>)> = self
+        // (handler name, wrapper type, declaring module) for every
+        // `transform fn <name>(Expr …` / `(Stmt …`.
+        let handlers: Vec<(String, &'static str, Option<String>)> = self
             .tokens
             .windows(5)
             .filter_map(|w| {
                 let is_transform = matches!(&w[0].kind, TokenKind::Identifier(n) if n == "transform");
                 let is_fn = matches!(w[1].kind, TokenKind::Keyword(Keyword::Fn));
                 let open = matches!(w[3].kind, TokenKind::OpenParen);
-                let takes_expr = matches!(&w[4].kind, TokenKind::Identifier(n) if n == "Expr");
-                match (&w[2].kind, is_transform && is_fn && open && takes_expr) {
-                    (TokenKind::Identifier(name), true) => {
+                let wrapper = match &w[4].kind {
+                    TokenKind::Identifier(n) if n == "Expr" => Some("Expr"),
+                    TokenKind::Identifier(n) if n == "Stmt" => Some("Stmt"),
+                    _ => None,
+                };
+                match (&w[2].kind, is_transform && is_fn && open, wrapper) {
+                    (TokenKind::Identifier(name), true, Some(wrapper)) => {
                         let module = self
                             .file_modules
                             .get(w[2].pos.file_id as usize)
                             .cloned()
                             .flatten();
-                        Some((name.clone(), module))
+                        Some((name.clone(), wrapper, module))
                     }
                     _ => None,
                 }
@@ -364,11 +370,13 @@ impl Preprocessor {
         // Emit each trampoline in its handler's own module (`$module` header): a
         // root synthetic file cannot call a handler private to another module, so
         // the trampoline for a handler in module M must itself live in M.
-        let mut by_module: Vec<(Option<String>, Vec<String>)> = Vec::new();
-        for (name, module) in handlers {
+        // Each entry: a module (None = root) → its handlers as (name, wrapper).
+        type ModuleHandlers = Vec<(Option<String>, Vec<(String, &'static str)>)>;
+        let mut by_module: ModuleHandlers = Vec::new();
+        for (name, wrapper, module) in handlers {
             match by_module.iter_mut().find(|(m, _)| *m == module) {
-                Some((_, names)) => names.push(name),
-                None => by_module.push((module, vec![name])),
+                Some((_, names)) => names.push((name, wrapper)),
+                None => by_module.push((module, vec![(name, wrapper)])),
             }
         }
         for (module, names) in by_module {
@@ -376,10 +384,10 @@ impl Preprocessor {
             if let Some(m) = &module {
                 src.push_str(&format!("$module {m}\n"));
             }
-            for name in names {
+            for (name, wrapper) in names {
                 src.push_str(&format!(
                     "transform fn __rt_{name}(u64 __h) -> u64 {{\n    \
-                     return {name}(Expr.from_handle(__h)).raw()\n}}\n"
+                     return {name}({wrapper}.from_handle(__h)).raw()\n}}\n"
                 ));
             }
             self.process_synthetic("<transform-trampolines>", src)?;

@@ -255,6 +255,9 @@ fn typecheck_is_idempotent_on_recheck() {
         // Same, with a quote-constructed value-block (a VarDecl binder) as
         // the settled rewrite.
         ("tests/programs/transform_hygiene.ap", &["-I", "lib"]),
+        // A settled decoration: the `@log` attributes are consumed and the
+        // bindings are value-blocks, so a bare re-check must not re-fire.
+        ("tests/programs/transform_decorate.ap", &["-I", "lib"]),
     ];
     for (path, args) in cases {
         let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();

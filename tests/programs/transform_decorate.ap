@@ -1,0 +1,37 @@
+# expected: 125
+# compile_args: "-I", "lib"
+#-
+  Decoration transforms fire. `@log` on a value binding is an eager,
+  attribute-seeded rewrite (hook #2b): the handler threads the bound value
+  through a zero-arg method (`logged`) that records it, then yields it back, so
+  the binding keeps its type. Two `@log` sites fire (25 + 100), and the recorded
+  total is 125 — proving an attribute drove a real, type-preserving rewrite that
+  injects runtime behavior (what a rule cannot do and a coercion will not). The
+  handler is `(Stmt) -> Stmt`; `node.value_expr()` reads the initializer and
+  `node.with_value_expr(...)` rebuilds the binding around the value block.
+-#
+
+i64 log_total = 0
+
+type Amount {
+    public i64 v
+    # Record into the compile-in-progress log, then return the value so the
+    # rewritten binding keeps its type and value.
+    public fn logged(this) -> Amount {
+        log_total = log_total + this.v
+        return Amount { v = this.v }
+    }
+}
+
+# Rewrites `T x = e` into `T x = { return e.logged() }`.
+transform fn log_it(Stmt node) -> Stmt {
+    Expr amount = node.value_expr()
+    return node.with_value_expr(quote { return $(amount).logged() })
+}
+transform @log log_it
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    @log Amount fee    = Amount { v = 25 }
+    @log Amount refund = Amount { v = 100 }
+    return log_total as i32
+}

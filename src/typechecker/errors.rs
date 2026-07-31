@@ -172,6 +172,12 @@ pub enum TypeCheckError {
     #[error("transform engine failed to build: {message}")]
     TransformEngineError { message: String },
 
+    /// An attribute-decoration handler produced no usable statement for a site —
+    /// typically a value-threading handler applied to a statement with no value
+    /// expression. Positioned at the decorated statement.
+    #[error("{message} at {position}")]
+    DecorationFailed { message: String, position: Position },
+
     #[error("Value block does not produce a value on every path — each control path must end in `return <expr>` at {0}")]
     ValueBlockMissingReturn(Position),
 
