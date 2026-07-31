@@ -116,12 +116,6 @@ pub enum ParserError {
 
     #[error("Lexer error: {0}")]
     LexerError(#[from] crate::lexer::LexerError),
-
-    /// A `quote` template contains a construct `desugar_quotes` doesn't lower
-    /// yet — only `$(expr)` and a zero-arg method call are implemented; the
-    /// rest of the `Ast.*` table lands as later template shapes need it.
-    #[error("quote does not yet support {0} at {1}")]
-    UnsupportedQuoteShape(String, Position),
 }
 
 impl ParserError {

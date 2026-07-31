@@ -71,33 +71,6 @@ checker.format_error(&error) -> String
 segment. When the error carries no position (e.g. `MissingReturn`), or the
 `file_id` does not resolve, it falls back to the bare `Display` with no file prefix.
 
-## Round-based elaboration (`elaborate.rs`)
-
-`check_program` is a single pass; the front end drives it through
-`elaborate_program(&mut program, target, max_rounds) -> Elaboration`, the
-metasystem's **hook #2 (transforms)** engine. It re-checks the whole program with
-a *fresh* `TypeChecker` each round until a round applies **zero rewrites** (the
-fixpoint) or `max_rounds` (`--max-rounds`, default `DEFAULT_MAX_ROUNDS = 16`) is
-exceeded — a non-settling transform is then a `RoundLimitExceeded` error. Only the
-final round's diagnostics are reported. Both entry points (`main.rs::build_program`
-and the test harness's `parse_and_typecheck`) go through it, so the corpus sees the
-same path production does.
-
-The checker exposes `rewrites() -> usize`, which the driver reads to decide
-quiescence, and consults a `HandlerRegistry` at repair demand sites (currently just
-the failed-coercion site in `check_expression`, via `try_repair` → an `Obligation`
-key). **This machinery is inert today:** no transform handlers are registered, so
-`rewrites()` is always 0, the loop runs exactly once, and the result is
-byte-for-byte identical to a bare `check_program`. Its purpose is to land the
-round engine and prove its load-bearing invariant — **re-checking an
-already-checked `Program` is a fixpoint** — before any handler exists. That
-invariant is guarded permanently by `typecheck_is_idempotent_on_recheck`
-(integration tests) and, at expression level, `mcall_resolution_is_idempotent_on_recheck`.
-The `Unresolved` poison sentinel (`TypeBase::Unresolved` / `LangType::UNRESOLVED`)
-that suppresses cascade errors at a stuck demand site is defined for the same
-reason, and is likewise never stamped while the registry is empty. See
-`doc/plans/Transforms-Plan.md`.
-
 ## Checking Phases
 
 ### Phase 1: Register Declarations
@@ -171,31 +144,6 @@ unary-not, cast, function call).
 Because literals are stamped at their final width during checking, a constant
 like `u8 x = 1 + 2` arrives at codegen already typed `u8` — codegen emits `i8`
 arithmetic directly instead of computing in `i32` and truncating.
-
-### Checker-resolved `MethodCall`
-
-`ExprKind::MethodCall { base, name, args }` is the one node the checker
-**resolves and rewrites in place** (every other arm only stamps `expr_type` and
-recurses). The parser normally lowers method calls at parse time
-(`build_method_call` → `FunctionCall`/`IndirectCall`), so it never emits this
-node; it exists for metaprogram-generated AST (Three-Hook-Metasystem Phases
-3/4), which has no parse-time receiver types. `resolve_method_call`
-(`checker/expressions.rs`) reproduces the parser's dispatch against
-`self.symbols`/`self.scopes`: static-`Type.m(..)` vs instance-`obj.m(..)`,
-`Type$method` mangling, value-receiver autoref (`&base`; deeper-than-one-level
-pointers rejected), and method-vs-fn-pointer-field disambiguation — then
-replaces the node with a `FunctionCall` (method) or `IndirectCall` (fn-ptr
-field) and re-checks it. Because the result is a plain call node, re-checking
-is stable (the lowering is one-shot and idempotent).
-
-The per-method privacy gate (`MethodSig.vis`) is enforced for free once the
-rewritten `FunctionCall` flows through `check_call` → `check_method_access`. The
-`public type` **cross-module** gate is *not* reproduced — the checker has no
-`file_id → module` map — matching the metasystem's accepted carve-out that
-transform-generated code bypasses import visibility. Real user code is
-unaffected: the parser still emits pre-resolved calls and keeps that gate. This
-path has no user-facing syntax, so it is covered by Rust unit tests
-(`checker/tests.rs`, the `mcall_*` cases), not the `.ap` corpus.
 
 ### Narrow-width comparisons
 

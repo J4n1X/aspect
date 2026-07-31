@@ -2,7 +2,6 @@ use super::TypeChecker;
 use crate::lexer::{LangType, TypeBase};
 use crate::parser::{BinaryOp, ComparisonOp, ExprKind, Expression, LiteralValue};
 use crate::symbol::module::Visibility;
-use crate::typechecker::elaborate::Obligation;
 use crate::typechecker::errors::TypeCheckError;
 use crate::typechecker::types::{
     cast_valid, literal_float_compatible, literal_int_fits, types_coercible,
@@ -21,12 +20,6 @@ impl TypeChecker {
     /// resolution, indices, conditions, cast/dereference operands).
     pub(crate) fn synth_expression(&mut self, expr: &mut Expression) -> LangType {
         let pos = expr.pos;
-        // `MethodCall` is rewritten *before* the match because it replaces the
-        // whole node — which a `match &mut expr.kind` arm cannot do. The
-        // checker's one in-place lowering; see `resolve_method_call`.
-        if matches!(expr.kind, ExprKind::MethodCall { .. }) {
-            return self.resolve_method_call(expr);
-        }
         let default_type = expr.expr_type;
         match &mut expr.kind {
             ExprKind::Literal(_) => default_type,
@@ -340,18 +333,6 @@ impl TypeChecker {
                 expr.expr_type = ty;
                 ty
             }
-
-            // Resolved-and-rewritten before this match (see the guard at the
-            // top of `synth_expression`), so the node is never a `MethodCall`
-            // by the time control reaches here.
-            ExprKind::MethodCall { .. } => unreachable!("MethodCall resolved before the match"),
-
-            // Desugared to `Ast.*`/`meta_ast_*` calls before typecheck
-            // (`src/meta/quote.rs`) — a meta fn's body never reaches the
-            // checker with one of these still in it.
-            ExprKind::Quote { .. } | ExprKind::Splice(_) => {
-                unreachable!("Quote/Splice is lowered before typecheck")
-            }
         }
     }
 
@@ -364,11 +345,6 @@ impl TypeChecker {
         field: &str,
         pos: crate::lexer::Position,
     ) -> LangType {
-        // A poisoned base has no fields to resolve; propagate the sentinel
-        // instead of a spurious `UnknownField`.
-        if base_type.base == TypeBase::Unresolved {
-            return LangType::UNRESOLVED;
-        }
         if let TypeBase::Struct(id) = base_type.base
             && base_type.pointer_depth <= 1
         {
@@ -484,217 +460,6 @@ impl TypeChecker {
             self.errors
                 .push(TypeCheckError::UndefinedFunction(name.to_string(), pos));
             self.synth_all(args);
-        }
-    }
-
-    /// Rewrite an `ExprKind::MethodCall` in place into a `FunctionCall` (method)
-    /// or `IndirectCall` (fn-pointer field), then return its type by re-checking.
-    ///
-    /// Exists so metaprogram-generated AST (with no parse-time receiver types)
-    /// can defer method dispatch to type-checking. A *one-shot* lowering — the
-    /// result is a plain call, so re-checking is stable. The per-method privacy
-    /// gate is enforced for free via the rewritten `FunctionCall` → `check_call`;
-    /// the `public type` cross-module gate is deliberately **not** reproduced
-    /// (the checker has no `file_id → module` map), an accepted carve-out for
-    /// metaprogram-generated code.
-    fn resolve_method_call(&mut self, expr: &mut Expression) -> LangType {
-        let pos = expr.pos;
-        let (base, name, args) = match std::mem::replace(&mut expr.kind, ExprKind::Null) {
-            ExprKind::MethodCall { base, name, args } => (*base, name, args),
-            _ => unreachable!("resolve_method_call called on a non-MethodCall node"),
-        };
-        *expr = self.build_method_call_node(base, name, args, pos);
-        // Re-check the rewritten node: `FunctionCall` runs `check_call`
-        // (arity/arg types + the per-method gate), `IndirectCall` validates the
-        // callee signature.
-        self.synth_expression(expr)
-    }
-
-    /// Build the resolved call `Expression` for `base.name(args)`. Returns a
-    /// `FunctionCall` (static or instance method), an `IndirectCall` (fn-pointer
-    /// field), or a `void` `Null` placeholder after pushing a diagnostic.
-    fn build_method_call_node(
-        &mut self,
-        mut base: Expression,
-        name: String,
-        args: Vec<Expression>,
-        pos: crate::lexer::Position,
-    ) -> Expression {
-        // Static form: `TypeName.method(args)` — `base` is `Variable(TypeName)`
-        // naming a known type-struct not shadowed by a local.
-        if let ExprKind::Variable(var_name) = &base.kind
-            && let Some(id) = self.symbols.struct_id(var_name)
-            && self.lookup_var(var_name).is_none()
-        {
-            return self.build_static_method_call(id, &name, args, pos);
-        }
-
-        // Instance form: synth the receiver, which must be a type-struct value
-        // or single-level pointer-to-struct.
-        let base_type = self.synth_expression(&mut base);
-        let TypeBase::Struct(id) = base_type.base else {
-            self.errors.push(TypeCheckError::InvalidMethodReceiver {
-                found: base_type,
-                position: pos,
-            });
-            return Expression::new(ExprKind::Null, LangType::VOID, pos);
-        };
-        let type_name = self.symbols.struct_info(id).name.clone();
-
-        // Method vs fn-pointer field. Snapshot the needed facts before any
-        // `self.errors` borrow.
-        let method_is_static = self
-            .symbols
-            .struct_info(id)
-            .methods
-            .get(&name)
-            .map(|sig| sig.is_static);
-
-        if let Some(is_static) = method_is_static {
-            // An instance call must resolve to an instance method.
-            if is_static {
-                self.errors.push(TypeCheckError::MethodCallForm {
-                    message: format!(
-                        "'{type_name}.{name}' is a static method; call it as \
-                         `{type_name}.{name}(...)` without a receiver"
-                    ),
-                    position: pos,
-                });
-                return Expression::new(ExprKind::Null, LangType::VOID, pos);
-            }
-            let mangled = crate::symbol::module::mangle_method(&type_name, &name);
-            let return_type = self
-                .symbols
-                .lookup_function(&mangled)
-                .map_or(LangType::VOID, |f| f.return_type);
-            // Autoref a value, pass a pointer as-is, reject deeper pointers.
-            // Const propagates into the reference type, so a mutating method on
-            // a const receiver is rejected downstream by `check_call`.
-            let receiver = match base_type.pointer_depth {
-                0 => {
-                    let ref_ty = base_type.with_pointer_depth(1);
-                    let base_pos = base.pos;
-                    Expression::new(ExprKind::Reference(Box::new(base)), ref_ty, base_pos)
-                }
-                1 => base,
-                _ => {
-                    self.errors.push(TypeCheckError::InvalidMethodReceiver {
-                        found: base_type,
-                        position: pos,
-                    });
-                    return Expression::new(ExprKind::Null, LangType::VOID, pos);
-                }
-            };
-            let mut all_args = Vec::with_capacity(args.len() + 1);
-            all_args.push(receiver);
-            all_args.extend(args);
-            return Expression::new(
-                ExprKind::FunctionCall {
-                    name: mangled,
-                    args: all_args,
-                },
-                return_type,
-                pos,
-            );
-        }
-
-        // Not a method: `name` may be a fn-pointer *field*, callable through an
-        // indirect call. Anything else is a diagnostic.
-        let field_ty = self.symbols.field(id, &name).map(|(_, f)| f.ty);
-        match field_ty {
-            Some(fty) if matches!(fty.base, TypeBase::FnPtr(_)) && fty.pointer_depth == 0 => {
-                let TypeBase::FnPtr(fid) = fty.base else {
-                    unreachable!("guarded by the match arm")
-                };
-                let return_type = self.symbols.fnptr_sig(fid).return_type;
-                let base_pos = base.pos;
-                let field_access = Expression::new(
-                    ExprKind::FieldAccess {
-                        base: Box::new(base),
-                        field: name,
-                    },
-                    fty,
-                    base_pos,
-                );
-                Expression::new(
-                    ExprKind::IndirectCall {
-                        callee: Box::new(field_access),
-                        args,
-                    },
-                    return_type,
-                    pos,
-                )
-            }
-            Some(fty) => {
-                self.errors.push(TypeCheckError::NotCallable {
-                    name,
-                    type_name,
-                    found: fty,
-                    position: pos,
-                });
-                Expression::new(ExprKind::Null, LangType::VOID, pos)
-            }
-            None => {
-                self.errors.push(TypeCheckError::UnknownField {
-                    field: name,
-                    type_name,
-                    position: pos,
-                });
-                Expression::new(ExprKind::Null, LangType::VOID, pos)
-            }
-        }
-    }
-
-    /// Resolve a static-form `Type.method(args)` call node.
-    fn build_static_method_call(
-        &mut self,
-        id: u32,
-        name: &str,
-        args: Vec<Expression>,
-        pos: crate::lexer::Position,
-    ) -> Expression {
-        let type_name = self.symbols.struct_info(id).name.clone();
-        let method_is_static = self
-            .symbols
-            .struct_info(id)
-            .methods
-            .get(name)
-            .map(|sig| sig.is_static);
-        match method_is_static {
-            // A static call must resolve to a static method.
-            Some(false) => {
-                self.errors.push(TypeCheckError::MethodCallForm {
-                    message: format!(
-                        "'{type_name}.{name}' is an instance method; call it as \
-                         `<receiver>.{name}(...)`"
-                    ),
-                    position: pos,
-                });
-                Expression::new(ExprKind::Null, LangType::VOID, pos)
-            }
-            Some(true) => {
-                let mangled = crate::symbol::module::mangle_method(&type_name, name);
-                let return_type = self
-                    .symbols
-                    .lookup_function(&mangled)
-                    .map_or(LangType::VOID, |f| f.return_type);
-                Expression::new(
-                    ExprKind::FunctionCall {
-                        name: mangled,
-                        args,
-                    },
-                    return_type,
-                    pos,
-                )
-            }
-            None => {
-                self.errors.push(TypeCheckError::UnknownField {
-                    field: name.to_string(),
-                    type_name,
-                    position: pos,
-                });
-                Expression::new(ExprKind::Null, LangType::VOID, pos)
-            }
         }
     }
 
@@ -827,36 +592,9 @@ impl TypeChecker {
             // synthesise and assert coercibility at the boundary.
             _ => {
                 let found = self.synth_expression(expr);
-                // A failed coercion is a repair demand site: consult a transform
-                // handler before erroring.
-                if !types_coercible(&found, target)
-                    && let Some(rewrite) =
-                        self.try_repair(&Obligation::Coerce { from: found, to: *target }, expr)
-                {
-                    *expr = rewrite; // spliced; re-checked next round
-                    self.rewrites += 1; // drives the driver to re-run to a fixpoint
-                    return;
-                }
                 self.assert_coercible(found, target, pos);
             }
         }
-    }
-
-    /// Consult a transform handler to repair a stuck demand `site`, returning a
-    /// rewritten node if a handler claims the obligation. A module-scoped handler
-    /// fires only for sites in its own module; a `public` one anywhere. Returns
-    /// `None` when none claims it, and the caller falls back to erroring.
-    fn try_repair(&mut self, obl: &Obligation, site: &Expression) -> Option<Expression> {
-        if self.handlers.is_empty() {
-            return None;
-        }
-        let Obligation::Coerce { from, to } = obl;
-        let site_module = self
-            .file_modules
-            .get(site.pos.file_id as usize)
-            .map_or("", String::as_str);
-        let addr = self.handlers.lookup(from, to, site_module)?.addr;
-        crate::meta::jit::fire_transform(addr, site)
     }
 
     /// Emit a `TypeMismatch` unless `found` is coercible to `target`; otherwise

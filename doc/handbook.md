@@ -36,8 +36,7 @@ It is referenced throughout rather than duplicated.
 13. [Standard library tour](#13-standard-library-tour)
 14. [Idioms and patterns](#14-idioms-and-patterns)
 15. [Common pitfalls](#15-common-pitfalls)
-16. [Attributes, rules, and transforms](#16-attributes-rules-and-transforms)
-17. [Where to go next](#17-where-to-go-next)
+16. [Where to go next](#16-where-to-go-next)
 
 ---
 
@@ -1142,9 +1141,8 @@ fn main(u32 argc, u8** argv) -> i32 {
 ## 11. The preprocessor
 
 A token-level pass runs before parsing and expands line-anchored `$`
-directives — chosen instead of `#` because `#` is already comments, and
-`@` is reserved for the (planned) metasystem. A `$` must be the first
-token on its line. The **conditional-compilation** directives
+directives — chosen instead of `#` because `#` is already comments. A `$`
+must be the first token on its line. The **conditional-compilation** directives
 (`$if`/`$ifdef`/`$ifndef`/`$elseif`/`$elseifdef`/`$else`/`$endif`) work
 anywhere, including inside a function body — just like C's `#ifdef`, they
 gate which tokens reach the parser. The **state-mutating** directives
@@ -1161,8 +1159,7 @@ $undefine DEBUG                # no-op if not defined
 ```
 
 Substitution is by identifier token — `u8[MAX_SIZE]` works because the
-array size is its own token. There are no function-like macros; that's
-left to the (not-yet-built) metasystem. Redefinition without
+array size is its own token. There are no function-like macros. Redefinition without
 `$undefine` first is an error, so overridable defaults write a guard:
 
 ```aspect
@@ -1561,285 +1558,7 @@ Aspect:
 
 ---
 
-## 16. Attributes, rules, and transforms
-
-Aspect has a growing *metasystem* — machinery for a program to describe,
-constrain, and rewrite itself. Three pieces are usable today: **attributes**
-(inert markers), **rules** (post-typecheck governance), and **transforms**
-(typed-AST rewriting that repairs stuck coercions). All are deliberately
-conservative; the fuller story (pre-parse `expansion fn` and the `quote`
-construction sugar) is future work.
-
-### Attributes — `@name`
-
-An attribute is `@name` or `@name(args)`, written before an item, a struct
-member, or a statement. The parser attaches it as **inert metadata** and never
-interprets it — a program behaves exactly as if every attribute were deleted,
-*unless* a rule gives one meaning.
-
-```aspect
-@version(2)
-type Config {
-    @unit("ms") public i32 timeout
-}
-
-fn run() -> i32 {
-    @debug i32 total = compute()      # attribute on a statement
-    return total
-}
-```
-
-Attributes stack in source order (outside-in — in `@a @b x`, `a` wraps `b`
-wraps `x`). Arguments are ordinary expressions but are not type-checked. An
-`@` not followed by an identifier is a parse error.
-
-### Rules — `rule <anchor> <checker>`
-
-A **rule** is a whole-program judgment that runs *after* type checking and
-**only diagnoses** — it never changes your program. You declare one at the top
-level:
-
-```aspect
-rule Config singleton        # Config may be constructed at most once
-rule @debug   audit          # list every @debug site (a report, not an error)
-```
-
-- The **anchor** is a type-struct name or an `@attribute`.
-- The **checker** names a built-in rule. Two ship today:
-  - `singleton` — its anchored type may be *constructed* (a struct literal or
-    `alloc`) at most once in the whole program; each extra construction is a
-    build error. (Copies, uninitialized declarations, and arrays are not
-    counted in this first version.)
-  - `audit` — a report-only rule that lists every site of its anchor. It emits
-    notes (to stderr / the warning channel), never errors.
-- A rule whose anchor names an unknown type, or whose checker is unknown, is a
-  build error (with a did-you-mean for a near-miss checker name).
-
-Rules are **module-scoped by default**: a bare `rule` judges only sites in its
-own module. Prefix it with `public` to govern the whole program — the same
-visibility model as `public type`:
-
-```aspect
-rule Config singleton          # only this module's Config constructions
-public rule Config singleton   # every Config construction, program-wide
-```
-
-`rule` is a *soft keyword*: a type, global, or local literally named `rule`
-still works (`rule r = rule { … }` is a variable of type `rule`). A rule
-declaration is recognised only in the `rule <anchor> <checker>` shape.
-
-### Writing a rule in Aspect — `rule fn`
-
-You can also write a rule checker yourself, as a `rule fn`:
-
-```aspect
-rule fn only_one(Program p, Type anchor) -> Judgments {
-    Judgments js = Judgments.new()
-    ExprList sites = p.instantiations_of(anchor.struct_name())
-    if sites.count() > 1 as u64 {
-        js.error(sites.at(1 as u64).pos(), "constructed more than once")
-    }
-    return js
-}
-
-rule Config only_one
-```
-
-A `rule fn` inspects the typed program through `std/meta` — a compiler-provided
-interface of opaque handles (`Program`, `Type`, `Expr`, `Judgments`, …) that is
-in scope **only inside a rule fn** (naming those types in ordinary code, or
-calling a rule fn from it, is an error). It runs after type checking,
-JIT-compiled, and emits judgments — `error` fails the build, `warn` is a note.
-`std/meta` is injected automatically — no `$import` — whenever a `rule fn` is
-present; build with `-I lib` so the compiler can find it.
-
-### Transforms — `transform <key> <handler>`
-
-A **transform** repairs a *stuck coercion*. When built-in coercion of a value
-from one type to another fails at a demand site (a call argument, an
-assignment, a `return`), the checker consults any transform bound to that
-`from -> to` key; the transform's handler rewrites the site, and the program is
-re-checked. This lets a library opt a type into an implicit conversion it
-controls — without loosening the type system for everyone.
-
-```aspect
-type Str {
-    public u8* ptr
-    public fn c_str(this) -> u8* { return this.ptr }
-}
-
-# The handler: given the demand site, build `site.c_str()`.
-transform fn to_cstr(Expr site) -> Expr { return quote { return $(site).c_str() } }
-
-# The binding: when a `Str` is wanted as a `u8*` and coercion fails, fire it.
-transform Str -> u8* to_cstr
-
-extern fn strlen(u8* s) -> u64
-
-fn main(u32 argc, u8 **argv) -> i32 {
-    Str s = Str { ptr = "hello" }
-    return strlen(s) as i32          # `strlen(s)` becomes `strlen(s.c_str())` → 5
-}
-```
-
-- The **handler** is a `transform fn` — a meta function with signature
-  `(Expr) -> Expr`. It reads the demand site as an `Expr` and returns a
-  replacement, built with `quote { ... }` (below) or, bare, the `Ast.*`
-  constructors it desugars to (`Ast.method(site, "name")` wraps `site` as
-  `site.name()`). Like a `rule fn`, it runs JIT-compiled and never reaches the
-  artifact; `std/meta` (which provides `Expr`/`Ast`) is injected
-  automatically — build with `-I lib`.
-- The **binding** `transform <from> -> <to> <handler>` fires the handler at a
-  stuck `from -> to` coercion. It takes optional `public`: a bare transform
-  governs only its own module, `public` the whole program (like `public type`
-  and `public rule`). A `transform fn` itself takes neither `public` nor
-  `export` — visibility lives on the binding.
-- Elaboration re-checks to a **fixpoint**: the rewritten site is checked again,
-  and any coercion it introduces may itself fire a transform. A handler that
-  never discharges its obligation (e.g. returns the site unchanged) is caught by
-  a round cap (`--max-rounds`, default 16) rather than looping forever.
-- Guardrails, all reported before elaboration: a key that already coerces
-  implicitly is **dead** (rejected); a key that only removes `const` is rejected
-  (const removal stays an explicit `as`); a handler that is not a valid
-  `transform fn` is rejected; and two handlers claiming one key with overlapping
-  reach are rejected. A stuck coercion with *no* binding stays an ordinary type
-  error.
-
-#### Decoration — `transform @attr <handler>`
-
-The other transform mode. Instead of repairing a stuck coercion, a **decoration**
-rewrites a statement carrying an attribute it claims. Its handler is a
-`transform fn (Stmt) -> Stmt`, and it fires **eagerly** on every tagged
-statement (not on a type error), consuming the attribute so it fires once.
-
-```aspect
-i64 log_total = 0
-
-type Amount {
-    public i64 v
-    public fn logged(this) -> Amount { log_total = log_total + this.v; return Amount { v = this.v } }
-}
-
-# Rewrite `Amount x = e` into `Amount x = { return e.logged() }`.
-transform fn log_it(Stmt node) -> Stmt {
-    Expr amount = node.value_expr()
-    return node.with_value_expr(quote { return $(amount).logged() })
-}
-transform @log log_it
-
-fn main(u32 argc, u8 **argv) -> i32 {
-    @log Amount fee = Amount { v = 25 }     # fires log_it: records 25, keeps `fee`
-    return log_total as i32                 # 25
-}
-```
-
-- `Stmt.value_expr()` reads the statement's value (a `VarDecl` initializer, an
-  assignment RHS, a `return` operand, or an expression statement);
-  `Stmt.with_value_expr(e)` rebuilds it with that value replaced. The handler
-  threads the value through a **zero-arg method** — the one call form `quote`
-  builds today.
-- `public transform @attr` reaches the whole program; a bare one is
-  module-scoped. Two handlers claiming one `@attr` in reach is rejected.
-- Stacked attributes (`@a @b x`) fire innermost first, one per round; each firing
-  carries the surviving attributes forward.
-- A value-threading handler on a statement with **no** value (an `if`/`while`/
-  `for`/block) is a clean error, not a crash. An `@attr` with **no** handler
-  stays inert. Distinct from a `rule @attr` (which only judges): a decoration
-  consumes the attribute, so a rule anchored on the same name won't see decorated
-  sites — give the two different attributes.
-
-Deferred: **function** decoration (`transform @attr(fn)`), **type-directed**
-decoration (choosing a rewrite from the subject's resolved type, like a `@debug`
-that prints per type), and the arg-bearing write surface a richer recorder needs.
-
-### `quote { ... }` — the AST-construction sugar
-
-Building a replacement one `Ast.*` call at a time gets unwieldy fast — nested
-construction requires nesting builder calls, which stops reading like the code
-it builds. `quote { ... }` is sugar for exactly that nesting:
-
-```aspect
-transform fn to_cstr(Expr site) -> Expr { return quote { return $(site).c_str() } }
-```
-
-is the same rewrite as the bare `Ast.method(site, "c_str")` form above — `quote`
-desugars to it before typecheck, so nothing about how the handler runs changes.
-
-- **A quote's body is always a statement sequence** — the same `{ stmt* }`
-  grammar a value-block uses, parsed by the ordinary Aspect parser (real
-  syntax errors at real positions, not a foreign template language). `return`
-  is what makes it *value-producing*; a body not ending in `return <expr>` is
-  *void* (below). Legal only inside a meta fn (`rule fn` / `transform fn`); a
-  `quote` in ordinary code is a meta-scope error, the same class as calling a
-  `rule fn` from ordinary code.
-- **`$(expr)`** is a splice hole: `expr` is ordinary handler-side Aspect (it
-  runs in the handler, not the template) and must evaluate to `Expr` — a
-  splice of the wrong type is an ordinary type error, positioned at the
-  splice, exactly as if you'd passed it to `Ast.method` by hand.
-- **A local variable can be declared inside a template** —
-  `quote { u8* __v = $(site).c_str() return __v }` builds a two-statement
-  value-block. The declared name is renamed under the hood so it can never
-  capture a same-named variable at the splice site (hygiene, below) — reading
-  or writing it *inside the template* still uses the name you wrote.
-- **v1 scope**, beyond `$(expr)`, a zero-argument method call
-  (`$(x).name()`), and a local `VarDecl`: an integer, bool, or a single
-  pointer to one only for a declared local's type (no struct/array locals, no
-  `Type` splice for a dynamic type yet). A richer template (field access,
-  binary operators, branching, a method call with arguments) is a clear "not
-  yet supported" error, not a panic; the rest of the `Ast.*` table lands as
-  later slices need it. See [`doc/plans/Quote-Plan.md`](../plans/Quote-Plan.md)
-  for the staging.
-- **Hygiene.** A template-declared local is renamed so it can't capture a
-  same-named variable from wherever the constructed AST gets spliced —
-  without it, `quote { u8* __v = $(site).c_str() return __v }` spliced at a
-  demand site that happens to also be named `__v` would have the *template's*
-  `__v` shadow the *demand site's* `__v` starting at its own declaration
-  (visible before its initializer is even checked), corrupting the rewrite.
-  Free identifiers (anything not declared inside the template) are **not**
-  renamed — they resolve wherever the constructed AST ends up, unhygienically,
-  by design.
-- **Void quotes.** A body not ending in `return <expr>` — e.g.
-  `quote { $(subject) }`, one expression-statement — builds a statement
-  sequence with no value, for contexts that want a `Stmt` rather than an
-  `Expr`. A decoration handler (`transform @attr`, above) returns a `Stmt`, so a
-  void quote is one way to build its result; the value-threading form uses a
-  value quote (`return`) instead so the rewritten binding keeps its value.
-
-### Meta globals — `meta <type> <name>`
-
-A **meta global** is compile-time-only mutable state a metaprogram can carry
-across invocations — the memory a transform needs to, say, count how often it
-fired:
-
-```aspect
-meta u32 fired = 0
-
-transform fn pick(Expr site) -> Expr {
-    fired = fired + 1                       # persists across firings
-    if fired == 1 as u32 { return Ast.method(site, "first") }
-    return Ast.method(site, "second")
-}
-```
-
-- Declared at the top level with a `meta` modifier. v1 allows an **integer or
-  bool** type only; it defaults to zero and takes no `public`/`export`.
-- It exists only during compilation and never reaches the runtime artifact.
-- **Readable and writable only inside a `transform fn`.** Naming one from
-  ordinary code, a global initializer, or (for now) a `rule fn` is a meta-scope
-  error — in v1 the live value lives only in the transform engine, so a rule
-  couldn't see it anyway. Cross-hook access is a later slice.
-- **Mutation order across firings is unspecified.** Use meta globals for
-  order-insensitive aggregates (counts, accumulation), not for assigning stable
-  per-site ids.
-
-> This is a growing metasystem. The remaining hook — `expansion fn` (pre-parse
-> syntax) — is future work, as are `quote`'s hygiene and statement/block forms.
-> The design lives in
-> [`doc/plans/Three-Hook-Metasystem.md`](../doc/plans/Three-Hook-Metasystem.md).
-
----
-
-## 17. Where to go next
+## 16. Where to go next
 
 - **Formal grammar, precedence, every edge case:**
   [`doc/compiler/09-syntax-reference.md`](compiler/09-syntax-reference.md)
@@ -1855,8 +1574,7 @@ transform fn pick(Expr site) -> Expr {
 - **How the compiler itself is built**, if you're curious or want to
   contribute: [`doc/compiler/00-overview.md`](compiler/00-overview.md)
   onward.
-- **What's planned but not built yet** (a metasystem for code
-  generation, methods as fn-pointer values, a struct by-value C ABI, and
+- **What's planned but not built yet** (methods as fn-pointer values, a struct by-value C ABI, and
   dropping the libc dependency compiler-wide): `TODO.md` at the
   repository root. Note inline assembly is *built* — see `asm fn` above —
   and raw Linux/x86-64 syscalls are already available today via

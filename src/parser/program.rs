@@ -1,6 +1,5 @@
 use crate::lexer::{Keyword, LangType, Position, TokenKind};
 use crate::parser::expressions::Parser;
-use crate::parser::meta::MetaItem;
 use crate::parser::{ParserError, Statement, StatementKind};
 use crate::symbol::module::Visibility;
 use aspect_macros::parse_rule;
@@ -49,8 +48,6 @@ impl Parser {
 
         let mut functions = Vec::new();
         let mut global_vars = Vec::new();
-        let mut rules = Vec::new();
-        let mut transforms = Vec::new();
 
         // Pre-register type/enum names and aliases so named types resolve
         // regardless of declaration order. Enums are interned before the alias
@@ -62,26 +59,9 @@ impl Parser {
         skip_nl!();
 
         while !self.is_at_end() {
-            // Item attributes come first (`@attr public fn ...`) and attach to
-            // whichever item follows.
-            let attrs = self.parse_leading_attrs()?;
             let (vis, export, vis_pos) = self.parse_vis_linkage_modifiers()?;
             let kind = self.parse_kind_modifier()?;
             let is_extern = matches!(&kind, Some((Keyword::Extern, _)));
-
-            // Metaprogramming declarations (`rule`/`transform` in any form) are
-            // parsed out-of-line (`parser/meta.rs`) so this loop stays about
-            // ordinary items. A `None` means the cursor is not at a meta decl.
-            if let Some(item) = self.try_parse_meta_item(&attrs, vis, export, vis_pos, &kind)? {
-                match item {
-                    MetaItem::Rule(r) => rules.push(r),
-                    MetaItem::Transform(t) => transforms.push(t),
-                    MetaItem::Function(f) => functions.push(f),
-                    MetaItem::Global(g) => global_vars.push(g),
-                }
-                skip_nl!();
-                continue;
-            }
 
             // `extern` may be `public` (nameable from importers) but never
             // `export`: there is no local symbol here to give external linkage.
@@ -125,21 +105,18 @@ impl Parser {
             }
 
             if let Some((Keyword::Asm, asm_pos)) = &kind {
-                let func = self.parse_asm_function(*asm_pos, vis, export, attrs)?;
+                let func = self.parse_asm_function(*asm_pos, vis, export)?;
                 functions.push(func);
             } else if let Some((Keyword::Naked, naked_pos)) = &kind {
-                let func = self.parse_naked_function(*naked_pos, vis, export, attrs)?;
+                let func = self.parse_naked_function(*naked_pos, vis, export)?;
                 functions.push(func);
             }
             // `fn ident(...)` is a definition; `fn(...)` is a function-pointer
             // -typed global.
             else if self.check_keyword(&Keyword::Fn) && !self.starts_fnptr_var_decl() {
-                let func = self.parse_function(is_extern, vis, export, attrs)?;
+                let func = self.parse_function(is_extern, vis, export)?;
                 functions.push(func);
             } else if self.check_keyword(&Keyword::Alias) {
-                // An alias is a pure compile-time name binding — there is no
-                // node for an attribute to ride on.
-                Self::reject_attrs(&attrs, "an alias declaration")?;
                 if is_extern {
                     return Err(ParserError::UnexpectedToken(
                         "extern can only be used with functions".to_string(),
@@ -154,7 +131,7 @@ impl Parser {
                         self.peek().pos,
                     ));
                 }
-                let methods = self.parse_struct_def(attrs)?;
+                let methods = self.parse_struct_def()?;
                 functions.extend(methods);
             } else if self.check_keyword(&Keyword::Enum) {
                 if is_extern {
@@ -163,7 +140,7 @@ impl Parser {
                         self.peek().pos,
                     ));
                 }
-                self.parse_enum_def(attrs)?;
+                self.parse_enum_def()?;
             } else if matches!(
                 self.peek().kind,
                 TokenKind::LangType(_) | TokenKind::Identifier(_)
@@ -180,7 +157,7 @@ impl Parser {
                         self.peek().pos,
                     ));
                 }
-                let global = self.parse_global_var(vis, export, attrs)?;
+                let global = self.parse_global_var(vis, export)?;
                 global_vars.push(global);
             } else {
                 return Err(ParserError::UnexpectedToken(
@@ -207,9 +184,6 @@ impl Parser {
             string_literals: self.string_literals.iter().cloned().collect(),
             symbols: std::mem::take(&mut self.module),
             source_files: self.source_files.clone(),
-            rules,
-            file_modules: self.file_modules.clone(),
-            transforms,
         })
     }
 
@@ -473,172 +447,5 @@ impl Parser {
         }
         term!();
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::parser::{MetaKind, Parser, Program, RuleAnchor};
-
-    fn parse(source: &str) -> Program {
-        let tokens = crate::lexer::tokenize(source.to_string()).expect("lex");
-        Parser::new(tokens).parse_program().expect("parse")
-    }
-
-    /// `rule <Type> <fn>` — three identifiers — is a rule declaration.
-    #[test]
-    fn type_anchored_rule_parses() {
-        let program = parse("rule Config singleton\nfn f() -> i32 {\n    return 0\n}");
-        assert_eq!(program.rules.len(), 1);
-        assert!(matches!(&program.rules[0].anchor, RuleAnchor::Type(n) if n == "Config"));
-        assert_eq!(program.rules[0].checker_fn, "singleton");
-    }
-
-    /// `rule @attr <fn>` — the `@` after `rule` — is an attribute-anchored rule.
-    #[test]
-    fn attribute_anchored_rule_parses() {
-        let program = parse("rule @nopanic auditor\nfn f() -> i32 {\n    return 0\n}");
-        assert_eq!(program.rules.len(), 1);
-        assert!(matches!(&program.rules[0].anchor, RuleAnchor::Attribute(n) if n == "nopanic"));
-        assert_eq!(program.rules[0].checker_fn, "auditor");
-    }
-
-    /// The soft keyword: a type literally named `rule` used as a global
-    /// (`rule g = …`, two identifiers then `=`) is a global, not a rule.
-    #[test]
-    fn type_named_rule_stays_a_global() {
-        let program = parse(
-            "type rule {\n    public i32 v\n}\nrule g = rule { v = 5 }\nfn f() -> i32 {\n    return 0\n}",
-        );
-        assert!(program.rules.is_empty());
-        assert!(program.global_vars.iter().any(|g| g.name == "g"));
-    }
-
-    /// A rule may carry `public` — it makes the rule whole-program (vs. its
-    /// declaring module by default), mirroring `public type`.
-    #[test]
-    fn public_rule_parses_whole_program() {
-        let program = parse("public rule Config singleton\nfn f() -> i32 {\n    return 0\n}");
-        assert_eq!(program.rules.len(), 1);
-        assert_eq!(
-            program.rules[0].vis,
-            crate::symbol::module::Visibility::Public
-        );
-    }
-
-    /// A private (bare) rule defaults to module scope.
-    #[test]
-    fn bare_rule_is_module_scoped() {
-        let program = parse("rule Config singleton\nfn f() -> i32 {\n    return 0\n}");
-        assert_eq!(
-            program.rules[0].vis,
-            crate::symbol::module::Visibility::Private
-        );
-    }
-
-    /// A rule still may not carry `export` — there is no linkage on a rule.
-    #[test]
-    fn export_rule_is_rejected() {
-        let tokens = crate::lexer::tokenize(
-            "export rule Config singleton\nfn f() -> i32 {\n    return 0\n}".to_string(),
-        )
-        .expect("lex");
-        assert!(Parser::new(tokens).parse_program().is_err());
-    }
-
-    /// `rule fn` marks a rule-checker function — and is a *function*, not a
-    /// `rule <anchor> <checker>` declaration (the `fn` disambiguates).
-    #[test]
-    fn rule_fn_is_marked() {
-        let program = parse("rule fn check(i32 x) -> i32 {\n    return x\n}");
-        assert_eq!(program.functions.len(), 1);
-        assert_eq!(program.functions[0].proto.meta_kind, Some(MetaKind::Rule));
-        assert_eq!(program.functions[0].proto.name, "check");
-        assert!(program.rules.is_empty());
-    }
-
-    /// An ordinary function has no meta kind.
-    #[test]
-    fn ordinary_fn_has_no_meta_kind() {
-        let program = parse("fn f() -> i32 {\n    return 0\n}");
-        assert_eq!(program.functions[0].proto.meta_kind, None);
-    }
-
-    /// A rule fn may not carry `public` — rejected at parse time.
-    #[test]
-    fn public_rule_fn_is_rejected() {
-        let tokens =
-            crate::lexer::tokenize("public rule fn f() -> i32 {\n    return 0\n}".to_string())
-                .expect("lex");
-        assert!(Parser::new(tokens).parse_program().is_err());
-    }
-
-    /// `transform fn <name>` is a *function* marked with `MetaKind::Transform`,
-    /// not a `transform <key> <handler>` binding.
-    #[test]
-    fn transform_fn_is_marked() {
-        let program = parse("transform fn xf(u64 e) -> u64 {\n    return e\n}");
-        assert_eq!(program.functions.len(), 1);
-        assert_eq!(
-            program.functions[0].proto.meta_kind,
-            Some(MetaKind::Transform)
-        );
-        assert!(program.transforms.is_empty());
-    }
-
-    /// A coercion binding parses into `Program.transforms` with a `Coerce` key.
-    #[test]
-    fn transform_coerce_decl_parses() {
-        let program = parse("transform i32 -> u8* to_cstr\nfn f() -> i32 {\n    return 0\n}");
-        assert_eq!(program.transforms.len(), 1);
-        assert!(matches!(
-            program.transforms[0].key,
-            crate::parser::TransformKey::Coerce { .. }
-        ));
-        assert_eq!(program.transforms[0].handler_fn, "to_cstr");
-        assert_eq!(
-            program.transforms[0].vis,
-            crate::symbol::module::Visibility::Private
-        );
-    }
-
-    /// An attribute binding parses into an `Attribute` key.
-    #[test]
-    fn transform_attr_decl_parses() {
-        let program = parse("transform @debug dbg\nfn f() -> i32 {\n    return 0\n}");
-        assert!(matches!(
-            &program.transforms[0].key,
-            crate::parser::TransformKey::Attribute(n) if n == "debug"
-        ));
-    }
-
-    /// The coercion from-type may itself be a fn-pointer type carrying its own
-    /// `->`; the *separator* arrow is the one `parse_type` leaves behind.
-    #[test]
-    fn transform_fnptr_from_type_key_parses() {
-        let program =
-            parse("transform fn(i32) -> i32 -> u8* h\nfn f() -> i32 {\n    return 0\n}");
-        assert_eq!(program.transforms.len(), 1);
-        assert_eq!(program.transforms[0].handler_fn, "h");
-    }
-
-    /// A transform binding may carry `public` (whole-program reach); the handler
-    /// fn may not.
-    #[test]
-    fn public_transform_binding_parses() {
-        let program = parse("public transform i32 -> u8* xf\nfn f() -> i32 {\n    return 0\n}");
-        assert_eq!(
-            program.transforms[0].vis,
-            crate::symbol::module::Visibility::Public
-        );
-    }
-
-    #[test]
-    fn public_transform_fn_is_rejected() {
-        let tokens = crate::lexer::tokenize(
-            "public transform fn xf(u64 e) -> u64 {\n    return e\n}".to_string(),
-        )
-        .expect("lex");
-        assert!(Parser::new(tokens).parse_program().is_err());
     }
 }

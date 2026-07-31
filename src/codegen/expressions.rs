@@ -417,15 +417,6 @@ pub(crate) fn walk_expression<'ctx>(
         ExprKind::ValueBlock(stmts) => {
             cg.generate_value_block(stmts, expr.expr_type, expr.pos)
         }
-        // The typechecker resolves every `MethodCall` into a `FunctionCall` /
-        // `IndirectCall` (see `resolve_method_call`); codegen never sees one.
-        ExprKind::MethodCall { .. } => unreachable!("MethodCall is lowered by the typechecker"),
-        // Both are desugared to `Ast.*`/`meta_ast_*` calls before typecheck
-        // (`src/meta/quote.rs`); one reaching codegen means that pass was
-        // bypassed.
-        ExprKind::Quote { .. } | ExprKind::Splice(_) => {
-            unreachable!("Quote/Splice is lowered before typecheck")
-        }
     }
 }
 

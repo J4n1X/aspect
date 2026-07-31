@@ -100,7 +100,6 @@ pub enum TokenKind {
     Arrow,        // ->
     Question,     // ?
     Dollar,       // $ — preprocessor directive sigil (e.g. `$import std/io`)
-    At,           // @ — attribute sigil (e.g. `@nopanic fn ...`)
 
     // Arithmetic operators
     Plus,     // +
@@ -174,10 +173,6 @@ pub enum TypeBase {
     /// `fn(args) -> R` *is* the pointer (machine functions are always called
     /// through an address).
     FnPtr(u32),
-    /// The type stamped at a demand site whose repair obligation is unresolved
-    /// in the current elaboration round. Suppresses downstream cascade errors and
-    /// never reaches codegen (an obligation unresolved at quiescence is fatal).
-    Unresolved,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
@@ -215,8 +210,6 @@ impl LangType {
     }
 
     pub const VOID: Self = Self::plain(TypeBase::Void, 0, 0);
-    /// See [`TypeBase::Unresolved`].
-    pub const UNRESOLVED: Self = Self::plain(TypeBase::Unresolved, 0, 0);
     /// The default integer type — what integer literals stamp to.
     pub const I32: Self = Self::plain(TypeBase::SInt, 32, 0);
     /// Integer literals too large for `i32` default to this.
@@ -370,11 +363,6 @@ impl LangType {
 
 impl fmt::Display for LangType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        // The sentinel has no width/family to render.
-        if self.base == TypeBase::Unresolved {
-            return write!(f, "<unresolved>");
-        }
-
         let const_str = if self.is_const { "const " } else { "" };
         let asterisks = "*".repeat(self.pointer_depth as usize);
 
@@ -407,11 +395,7 @@ impl fmt::Display for LangType {
             TypeBase::SInt => "i",
             TypeBase::UInt | TypeBase::Void => "u",
             TypeBase::SFloat => "f",
-            TypeBase::Bool
-            | TypeBase::Struct(_)
-            | TypeBase::FnPtr(_)
-            | TypeBase::Enum(_)
-            | TypeBase::Unresolved => {
+            TypeBase::Bool | TypeBase::Struct(_) | TypeBase::FnPtr(_) | TypeBase::Enum(_) => {
                 unreachable!("handled above")
             }
         };
@@ -464,7 +448,6 @@ impl fmt::Display for TokenKind {
             TokenKind::Arrow => write!(f, "->"),
             TokenKind::Question => write!(f, "?"),
             TokenKind::Dollar => write!(f, "$"),
-            TokenKind::At => write!(f, "@"),
             TokenKind::Plus => write!(f, "+"),
             TokenKind::Minus => write!(f, "-"),
             TokenKind::Asterisk => write!(f, "*"),

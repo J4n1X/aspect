@@ -2,9 +2,7 @@ use indexmap::IndexSet;
 
 use crate::lexer::{Keyword, LangType, Position, Token, TokenKind, TypeBase};
 use crate::parser::program::PendingBody;
-use crate::parser::{
-    BinaryOp, ComparisonOp, ExprKind, Expression, LiteralValue, ParserError, StatementKind,
-};
+use crate::parser::{BinaryOp, ComparisonOp, ExprKind, Expression, LiteralValue, ParserError};
 use crate::symbol::module::ModuleSymbols;
 use crate::symbol::table::SymbolTable;
 use aspect_macros::parse_rule;
@@ -100,11 +98,6 @@ pub struct Parser {
     /// variable scope, whose `Symbol` carries no visibility, so the
     /// reference-site gate reads it here.
     pub(crate) global_vis: std::collections::HashMap<String, crate::symbol::module::Visibility>,
-    /// Nesting depth inside `quote { ... }` (a counter, not a bool, so nested
-    /// quotes are representable later). While `> 0`, `$(expr)` parses as a
-    /// splice and method/field postfix defers unconditionally instead of
-    /// resolving from a receiver type — see `parse_quote`/`parse_dot_postfix`.
-    pub(crate) quote_depth: usize,
 }
 
 impl Parser {
@@ -124,7 +117,6 @@ impl Parser {
             file_modules: Vec::new(),
             module_imports: std::collections::HashMap::new(),
             global_vis: std::collections::HashMap::new(),
-            quote_depth: 0,
         }
     }
 
@@ -773,19 +765,6 @@ impl Parser {
             TokenKind::Identifier(name) => {
                 let name = name.clone();
                 self.advance();
-                // `quote { ... }` is a soft keyword: an AST-construction
-                // template, legal only inside a meta fn (`check_meta_gate`
-                // enforces that semantically). Guarded the same way as the
-                // struct-literal check below — only when no real struct is
-                // named `quote` — so `type quote { ... }` keeps its literal
-                // form, matching the precedent every other soft keyword
-                // (`rule`/`transform`/`meta`) already sets.
-                if name == "quote"
-                    && self.module.struct_id(&name).is_none()
-                    && self.check(&TokenKind::OpenBrace)
-                {
-                    return self.parse_quote(pos);
-                }
                 // `KnownType { ... }` is a struct literal; otherwise a variable
                 // reference. A bare `{` elsewhere always stays a block.
                 if let Some(id) = self.module.struct_id(&name)
@@ -794,26 +773,8 @@ impl Parser {
                     self.check_struct_visibility(id, pos)?;
                     return self.parse_struct_literal(id, pos);
                 }
-                // Inside a quote template, a bare identifier can't be
-                // resolved against the handler's own scope — it may name a
-                // template-local binder (a `VarDecl` earlier in the *same*
-                // template) or a free identifier the constructed AST relies
-                // on resolving wherever it's spliced (unhygienic by design).
-                // Either way that's `lower`'s call, not the parser's, so
-                // this defers exactly like method/field dispatch already does.
-                if self.quote_depth > 0 {
-                    return Ok(Expression::new(
-                        ExprKind::Variable(name),
-                        LangType::UNRESOLVED,
-                        pos,
-                    ));
-                }
                 self.variable_reference(name, pos)
             }
-            // `$(expr)` — a splice hole, legal only inside a `quote` template.
-            // Outside quote-mode `$` in expression position is not a valid
-            // primary expression, so it falls to the `_` arm below.
-            TokenKind::Dollar if self.quote_depth > 0 => self.parse_splice(pos),
             TokenKind::Keyword(kw @ (Keyword::True | Keyword::False)) => {
                 let value = *kw == Keyword::True;
                 self.advance();
@@ -848,51 +809,6 @@ impl Parser {
 
             _ => Err(ParserError::ExpectedExpression(pos)),
         }
-    }
-
-    /// `quote { stmt* }` with the cursor on `{` (guaranteed by the
-    /// soft-keyword check in `parse_primary`). The body is *always* a
-    /// statement sequence — the same grammar a `ValueBlock` uses — parsed by
-    /// delegating straight to `parse_block_statement` (its own error
-    /// recovery included) under quote-mode; `quote_depth` is decremented on
-    /// every path, including a parse error, so a failure inside the template
-    /// cannot leave later parsing permanently in quote-mode. Whether the
-    /// resulting body is value-producing or void is a property of its
-    /// content (§1 of `doc/plans/Quote-Plan.md`), decided later by
-    /// `src/meta/quote.rs::lower_body`, not here.
-    fn parse_quote(&mut self, pos: Position) -> Result<Expression, ParserError> {
-        self.quote_depth += 1;
-        let block = self.parse_block_statement();
-        self.quote_depth -= 1;
-        let block = block?;
-        let StatementKind::Block(body) = block.kind else {
-            unreachable!("parse_block_statement always returns StatementKind::Block")
-        };
-        Ok(Expression::new(
-            ExprKind::Quote { body },
-            LangType::UNRESOLVED,
-            pos,
-        ))
-    }
-
-    /// `$(expr)` with the cursor on `$`. `expr` is ordinary handler-side
-    /// Aspect, not template content, so it is parsed with quote-mode
-    /// suspended (saved and restored, not just zeroed, so a splice nested
-    /// inside a future nested quote resumes at the right depth).
-    fn parse_splice(&mut self, pos: Position) -> Result<Expression, ParserError> {
-        self.advance(); // `$`
-        self.expect(&TokenKind::OpenParen, "(")?;
-        let outer_depth = self.quote_depth;
-        self.quote_depth = 0;
-        let inner = self.parse_expression();
-        self.quote_depth = outer_depth;
-        let inner = inner?;
-        self.expect(&TokenKind::CloseParen, ")")?;
-        Ok(Expression::new(
-            ExprKind::Splice(Box::new(inner)),
-            LangType::UNRESOLVED,
-            pos,
-        ))
     }
 
     /// Chooses the smallest signed type that fits.
@@ -1234,36 +1150,6 @@ impl Parser {
     fn parse_dot_postfix(&mut self, base: Expression) -> Result<Expression, ParserError> {
         let pos = base.pos;
         let name = self.parse_ident("field or method name")?;
-
-        // Inside a `quote` template, method/field dispatch cannot resolve
-        // from a receiver type (the template has none — e.g. a spliced
-        // receiver is a runtime `Expr` handle, not a typed value), so defer
-        // unconditionally to the §14.2 node the checker resolves later,
-        // instead of the lookup below.
-        if self.quote_depth > 0 {
-            if self.check(&TokenKind::OpenParen) {
-                self.advance();
-                let args =
-                    self.parse_comma_separated(&TokenKind::CloseParen, Self::parse_expression)?;
-                return Ok(Expression::new(
-                    ExprKind::MethodCall {
-                        base: Box::new(base),
-                        name,
-                        args,
-                    },
-                    LangType::UNRESOLVED,
-                    pos,
-                ));
-            }
-            return Ok(Expression::new(
-                ExprKind::FieldAccess {
-                    base: Box::new(base),
-                    field: name,
-                },
-                LangType::UNRESOLVED,
-                pos,
-            ));
-        }
 
         // Method call only when `name` is actually a method of the base's type;
         // otherwise (e.g. `.callback(` on a fn-pointer *field*) fall through to

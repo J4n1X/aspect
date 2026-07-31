@@ -1,6 +1,6 @@
 use crate::lexer::{Keyword, LangType, TokenKind, TypeBase};
 use crate::parser::expressions::Parser;
-use crate::parser::{Attribute, ExprKind, Expression, ParserError};
+use crate::parser::{ExprKind, Expression, ParserError};
 use crate::symbol::module::Visibility;
 use aspect_macros::parse_rule;
 
@@ -31,49 +31,12 @@ impl Parser {
             .map_err(|e| ParserError::from_symbol(e, pos))
     }
 
-    /// Attributes are inert cargo: the parser validates only the shape and
-    /// attaches them, in source order, to the item that follows. Source order
-    /// is outside-in — in `@a @b x`, `a` is applied last. Newlines after an
-    /// attribute are skipped, so one on its own line binds to what follows.
-    #[parse_rule]
-    pub(crate) fn parse_leading_attrs(&mut self) -> Result<Vec<Attribute>, ParserError> {
-        let mut attrs = Vec::new();
-        while self.check(&TokenKind::At) {
-            let pos = pos!();
-            self.advance();
-            let name = self.parse_ident("attribute name")?;
-            let args = if token_if!(OpenParen) {
-                self.parse_comma_separated(&TokenKind::CloseParen, Self::parse_expression)?
-            } else {
-                Vec::new()
-            };
-            attrs.push(Attribute { name, args, pos });
-            skip_nl!();
-        }
-        Ok(attrs)
-    }
-
-    /// Reject attributes on a construct that takes none (e.g. `alias`).
-    pub(crate) fn reject_attrs(attrs: &[Attribute], what: &str) -> Result<(), ParserError> {
-        match attrs.first() {
-            Some(attr) => Err(ParserError::UnexpectedToken(
-                format!("attributes cannot be applied to {what}"),
-                attr.pos,
-            )),
-            None => Ok(()),
-        }
-    }
-
     /// `type Name { [public] Type field ... [const?] fn method(...) {...} ... }`.
     ///
     /// Fields must come before methods. Methods are desugared into mangled free
-    /// functions (`Type$method`) and returned to `do_parse_program`. `attrs`
-    /// land on the struct's `StructInfo`.
+    /// functions (`Type$method`) and returned to `do_parse_program`.
     #[parse_rule]
-    pub(crate) fn parse_struct_def(
-        &mut self,
-        attrs: Vec<Attribute>,
-    ) -> Result<Vec<crate::parser::Function>, ParserError> {
+    pub(crate) fn parse_struct_def(&mut self) -> Result<Vec<crate::parser::Function>, ParserError> {
         use crate::symbol::module::FieldInfo;
 
         let pos = pos!();
@@ -90,8 +53,6 @@ impl Parser {
             return Err(ParserError::DuplicateType(name, pos));
         }
 
-        self.module.set_struct_attrs(id, attrs);
-
         token!(OpenBrace);
 
         let mut fields: Vec<FieldInfo> = Vec::new();
@@ -105,10 +66,6 @@ impl Parser {
             if self.check(&TokenKind::CloseBrace) || self.is_at_end() {
                 break;
             }
-
-            // Member attributes precede everything else (`@attr public fn ...`)
-            // and attach to whichever member follows — field or method.
-            let member_attrs = self.parse_leading_attrs()?;
 
             // Optional `public` prefix — shared by fields and methods. Absence
             // means private for both (encapsulation by default).
@@ -130,7 +87,7 @@ impl Parser {
                     self.advance();
                     skip_nl!();
                 }
-                let method = self.parse_method(id, &name, is_const_fn, vis, member_attrs)?;
+                let method = self.parse_method(id, &name, is_const_fn, vis)?;
                 methods.push(method);
                 continue;
             }
@@ -147,7 +104,6 @@ impl Parser {
                 name: field_name,
                 ty: field_type,
                 vis,
-                attrs: member_attrs,
             });
             self.match_token(&[TokenKind::Semicolon, TokenKind::Newline]);
         }
@@ -163,10 +119,9 @@ impl Parser {
 
     /// `enum Name { V1, V2, ... }`. Variants are comma- and/or newline-separated
     /// identifiers, each assigned its declaration-order index as its value. Like
-    /// an alias, an enum has no AST node — only a symbol-table entry; `attrs`
-    /// land on its `EnumInfo`.
+    /// an alias, an enum has no AST node — only a symbol-table entry.
     #[parse_rule]
-    pub(crate) fn parse_enum_def(&mut self, attrs: Vec<Attribute>) -> Result<(), ParserError> {
+    pub(crate) fn parse_enum_def(&mut self) -> Result<(), ParserError> {
         let pos = pos!();
         kw!(Enum);
         let name = ident!();
@@ -184,8 +139,6 @@ impl Parser {
         {
             return Err(ParserError::DuplicateType(name, pos));
         }
-
-        self.module.set_enum_attrs(id, attrs);
 
         token!(OpenBrace);
 
@@ -243,7 +196,6 @@ impl Parser {
         struct_name: &str,
         is_const_fn: bool,
         vis: crate::symbol::module::Visibility,
-        attrs: Vec<Attribute>,
     ) -> Result<crate::parser::Function, ParserError> {
         use crate::parser::{Function, FunctionProto};
         use crate::symbol::module::{mangle_method, MethodSig};
@@ -301,8 +253,6 @@ impl Parser {
             // `MethodSig.vis` gate), not the module namespace or linkage.
             vis: Visibility::Private,
             export: false,
-            attrs,
-            meta_kind: None,
             pos,
         };
 
@@ -390,7 +340,6 @@ impl Parser {
         is_extern: bool,
         vis: Visibility,
         export: bool,
-        attrs: Vec<Attribute>,
     ) -> Result<crate::parser::Function, ParserError> {
         use crate::parser::{Function, FunctionProto};
         let pos = pos!();
@@ -417,8 +366,6 @@ impl Parser {
             return_type,
             vis,
             export,
-            attrs,
-            meta_kind: None,
             pos,
         };
 
@@ -444,7 +391,6 @@ impl Parser {
         &mut self,
         vis: Visibility,
         export: bool,
-        attrs: Vec<Attribute>,
     ) -> Result<crate::parser::GlobalVar, ParserError> {
         use crate::parser::GlobalVar;
 
@@ -474,8 +420,6 @@ impl Parser {
             pos,
             vis,
             export,
-            is_meta: false,
-            attrs,
         })
     }
 
@@ -566,41 +510,11 @@ impl Parser {
 
 #[cfg(test)]
 mod tests {
-    use crate::parser::{FunctionBody, Parser, Program};
+    use crate::parser::{Parser, Program};
 
     fn parse(source: &str) -> Program {
         let tokens = crate::lexer::tokenize(source.to_string()).expect("lex");
         Parser::new(tokens).parse_program().expect("parse")
-    }
-
-    /// Attribute order is source order, which is outside-in: in `@a @b fn`,
-    /// `a` is applied last (`a(b(f))`).
-    #[test]
-    fn stacked_attributes_keep_source_order() {
-        let program = parse("@a @b(1) fn f() {\n    return\n}");
-        let attrs = &program.functions[0].proto.attrs;
-        let names: Vec<&str> = attrs.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, ["a", "b"]);
-        assert!(attrs[0].args.is_empty());
-        assert_eq!(attrs[1].args.len(), 1);
-    }
-
-    /// An attribute on its own line binds to the following statement.
-    #[test]
-    fn statement_attributes_attach_to_the_statement() {
-        let program = parse("fn f() -> i32 {\n    @debug\n    @trace(2)\n    return 0\n}");
-        let FunctionBody::Aspect(body) = &program.functions[0].body else {
-            panic!("expected an Aspect body");
-        };
-        let names: Vec<&str> = body[0].attrs.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, ["debug", "trace"]);
-    }
-
-    /// A dangling `@` at EOF is a parse error, not a panic.
-    #[test]
-    fn at_sign_at_eof_is_an_error() {
-        let tokens = crate::lexer::tokenize("@".to_string()).expect("lex");
-        assert!(Parser::new(tokens).parse_program().is_err());
     }
 
     /// An `enum` registers its variants in declaration order; the index is the

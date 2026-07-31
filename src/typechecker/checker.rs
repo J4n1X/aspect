@@ -37,15 +37,6 @@ pub struct TypeChecker {
     /// appear in the `Err` path and never change the exit code (v1). Both
     /// `main.rs` and the test harness read this, each building its own checker.
     warnings: Vec<super::errors::TypeWarning>,
-    /// Transform handlers consulted at demand sites during a round.
-    handlers: super::elaborate::HandlerRegistry,
-    /// Module of each file (parallel to `source_files`); a demand site's module
-    /// is `file_modules[pos.file_id]`, which gates a module-scoped transform.
-    file_modules: Vec<String>,
-    /// Handler rewrites applied this round; the elaboration driver reads it to
-    /// detect quiescence. Only a transform rewrite bumps it — the one-shot
-    /// `MethodCall` lowering is core lowering and must not.
-    rewrites: usize,
 }
 
 impl TypeChecker {
@@ -61,9 +52,6 @@ impl TypeChecker {
             target: TargetSpec::host(),
             errors: Vec::new(),
             warnings: Vec::new(),
-            handlers: super::elaborate::HandlerRegistry::new(),
-            file_modules: Vec::new(),
-            rewrites: 0,
         }
     }
 
@@ -73,23 +61,6 @@ impl TypeChecker {
     #[must_use]
     pub fn with_target(mut self, target: TargetSpec) -> Self {
         self.target = target;
-        self
-    }
-
-    /// Install the transform handler registry the round loop resolved. A demand
-    /// site consults it (via `try_repair`) before erroring.
-    #[must_use]
-    pub fn with_handlers(mut self, handlers: super::elaborate::HandlerRegistry) -> Self {
-        self.handlers = handlers;
-        self
-    }
-
-    /// Seed the source-file registry so diagnostics resolve `pos.file_id` to a
-    /// filename even when the checker never runs `check_program` (the transform
-    /// guard/engine error paths format their errors through a bare checker).
-    #[must_use]
-    pub fn with_source_files(mut self, files: Vec<std::path::PathBuf>) -> Self {
-        self.source_files = files;
         self
     }
 
@@ -107,13 +78,6 @@ impl TypeChecker {
     #[must_use]
     pub fn warnings(&self) -> &[super::errors::TypeWarning] {
         &self.warnings
-    }
-
-    /// Handler rewrites applied during the last `check_program`; the elaboration
-    /// driver reads this to detect the fixpoint (a round with zero is quiescent).
-    #[must_use]
-    pub fn rewrites(&self) -> usize {
-        self.rewrites
     }
 
     /// Mirrors [`Self::format_error`], as `file:line:col: warning: <message>`.
@@ -144,7 +108,6 @@ impl TypeChecker {
         if self.source_files.is_empty() {
             self.source_files = program.source_files.clone();
         }
-        self.file_modules = program.file_modules.clone();
 
         self.register_declarations(program);
 

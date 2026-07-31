@@ -135,49 +135,6 @@ pub enum TypeCheckError {
         position: Position,
     },
 
-    /// A `MethodCall` whose form (instance `obj.m(...)` vs static `T.m(...)`)
-    /// disagrees with the method's kind. The checker analogue of
-    /// `ParserError::MethodCallForm`; the message spells out the correct form.
-    #[error("{message} at {position}")]
-    MethodCallForm { message: String, position: Position },
-
-    /// The receiver of an instance `MethodCall` is neither a type-struct value
-    /// nor a single-level pointer-to-struct (e.g. `**Struct`, or a non-struct).
-    #[error("Method receiver must be a type-struct or pointer-to-type-struct, found '{found}' at {position}")]
-    InvalidMethodReceiver { found: LangType, position: Position },
-
-    /// A `MethodCall` `base.name(...)` where `name` names a field that is not a
-    /// function pointer (so it cannot be called) rather than a method.
-    #[error("Field '{name}' of type-struct '{type_name}' is not callable (its type '{found}' is not a function pointer) at {position}")]
-    NotCallable {
-        name: String,
-        type_name: String,
-        found: LangType,
-        position: Position,
-    },
-
-    /// Elaboration did not reach a fixpoint within the round bound — a transform
-    /// keeps rewriting. Positionless: it describes the run, not one site.
-    #[error("{message}")]
-    RoundLimitExceeded { message: String },
-
-    /// A `transform <key> <handler>` declaration is malformed: a dead or
-    /// const-removing coercion key, or a handler that is not a valid
-    /// `transform fn`. Reported before elaboration begins.
-    #[error("{message} at {position}")]
-    InvalidTransformKey { message: String, position: Position },
-
-    /// The transform engine (a JIT'd meta-only clone) failed to typecheck,
-    /// codegen, or JIT. Positionless: the message carries any inner diagnostics.
-    #[error("transform engine failed to build: {message}")]
-    TransformEngineError { message: String },
-
-    /// An attribute-decoration handler produced no usable statement for a site —
-    /// typically a value-threading handler applied to a statement with no value
-    /// expression. Positioned at the decorated statement.
-    #[error("{message} at {position}")]
-    DecorationFailed { message: String, position: Position },
-
     #[error("Value block does not produce a value on every path — each control path must end in `return <expr>` at {0}")]
     ValueBlockMissingReturn(Position),
 

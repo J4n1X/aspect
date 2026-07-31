@@ -16,7 +16,6 @@ impl Parser {
         pos: Position,
         vis: Visibility,
         export: bool,
-        attrs: Vec<crate::parser::Attribute>,
     ) -> Result<crate::parser::Function, ParserError> {
         use crate::parser::{AsmReg, AsmSpec, Function, FunctionProto};
         kw!(Fn);
@@ -92,8 +91,6 @@ impl Parser {
                 return_type,
                 vis,
                 export,
-                attrs,
-                meta_kind: None,
                 pos,
             },
             body: crate::parser::FunctionBody::Asm(AsmSpec {
@@ -117,7 +114,6 @@ impl Parser {
         pos: Position,
         vis: Visibility,
         export: bool,
-        attrs: Vec<crate::parser::Attribute>,
     ) -> Result<crate::parser::Function, ParserError> {
         use crate::parser::{Function, FunctionProto, NakedSpec};
         kw!(Fn);
@@ -155,8 +151,6 @@ impl Parser {
                 return_type,
                 vis,
                 export,
-                attrs,
-                meta_kind: None,
                 pos,
             },
             body: crate::parser::FunctionBody::Naked(NakedSpec { lines, pos }),

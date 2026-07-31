@@ -206,16 +206,6 @@ impl Preprocessor {
     /// Any [`PreprocessError`] from lexing, directive handling, or IO.
     pub fn preprocess(&mut self, entry: &Path) -> Result<PreprocessedSource, PreprocessError> {
         self.process_file(entry)?;
-        // Implicit `std/meta` injection: a program that declares a metaprogramming
-        // function (`rule fn`, later `expansion fn` / `transform fn`) gets the
-        // std/meta interface — its special types + `extern fn meta_*` — injected
-        // rather than `$import`-ed (locked design decision). Conditional, so an
-        // ordinary program keeps a clean namespace and pays nothing.
-        if self.declares_a_meta_fn() {
-            self.inject_std_meta()?;
-            self.inject_rule_trampolines()?;
-            self.inject_transform_trampolines()?;
-        }
         // The closing EOF inherits the last real token's position: it is what
         // the parser reports when input runs out mid-construct ("Expected '}'
         // but found 'EOF'"), and line 0:0 of no file is a location no editor
@@ -248,167 +238,6 @@ impl Preprocessor {
             imports: self.module_imports.clone(),
             search_roots: self.include_dirs.clone(),
         }
-    }
-
-    /// Whether the assembled token stream declares a metaprogramming function —
-    /// the identifier `rule` or `transform` immediately before the `fn` keyword.
-    /// Precise: those identifiers are only ever adjacent to `fn` in a `rule fn` /
-    /// `transform fn` descriptor (or a `transform fn(...)` fn-ptr coercion key,
-    /// which likewise implies the program uses the meta surface).
-    fn declares_a_meta_fn(&self) -> bool {
-        self.tokens.windows(2).any(|w| {
-            matches!(&w[0].kind, TokenKind::Identifier(n) if n == "rule" || n == "transform")
-                && matches!(w[1].kind, TokenKind::Keyword(crate::lexer::Keyword::Fn))
-        })
-    }
-
-    /// Process the `std/meta` module files (tokens inlined, module registered)
-    /// and make the module visible to every module in the program. This is the
-    /// injection, *not* an `$import`: the meta-only *gate* (checker) is what
-    /// restricts ordinary code from actually using the injected symbols.
-    fn inject_std_meta(&mut self) -> Result<(), PreprocessError> {
-        const META_MODULE: &str = "std/meta";
-        // If the program somehow already pulled it in, do not double-process.
-        if !self.imported.insert(META_MODULE.to_string()) {
-            return Ok(());
-        }
-        let pos = Position::with_file(1, 1, 0);
-        modules::load_and_verify_module(self, META_MODULE, pos)?;
-        // Visible to every module (including the anonymous root `""`) so a meta
-        // function anywhere can name std/meta's types.
-        let modules: Vec<String> = self
-            .file_modules
-            .iter()
-            .map(|m| m.clone().unwrap_or_default())
-            .collect();
-        for module in modules {
-            let edges = self.module_imports.entry(module).or_default();
-            if !edges.iter().any(|m| m == META_MODULE) {
-                edges.push(META_MODULE.to_string());
-            }
-        }
-        Ok(())
-    }
-
-    /// For each checker-shaped `rule fn` — `rule fn <name>(Program …` — inject a
-    /// scalar-ABI trampoline `__rt_<name>(u64, u64) -> u64`. A `(Program, Type)
-    /// -> Judgments` checker lowers to a `byval`/`sret` ABI that passes its
-    /// struct args on the stack, which a plain `extern "C"` call from the judge
-    /// cannot match; the trampoline wraps the two `u64` handles into std/meta
-    /// values, calls the real checker (codegen handles the inner ABI), and
-    /// returns the result handle — so the judge calls `fn(u64,u64)->u64`.
-    fn inject_rule_trampolines(&mut self) -> Result<(), PreprocessError> {
-        use crate::lexer::Keyword;
-        let names: Vec<String> = self
-            .tokens
-            .windows(5)
-            .filter_map(|w| {
-                let is_rule = matches!(&w[0].kind, TokenKind::Identifier(n) if n == "rule");
-                let is_fn = matches!(w[1].kind, TokenKind::Keyword(Keyword::Fn));
-                let open = matches!(w[3].kind, TokenKind::OpenParen);
-                let takes_program = matches!(&w[4].kind, TokenKind::Identifier(n) if n == "Program");
-                match (&w[2].kind, is_rule && is_fn && open && takes_program) {
-                    (TokenKind::Identifier(name), true) => Some(name.clone()),
-                    _ => None,
-                }
-            })
-            .collect();
-        if names.is_empty() {
-            return Ok(());
-        }
-        let mut src = String::new();
-        for name in names {
-            src.push_str(&format!(
-                "rule fn __rt_{name}(u64 __p, u64 __a) -> u64 {{\n    \
-                 Judgments __r = {name}(Program.from_handle(__p), Type.from_handle(__a))\n    \
-                 return __r.raw()\n}}\n"
-            ));
-        }
-        self.process_synthetic("<rule-trampolines>", src)
-    }
-
-    /// For each transform handler — `transform fn <name>(Expr …` (coercion) or
-    /// `transform fn <name>(Stmt …` (decoration) — inject a scalar-ABI trampoline
-    /// `__rt_<name>(u64) -> u64`. The handler lowers to a `byval`/`sret` ABI the
-    /// engine cannot call directly; the trampoline wraps the single handle, calls
-    /// the handler, and hands back the result handle — so the engine calls
-    /// `fn(u64) -> u64`. Both `Expr` and `Stmt` handles share `from_handle`/`raw`,
-    /// so only the wrapper type differs. A handler that takes neither gets no
-    /// trampoline and is caught by the key validator.
-    fn inject_transform_trampolines(&mut self) -> Result<(), PreprocessError> {
-        use crate::lexer::Keyword;
-        // (handler name, wrapper type, declaring module) for every
-        // `transform fn <name>(Expr …` / `(Stmt …`.
-        let handlers: Vec<(String, &'static str, Option<String>)> = self
-            .tokens
-            .windows(5)
-            .filter_map(|w| {
-                let is_transform = matches!(&w[0].kind, TokenKind::Identifier(n) if n == "transform");
-                let is_fn = matches!(w[1].kind, TokenKind::Keyword(Keyword::Fn));
-                let open = matches!(w[3].kind, TokenKind::OpenParen);
-                let wrapper = match &w[4].kind {
-                    TokenKind::Identifier(n) if n == "Expr" => Some("Expr"),
-                    TokenKind::Identifier(n) if n == "Stmt" => Some("Stmt"),
-                    _ => None,
-                };
-                match (&w[2].kind, is_transform && is_fn && open, wrapper) {
-                    (TokenKind::Identifier(name), true, Some(wrapper)) => {
-                        let module = self
-                            .file_modules
-                            .get(w[2].pos.file_id as usize)
-                            .cloned()
-                            .flatten();
-                        Some((name.clone(), wrapper, module))
-                    }
-                    _ => None,
-                }
-            })
-            .collect();
-        if handlers.is_empty() {
-            return Ok(());
-        }
-        // Emit each trampoline in its handler's own module (`$module` header): a
-        // root synthetic file cannot call a handler private to another module, so
-        // the trampoline for a handler in module M must itself live in M.
-        // Each entry: a module (None = root) → its handlers as (name, wrapper).
-        type ModuleHandlers = Vec<(Option<String>, Vec<(String, &'static str)>)>;
-        let mut by_module: ModuleHandlers = Vec::new();
-        for (name, wrapper, module) in handlers {
-            match by_module.iter_mut().find(|(m, _)| *m == module) {
-                Some((_, names)) => names.push((name, wrapper)),
-                None => by_module.push((module, vec![(name, wrapper)])),
-            }
-        }
-        for (module, names) in by_module {
-            let mut src = String::new();
-            if let Some(m) = &module {
-                src.push_str(&format!("$module {m}\n"));
-            }
-            for (name, wrapper) in names {
-                src.push_str(&format!(
-                    "transform fn __rt_{name}(u64 __h) -> u64 {{\n    \
-                     return {name}({wrapper}.from_handle(__h)).raw()\n}}\n"
-                ));
-            }
-            self.process_synthetic("<transform-trampolines>", src)?;
-        }
-        Ok(())
-    }
-
-    /// Lex an in-memory synthetic source (a compiler-generated unit like the
-    /// rule trampolines) under a fresh file id and splice its tokens into the
-    /// stream — the file-registry twin of [`Self::process_file`] for source that
-    /// has no path on disk.
-    fn process_synthetic(&mut self, name: &str, source: String) -> Result<(), PreprocessError> {
-        let file_id = u32::try_from(self.files.len())
-            .expect("preprocessor source files exceed u32::MAX");
-        self.files.push(PathBuf::from(name));
-        self.file_modules.push(None);
-        let raw = tokenize_with_file_id(source, file_id)?;
-        self.file_stack.push(FileContext::new(file_id));
-        self.process_tokens(&raw)?;
-        self.finish_file();
-        Ok(())
     }
 
     /// Prefixes the error with `file:line:column` (resolved via `pos.file_id`
@@ -487,9 +316,8 @@ impl Preprocessor {
             // next token could be a directive name (`$if`/`$else` lex as
             // `Keyword`, everything else as `Identifier` — see
             // `process_directive_line`). Anything else — mid-line, or a
-            // line-leading `$` not shaped like a name (e.g. quote's `$(`
-            // splice) — is not a directive and falls through to ordinary-token
-            // handling below, unchanged.
+            // line-leading `$` not shaped like a name — is not a directive and
+            // falls through to ordinary-token handling below, unchanged.
             let is_directive_start = matches!(token.kind, TokenKind::Dollar)
                 && at_line_start
                 && matches!(
@@ -738,8 +566,8 @@ mod tests {
     fn midline_dollar_passes_through_unchanged() {
         // Directives are line-anchored: a mid-line `$` — even one followed by
         // a real directive name — is not a directive and is passed through as
-        // an ordinary token instead of erroring (quote's `$(...)` splice needs
-        // exactly this).
+        // an ordinary token instead of erroring; a stray `$` is the parser's
+        // problem, not the preprocessor's.
         let tokens = preprocess_str("i32 x = 0 $define MAX 1\n").unwrap();
         assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Dollar)));
         assert!(tokens
@@ -749,8 +577,8 @@ mod tests {
 
     #[test]
     fn midline_dollar_paren_passes_through_unchanged() {
-        // The motivating case: `quote { $(site).c_str() }`'s `$(` is mid-line
-        // and not shaped like a directive name either way.
+        // A mid-line `$(` is not shaped like a directive name either way, so it
+        // passes through as ordinary tokens.
         let tokens = preprocess_str("i32 x = 0 $(y) 1\n").unwrap();
         let dollar_idx = tokens
             .iter()
@@ -786,8 +614,8 @@ mod tests {
 
     #[test]
     fn linestart_dollar_paren_passes_through_unchanged() {
-        // A line-leading `$(` (a future multi-line quote's splice) is not
-        // name-shaped either, so it is not misread as a directive attempt.
+        // A line-leading `$(` is not name-shaped, so it is not misread as a
+        // directive attempt.
         let tokens = preprocess_str("$(y)\n").unwrap();
         let dollar_idx = tokens
             .iter()

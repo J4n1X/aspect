@@ -11,7 +11,6 @@
 //! lives in [`crate::symbol::table::SymbolTable`], not here.
 
 use crate::lexer::LangType;
-use crate::parser::ast::Attribute;
 use crate::symbol::table::{FunctionSymbol, SymbolError};
 use std::collections::HashMap;
 
@@ -45,8 +44,6 @@ pub struct FieldInfo {
     pub name: String,
     pub ty: LangType,
     pub vis: Visibility,
-    /// Leading attributes in source order (outside-in, leftmost applied last).
-    pub attrs: Vec<Attribute>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -82,10 +79,6 @@ pub struct StructInfo {
     /// Field name -> index into `fields` (mirrors the LLVM struct element order).
     pub field_index: HashMap<String, usize>,
     pub methods: HashMap<String, MethodSig>,
-    /// Leading attributes of the `type` declaration itself, in source order
-    /// (outside-in, leftmost applied last). Empty until
-    /// [`ModuleSymbols::set_struct_attrs`].
-    pub attrs: Vec<Attribute>,
 }
 
 /// Shaped in parallel to [`StructInfo`] (id, `file_id`, `vis`, `attrs`) so the
@@ -104,8 +97,6 @@ pub struct EnumInfo {
     /// Variant names in declaration order; the index *is* the variant's value.
     /// Empty until [`ModuleSymbols::set_enum_variants`].
     pub variants: Vec<String>,
-    /// Leading attributes of the `enum` declaration, in source order.
-    pub attrs: Vec<Attribute>,
 }
 
 /// A distinct function-pointer signature (`fn(params) -> return_type`).
@@ -207,7 +198,6 @@ impl ModuleSymbols {
             fields: Vec::new(),
             field_index: HashMap::new(),
             methods: HashMap::new(),
-            attrs: Vec::new(),
         });
         self.structs_by_name.insert(name.to_string(), id);
         id
@@ -240,12 +230,6 @@ impl ModuleSymbols {
         info.field_index = field_index;
     }
 
-    /// A setter (not an `intern_struct` parameter) because interning happens in
-    /// the prescan, before the attributes are parsed.
-    pub fn set_struct_attrs(&mut self, id: u32, attrs: Vec<Attribute>) {
-        self.structs_by_id[id as usize].attrs = attrs;
-    }
-
     /// Look up a field by name, returning its layout index and info.
     #[must_use]
     pub fn field(&self, id: u32, name: &str) -> Option<(usize, &FieldInfo)> {
@@ -273,7 +257,6 @@ impl ModuleSymbols {
             file_id,
             vis,
             variants: Vec::new(),
-            attrs: Vec::new(),
         });
         self.enums_by_name.insert(name.to_string(), id);
         id
@@ -297,11 +280,6 @@ impl ModuleSymbols {
     /// Replace an enum's variant list (finalising its `enum` body).
     pub fn set_enum_variants(&mut self, id: u32, variants: Vec<String>) {
         self.enums_by_id[id as usize].variants = variants;
-    }
-
-    /// A setter for the same reason as [`Self::set_struct_attrs`].
-    pub fn set_enum_attrs(&mut self, id: u32, attrs: Vec<Attribute>) {
-        self.enums_by_id[id as usize].attrs = attrs;
     }
 
     /// The value (index) of a variant by name, or `None` if the enum has no

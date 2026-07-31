@@ -132,8 +132,8 @@ pub(crate) fn parse_module_path(
 /// The returned list is non-empty and deterministic (directory-form files
 /// are sorted by name).
 /// Resolve `module` against the `-I` roots, process every file it maps to, and
-/// verify each file's `$module` declaration matches `module`. Shared by the
-/// `$import` handler and the std/meta injection.
+/// verify each file's `$module` declaration matches `module`. The engine behind
+/// the `$import` handler.
 pub(crate) fn load_and_verify_module(
     pp: &mut Preprocessor,
     module: &str,

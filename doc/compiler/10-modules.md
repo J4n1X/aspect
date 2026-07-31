@@ -221,10 +221,3 @@ The `std/c/*` modules are raw libc `extern fn` bindings, importable at
 header granularity like their C namesakes. The directory-form modules
 (`std/vec`, `std/collections`, …) are the ones expected to grow one file
 per concrete type until generics exist.
-
-## Metasystem outlook
-
-The compiler records `file_id → module path` for every file — this
-identity is what the planned metasystem hangs its "expansions must be
-imported, never defined in the invoking file" constraint on. See
-`doc/plans/Three-Hook-Metasystem.md`.

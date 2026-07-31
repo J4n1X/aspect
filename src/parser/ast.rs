@@ -104,16 +104,6 @@ pub enum ExprKind {
         callee: Box<Expression>,
         args: Vec<Expression>,
     },
-    /// An *unresolved* method or fn-pointer-field call `base.name(args)`. The
-    /// parser resolves such calls itself and never emits this node; it exists
-    /// so metaprogram-generated AST (with no parse-time receiver types) can
-    /// defer dispatch to the checker, which **rewrites it in place** into a
-    /// `FunctionCall` or `IndirectCall` — codegen never sees a `MethodCall`.
-    MethodCall {
-        base: Box<Expression>,
-        name: String,
-        args: Vec<Expression>,
-    },
     /// `sizeof(T)` — the compile-time size of a type in bytes. Lowered to a
     /// `u64` constant at codegen using the target data layout (so struct
     /// padding and target pointer width are respected). The type checker
@@ -131,28 +121,6 @@ pub enum ExprKind {
     /// `ListInitializer` at parse time: a brace expression that parses as a
     /// comma-separated list *is* a list; anything else re-parses as statements.
     ValueBlock(Vec<Statement>),
-    /// `quote { stmt* }` — an AST-construction template, parsed by the real
-    /// statement parser in quote-mode (`Parser::quote_depth`), the same
-    /// `'{' stmt* '}'` grammar a `ValueBlock` uses (literally
-    /// `parse_block_statement`). Value-producing iff the last statement is
-    /// `Return(Some(_))`; otherwise void — see `src/meta/quote.rs`'s
-    /// `lower_body`, which is also where "value" lowers to an `Expr`
-    /// (`Ast.value_block`) and "void" to a `Stmt` (`Ast.block`, *not* another
-    /// `ValueBlock` — that variant is unconditionally value-producing).
-    /// Legal only inside a meta fn; desugared to `Ast.*`/`meta_ast_*` builder
-    /// calls before typecheck, so it never reaches the checker or codegen.
-    /// Kept out of the frozen `meta_expr_kind` ABI enum in
-    /// `lib/std/meta/meta.ap` — a handler can never observe one through the
-    /// handle API.
-    Quote { body: Vec<Statement> },
-    /// `$(expr)` — a splice hole inside a `quote` template. `expr` is
-    /// ordinary handler-side Aspect (parsed with quote-mode suspended), not
-    /// template content; it must evaluate to the `Expr` handle type. Lowered
-    /// to its inner expression verbatim (`lower(Splice(e)) = e`), after
-    /// recursively desugaring `e` itself — `$(quote { ... })` parses (a
-    /// nested quote inside a splice), so `e` can still contain an
-    /// undesugared `Quote`. Same ABI exclusion as `Quote`.
-    Splice(Box<Expression>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -214,49 +182,17 @@ pub enum StatementKind {
     Continue,
 }
 
-/// An `@name` / `@name(args)` attribute: inert metadata the parser attaches
-/// to the item, field, or statement it precedes. The parser never interprets
-/// attributes — meaning is assigned by later phases (rules, transforms), or
-/// never. Args are parsed as ordinary expressions but never type-checked.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Attribute {
-    pub name: String,
-    /// `(...)` arguments in source order; empty for the bare `@name` form.
-    pub args: Vec<Expression>,
-    /// The `@` sigil.
-    pub pos: Position,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct Statement {
     pub kind: StatementKind,
     pub pos: Position,
-    /// Leading attributes in source order — which is outside-in: in
-    /// `@a @b x`, `a` is applied last (`a(b(x))`).
-    pub attrs: Vec<Attribute>,
 }
 
 impl Statement {
     #[must_use]
     pub fn new(kind: StatementKind, pos: Position) -> Self {
-        Self {
-            kind,
-            pos,
-            attrs: Vec::new(),
-        }
+        Self { kind, pos }
     }
-}
-
-/// The metaprogramming hook a `<hook> fn` implements. The surface keyword is
-/// hook-specific and glanceable — `rule fn`, `transform fn`, and later
-/// `expansion fn` — while this enum is the shared category they all belong to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MetaKind {
-    /// `rule fn` — a post-typecheck judgment, `(Program, Type) -> Judgments`.
-    Rule,
-    /// `transform fn` — an obligation handler run during elaboration,
-    /// `(Expr) -> Expr`.
-    Transform,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -273,14 +209,6 @@ pub struct FunctionProto {
     /// lets `globaldce` strip it when unreachable — why an unused stdlib
     /// doesn't bloat every binary. Orthogonal to `vis`; the two compose.
     pub export: bool,
-    /// Leading attributes in source order (outside-in, leftmost applied last).
-    pub attrs: Vec<Attribute>,
-    /// Which metaprogramming hook this function implements, or `None` for an
-    /// ordinary function. A metaprogramming function (`rule fn` today) has
-    /// `std/meta` in scope, may not be called from ordinary code, and is
-    /// codegen'd into the JIT-only judge module — never the artifact. See
-    /// `doc/compiler/11-rules.md`.
-    pub meta_kind: Option<MetaKind>,
     pub pos: Position,
 }
 
@@ -366,65 +294,6 @@ pub struct GlobalVar {
     /// Foreign linkage (`export` gives external linkage); see
     /// [`FunctionProto::export`]. Orthogonal to `vis`; the two compose.
     pub export: bool,
-    /// A `meta` global — compile-time-only mutable state, readable/writable only
-    /// inside a `transform fn` (enforced by the meta-scope gate). It lives in the
-    /// persistent transform judge module (so its value survives across firings)
-    /// and is stripped from the artifact by `globaldce` like any unused meta
-    /// symbol. `false` for an ordinary global.
-    pub is_meta: bool,
-    /// Leading attributes in source order (outside-in, leftmost applied last).
-    pub attrs: Vec<Attribute>,
-    pub pos: Position,
-}
-
-/// The subject a `rule` binds to. An enum from day one (§7 of the metasystem
-/// plan) so new anchor kinds (`function`, `module`) can be added later without
-/// breaking existing rules.
-#[derive(Debug, Clone, PartialEq)]
-pub enum RuleAnchor {
-    /// `rule Config singleton` — the name of a type-struct (aliases resolve).
-    Type(String),
-    /// `rule @nopanic ensure_nopanic` — an attribute name (`@nopanic` → `"nopanic"`).
-    Attribute(String),
-}
-
-/// A `rule <anchor> <checker_fn>` declaration: a post-typecheck judgment run
-/// over the typed program by [`crate::meta::run_rules`]. In Phase 2a
-/// `checker_fn` names a compiler **builtin** rule (there is no JIT yet); a
-/// later phase lets it name a user-authored Aspect function. Rules modify
-/// nothing — they only emit diagnostics — so the node carries no body.
-///
-/// Visibility governs *reach*, mirroring `public type`: a private rule judges
-/// only sites in its own module; a `public` rule judges the whole program.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RuleDecl {
-    pub anchor: RuleAnchor,
-    pub checker_fn: String,
-    pub vis: Visibility,
-    pub pos: Position,
-}
-
-/// The demand a `transform <key> <handler>` binds a handler to. An enum from the
-/// start (like [`RuleAnchor`]) so new key kinds join without breaking the AST.
-#[derive(Debug, Clone, PartialEq)]
-pub enum TransformKey {
-    /// `transform String -> u8* to_cstr` — fires when built-in coercion of
-    /// `from` to `to` fails at a demand site.
-    Coerce { from: LangType, to: LangType },
-    /// `transform @debug debug_print` — an attribute site. Parses now; firing is
-    /// deferred (like attribute-anchored rule fns).
-    Attribute(String),
-}
-
-/// A `transform <key> <handler_fn>` binding: an obligation handler run during
-/// round-based elaboration ([`crate::typechecker::elaborate`]). Like a rule,
-/// visibility governs reach — a private transform applies only in its declaring
-/// module, `public` program-wide.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TransformDecl {
-    pub key: TransformKey,
-    pub handler_fn: String,
-    pub vis: Visibility,
     pub pos: Position,
 }
 
@@ -440,14 +309,4 @@ pub struct Program {
     /// each `$import`-pulled file after that. Empty for synthetic programs
     /// (e.g. checker unit tests that don't go through the preprocessor).
     pub source_files: Vec<std::path::PathBuf>,
-    /// Governance rules (`rule <anchor> <fn>`), run post-typecheck by
-    /// [`crate::meta::run_rules`]. Empty for programs declaring no rules.
-    pub rules: Vec<RuleDecl>,
-    /// Module name of each file, parallel to `source_files` (indexed by
-    /// `Position::file_id`); empty ⇒ every file is the anonymous root module
-    /// `""`. Carried so `meta` queries can resolve a position to its module.
-    pub file_modules: Vec<String>,
-    /// Transform handlers (`transform <key> <fn>`), consulted at demand sites
-    /// during elaboration. Empty for programs declaring no transforms.
-    pub transforms: Vec<TransformDecl>,
 }

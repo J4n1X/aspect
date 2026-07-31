@@ -82,10 +82,6 @@ impl LangTypeExt for LangType {
             // An enum's underlying representation is a 32-bit integer; the
             // nominal enum type carries no distinct LLVM shape.
             TypeBase::Enum(_) => ctx.i32_type().into(),
-            // Never reaches codegen — an unresolved obligation is a fatal error.
-            TypeBase::Unresolved => {
-                unreachable!("unresolved type reached codegen — an unresolved obligation escaped the checker")
-            }
         })
     }
 

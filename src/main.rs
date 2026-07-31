@@ -71,11 +71,6 @@ struct PreprocArgs {
     /// `compile`/`interpret`.
     #[arg(long = "target", value_name = "TRIPLE", default_value_t = TargetSpec::host().triple().to_string())]
     target: String,
-
-    /// Maximum type-check elaboration rounds before a non-settling transform is
-    /// an error (default 16).
-    #[arg(long = "max-rounds", value_name = "N", default_value_t = aspect::typechecker::DEFAULT_MAX_ROUNDS)]
-    max_rounds: usize,
 }
 
 impl PreprocArgs {
@@ -308,57 +303,8 @@ fn parse_program_from(path: &Path, preproc: &PreprocArgs) -> Result<Program> {
 fn build_program(path: &Path, preproc: &PreprocArgs) -> Result<Program> {
     let mut program = parse_program_from(path, preproc)?;
 
-    // The meta-scope gate always runs before elaboration: a misuse of the meta
-    // surface in ordinary code is then a clean `meta-scope` error rather than a
-    // mid-elaboration engine failure (or, for a `quote` left un-desugared in
-    // ordinary code, an internal panic — `quote` needs no `transform`/`rule`
-    // declaration anywhere in the file to parse, so this can't be gated on
-    // `program.transforms`/`.rules` being non-empty the way it used to be).
-    let mut gate = String::new();
-    for judgment in aspect::meta::check_meta_gate(&program) {
-        let _ = writeln!(
-            gate,
-            "{}",
-            aspect::meta::format_judgment(&judgment, &program.source_files)
-        );
-    }
-    if !gate.is_empty() {
-        anyhow::bail!(
-            "Meta-scope check failed for '{}':\n{}",
-            path.display(),
-            gate.trim_end()
-        );
-    }
-
-    // Desugar `quote { ... }` templates into `Ast.*` builder calls before the
-    // checker ever sees a meta function's body (Quote-Plan Slice C) — the
-    // gate above already guarantees any surviving `Quote` is legitimately
-    // inside a meta function, not stray ordinary code.
-    aspect::meta::quote::desugar_quotes(&mut program).map_err(|errors| {
-        let mut msg = String::new();
-        for error in &errors {
-            let _ = writeln!(
-                msg,
-                "{}",
-                aspect::lexer::format_diagnostic(&program.source_files, error, error.position())
-            );
-        }
-        anyhow::anyhow!(
-            "Quote desugaring failed for '{}':\n{}",
-            path.display(),
-            msg.trim_end()
-        )
-    })?;
-
-    // Re-check to a fixpoint so transforms can rewrite the AST; the final
-    // round's checker formats diagnostics.
-    let elaboration = aspect::typechecker::elaborate_program(
-        &mut program,
-        preproc.target_spec(),
-        preproc.max_rounds,
-    );
-    let typechecker = elaboration.checker;
-    elaboration.result.map_err(|errors| {
+    let mut typechecker = aspect::typechecker::TypeChecker::new().with_target(preproc.target_spec());
+    typechecker.check_program(&mut program).map_err(|errors| {
         let mut err_msg = String::new();
         for error in &errors {
             let _ = writeln!(err_msg, "{}", typechecker.format_error(error));
@@ -373,26 +319,6 @@ fn build_program(path: &Path, preproc: &PreprocArgs) -> Result<Program> {
     // Non-fatal diagnostics: print to stderr, do not affect the exit code.
     for warning in typechecker.warnings() {
         eprintln!("{}", typechecker.format_warning(warning));
-    }
-
-    // Governance rules (Phase 2a): judge the typed program. Error judgments
-    // fail the build; reports go to stderr like warnings.
-    let mut rule_errors = String::new();
-    for judgment in aspect::meta::run_rules(&program) {
-        let line = aspect::meta::format_judgment(&judgment, &program.source_files);
-        match judgment.severity {
-            aspect::meta::Severity::Error => {
-                let _ = writeln!(rule_errors, "{line}");
-            }
-            aspect::meta::Severity::Report => eprintln!("{line}"),
-        }
-    }
-    if !rule_errors.is_empty() {
-        anyhow::bail!(
-            "Rule checking failed for '{}':\n{}",
-            path.display(),
-            rule_errors.trim_end()
-        );
     }
 
     Ok(program)
