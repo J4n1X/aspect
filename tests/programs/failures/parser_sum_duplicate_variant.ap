@@ -1,0 +1,11 @@
+# expected: "duplicate declaration of 'Circle'"
+# Variant names must be unique within one sum.
+
+sum Shape {
+    Circle(f64 radius)
+    Circle(f64 diameter)
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

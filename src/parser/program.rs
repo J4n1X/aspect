@@ -54,6 +54,7 @@ impl Parser {
         // prescan so an alias colliding with an enum name is caught there.
         self.prescan_type_names();
         self.prescan_enum_names();
+        self.prescan_sum_names();
         self.prescan_aliases();
 
         skip_nl!();
@@ -77,8 +78,9 @@ impl Parser {
             // object-file symbol can carry — never a type or alias.
             let defines_a_fn = matches!(&kind, Some((Keyword::Asm, _) | (Keyword::Naked, _)))
                 || (self.check_keyword(&Keyword::Fn) && !self.starts_fnptr_var_decl());
-            let defines_a_type =
-                self.check_keyword(&Keyword::Type) || self.check_keyword(&Keyword::Enum);
+            let defines_a_type = self.check_keyword(&Keyword::Type)
+                || self.check_keyword(&Keyword::Enum)
+                || self.check_keyword(&Keyword::Sum);
             let defines_a_global = matches!(
                 self.peek().kind,
                 TokenKind::LangType(_) | TokenKind::Identifier(_)
@@ -98,7 +100,7 @@ impl Parser {
             }
             if export && !defines_a_fn && !defines_a_global {
                 return Err(ParserError::UnexpectedToken(
-                    "export can only be used with functions or global variables — a type, enum or alias has no linked symbol"
+                    "export can only be used with functions or global variables — a type, enum, sum or alias has no linked symbol"
                         .to_string(),
                     vis_pos,
                 ));
@@ -141,6 +143,14 @@ impl Parser {
                     ));
                 }
                 self.parse_enum_def()?;
+            } else if self.check_keyword(&Keyword::Sum) {
+                if is_extern {
+                    return Err(ParserError::UnexpectedToken(
+                        "extern can only be used with functions".to_string(),
+                        self.peek().pos,
+                    ));
+                }
+                self.parse_sum_def()?;
             } else if matches!(
                 self.peek().kind,
                 TokenKind::LangType(_) | TokenKind::Identifier(_)
@@ -168,6 +178,11 @@ impl Parser {
 
             skip_nl!();
         }
+
+        // Every layout is final — reject by-value containment cycles before
+        // codegen could ever recurse on one. (Forward references mean a cycle
+        // may only close after the whole top level is parsed.)
+        self.check_byvalue_containment_cycles();
 
         // Pass 2: every prototype (free function and method) is registered by
         // now — parse the deferred bodies and fill them into their functions.
@@ -293,6 +308,14 @@ impl Parser {
         }
     }
 
+    /// The sum twin of [`Self::prescan_type_names`]: reserves an id for every
+    /// `sum <Name>`, so forward references and import cycles resolve.
+    fn prescan_sum_names(&mut self) {
+        for (name, file_id, vis) in self.prescan_named(Keyword::Sum) {
+            self.module.intern_sum(&name, file_id, vis);
+        }
+    }
+
     /// Pre-install every `alias` definition before pass 1, so aliases resolve
     /// regardless of declaration order. Fixpoint-iterates so chains may appear
     /// in any order (`alias A B` before `alias B i32`). Nothing is reported
@@ -333,6 +356,7 @@ impl Parser {
         if self.module.resolve_alias(&name).is_some()
             || self.module.struct_id(&name).is_some()
             || self.module.enum_id(&name).is_some()
+            || self.module.sum_id(&name).is_some()
         {
             return Err(ParserError::DuplicateType(name, pos));
         }
@@ -439,6 +463,7 @@ impl Parser {
             if self.module.resolve_alias(&name).is_some()
                 || self.module.struct_id(&name).is_some()
                 || self.module.enum_id(&name).is_some()
+                || self.module.sum_id(&name).is_some()
             {
                 return Err(ParserError::DuplicateType(name, pos));
             }

@@ -1,0 +1,12 @@
+# expected: "contains itself by value", "break the cycle with a pointer"
+# A sum can never store itself by value — the layout would be infinite.
+# Indirection through a pointer is the fix (see `List` in sum_types.ap).
+
+sum Expr {
+    Lit(i32 value)
+    Neg(Expr inner)
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

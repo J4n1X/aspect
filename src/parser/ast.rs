@@ -94,6 +94,35 @@ pub enum ExprKind {
         enum_id: u32,
         value: i64,
     },
+    /// Sum construction `SumName.Variant(args…)` (bare `SumName.Variant` for a
+    /// payload-less variant). The variant is resolved to its declaration index
+    /// at parse time; `args` are the payload values in field order — arity was
+    /// already checked by the parser, argument *types* by the checker.
+    SumConstruct {
+        sum_id: u32,
+        variant: u32,
+        args: Vec<Expression>,
+    },
+    /// Binding-free `is` probe: `scrutinee is Variant` (bare variant only —
+    /// any parenthesized pattern is the binding form). An ordinary `bool`
+    /// expression at the comparison tier, usable anywhere.
+    Is {
+        scrutinee: Box<Expression>,
+        sum_id: u32,
+        variant: u32,
+    },
+    /// Binding `is` probe: `scrutinee is Variant(a, _, b)`. **Not an
+    /// expression** — legal only as a leaf of the root `&&` spine of an
+    /// `if`/`elif`/`while` condition; the parser polices parenthesized and
+    /// `||` placements, the checker everything else. Binders are copies
+    /// (`None` = `_`), registered at parse time in textual order, scoped to
+    /// the success block.
+    IsBinding {
+        scrutinee: Box<Expression>,
+        sum_id: u32,
+        variant: u32,
+        binders: Vec<Option<(String, LangType)>>,
+    },
     /// A named function as a value (function pointer). Produced for a bare
     /// `foo` and for `&foo` (the parser collapses the address-of).
     FunctionRef(String),
@@ -141,11 +170,49 @@ impl Expression {
     }
 }
 
+/// One `case` pattern.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SwitchPattern {
+    /// A constant pattern on an int/bool/enum scrutinee, kept as its parsed
+    /// expression (integer/bool literal or `EnumValue`). The checker validates
+    /// it against the scrutinee type with the ordinary rules and rejects
+    /// non-constant shapes.
+    Const(Expression),
+    /// `Variant(a, _, b)` or bare `Variant` on a sum scrutinee, resolved at
+    /// parse time. `binders` has one entry per payload field, in order:
+    /// `Some((name, type))` binds a copy, `None` discards (`_`, or every field
+    /// when the pattern is a bare name).
+    SumVariant {
+        variant: u32,
+        binders: Vec<Option<(String, LangType)>>,
+    },
+}
+
+/// One `case` arm: its pattern list, body, and source position. A pattern
+/// that binds must be the arm's only pattern (enforced at parse).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SwitchArm {
+    pub patterns: Vec<SwitchPattern>,
+    pub body: Vec<Statement>,
+    pub pos: Position,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum StatementKind {
     Expression(Expression),
     Block(Vec<Statement>),
     Return(Option<Expression>),
+    /// `switch scrutinee { case … { } … default { } }`. The scrutinee is
+    /// evaluated exactly once. `complete` is true when the arms alone cover
+    /// the scrutinee (fully-listed sum/enum, `bool` with both literals) —
+    /// computed dedup-aware by the parser so the registry-less termination
+    /// analysis (`stmt_always_returns`) can read coverage without symbols.
+    Switch {
+        scrutinee: Expression,
+        arms: Vec<SwitchArm>,
+        default: Option<Vec<Statement>>,
+        complete: bool,
+    },
     If {
         condition: Expression,
         then_block: Vec<Statement>,

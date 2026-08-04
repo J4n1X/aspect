@@ -1,0 +1,12 @@
+# expected: "contains itself by value", "break the cycle with a pointer"
+# The struct case of the by-value containment check (previously unenforced —
+# the handbook always documented it as illegal).
+
+type Node {
+    i32 value
+    Node inner
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

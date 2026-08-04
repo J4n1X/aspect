@@ -10,7 +10,7 @@ public type Pair {
     public i32 a
     public i32 b
 
-    public fn sum(this) -> i32 {
+    public fn total(this) -> i32 {
         return this.a + this.b
     }
 

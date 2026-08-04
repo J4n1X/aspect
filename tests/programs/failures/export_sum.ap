@@ -1,0 +1,11 @@
+# expected: "export can only be used with functions or global variables"
+# A sum has no linked object-file symbol, so `export` cannot apply — same
+# rule as `export type` / `export enum`.
+
+export sum Shape {
+    Dot
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

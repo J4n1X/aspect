@@ -84,6 +84,28 @@ pub enum TypeCheckError {
     #[error("Condition must be a comparable type, found '{0}' at {1}")]
     InvalidConditionType(LangType, Position),
 
+    #[error("cannot switch on '{ty}'{hint} at {position}")]
+    InvalidSwitchScrutinee {
+        ty: String,
+        hint: &'static str,
+        position: Position,
+    },
+
+    #[error("switch on '{ty}' cannot enumerate its values — add a `default` arm at {position}")]
+    SwitchMissingDefault { ty: String, position: Position },
+
+    #[error("switch does not handle {missing} — add the missing cases or a `default` arm at {position}")]
+    SwitchNonExhaustive { missing: String, position: Position },
+
+    #[error("duplicate case {what} at {position}")]
+    SwitchDuplicateCase { what: String, position: Position },
+
+    #[error("case pattern must be a constant (a literal or enum variant) at {0}")]
+    NonConstantPattern(Position),
+
+    #[error("a binding `is` is not an expression — write it as an unparenthesized `&&`-conjunct of an if/elif/while condition at {0}")]
+    IsBindingNotExpression(Position),
+
     #[error("Cannot cast from '{from}' to '{to}' at {position}")]
     InvalidCast {
         from: LangType,

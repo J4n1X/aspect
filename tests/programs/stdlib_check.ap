@@ -119,19 +119,19 @@ fn main(u32 argc, u8** argv) -> i32 {
     fails += check(r1.next_u64() == r2.next_u64(), "rng deterministic")
     Rng r3 = Rng.seeded(7)
     bool in_range = true
-    for (i32 i = 0; i < 1000; i += 1) {
+    for i32 i = 0; i < 1000; i += 1 {
         u64 v = r3.below(6)
         if v >= 6 { in_range = false }
     }
     fails += check(in_range, "rng below bound")
     bool unit_ok = true
-    for (i32 i = 0; i < 1000; i += 1) {
+    for i32 i = 0; i < 1000; i += 1 {
         f64 u = r3.next_f64()
         if u < 0.0 || u >= 1.0 { unit_ok = false }
     }
     fails += check(unit_ok, "rng next_f64 unit interval")
     bool spread = false
-    for (i32 i = 0; i < 100; i += 1) {
+    for i32 i = 0; i < 100; i += 1 {
         i64 v = r3.range_i64(0 - 10, 10)
         if v < 0 { spread = true }
         if v < 0 - 10 || v >= 10 { spread = false break }
@@ -142,19 +142,19 @@ fn main(u32 argc, u8** argv) -> i32 {
     i32[9] xs = {5, 2, 9, 1, 7, 3, 8, 4, 6}
     sort_i32(xs, 9)
     bool sorted = true
-    for (i32 i = 0; i < 8; i += 1) {
+    for i32 i = 0; i < 8; i += 1 {
         if xs[i] > xs[i + 1] { sorted = false }
     }
     fails += check(sorted, "sort_i32 small")
 
     # large array through the quicksort path (reverse order, 200 elems)
     i64* big = malloc(200 * sizeof(i64))
-    for (i64 i = 0; i < 200; i += 1) {
+    for i64 i = 0; i < 200; i += 1 {
         big[i] = 200 - i
     }
     sort_i64(big, 200)
     bool big_ok = true
-    for (i64 i = 0; i < 200; i += 1) {
+    for i64 i = 0; i < 200; i += 1 {
         if big[i] != i + 1 { big_ok = false }
     }
     free(big)
@@ -183,7 +183,7 @@ fn main(u32 argc, u8** argv) -> i32 {
 
     # force several growths: 100 distinct keys
     u8[16] keybuf
-    for (i32 i = 0; i < 100; i += 1) {
+    for i32 i = 0; i < 100; i += 1 {
         keybuf[0] = (107) as u8              # 'k'
         keybuf[1] = (48 + i / 100 % 10) as u8
         keybuf[2] = (48 + i / 10 % 10) as u8
@@ -214,7 +214,7 @@ fn main(u32 argc, u8** argv) -> i32 {
     fails += check(zeroed != null, "zalloc_bytes")
     if zeroed != null {
         bool all_zero = true
-        for (i32 i = 0; i < 64; i += 1) {
+        for i32 i = 0; i < 64; i += 1 {
             if zeroed[i] != 0 { all_zero = false }
         }
         fails += check(all_zero, "zalloc_bytes is zeroed")

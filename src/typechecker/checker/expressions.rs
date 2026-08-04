@@ -275,6 +275,50 @@ impl TypeChecker {
                 struct_ty
             }
 
+            ExprKind::Is { scrutinee, .. } => {
+                // Scrutinee sum-ness and variant existence were parse-time
+                // requirements (resolution needed the sum); synth for effect.
+                self.synth_expression(scrutinee);
+                expr.expr_type = LangType::BOOL;
+                LangType::BOOL
+            }
+
+            // A binding `is` reaching ordinary synthesis is out of position —
+            // the legal placements (root `&&`-spine of an if/elif/while
+            // condition) are consumed by `check_condition_with_bindings`
+            // before synthesis ever sees them.
+            ExprKind::IsBinding { scrutinee, .. } => {
+                self.synth_expression(scrutinee);
+                self.errors
+                    .push(TypeCheckError::IsBindingNotExpression(pos));
+                expr.expr_type = LangType::BOOL;
+                LangType::BOOL
+            }
+
+            ExprKind::SumConstruct {
+                sum_id,
+                variant,
+                args,
+            } => {
+                let sum_id = *sum_id;
+                // Snapshot the payload field types — same borrow dance as
+                // struct literals (no `self.symbols` borrow across the
+                // per-argument `check_expression` calls). Arity was enforced
+                // by the parser, so a plain `zip` pairs them exactly.
+                let field_tys: Vec<LangType> = self.symbols.sum_info(sum_id).variants
+                    [*variant as usize]
+                    .fields
+                    .iter()
+                    .map(|(_, ty)| *ty)
+                    .collect();
+                for (arg, fty) in args.iter_mut().zip(field_tys) {
+                    self.check_expression(arg, &fty);
+                }
+                let sum_ty = LangType::sum_type(sum_id);
+                expr.expr_type = sum_ty;
+                sum_ty
+            }
+
             // The parser stamped the FnPtr type; nothing to check. An unknown
             // name would have stayed `Variable` with a `void` stamp.
             ExprKind::FunctionRef(_) => default_type,
@@ -404,6 +448,9 @@ impl TypeChecker {
         } else if let TypeBase::Enum(id) = ty.base {
             let stars = "*".repeat(ty.pointer_depth as usize);
             format!("{}{}", self.symbols.enum_info(id).name, stars)
+        } else if let TypeBase::Sum(id) = ty.base {
+            let stars = "*".repeat(ty.pointer_depth as usize);
+            format!("{}{}", self.symbols.sum_info(id).name, stars)
         } else {
             format!("{ty}")
         }
@@ -662,8 +709,22 @@ impl TypeChecker {
 
     fn binary_op_types_valid(left: &LangType, right: &LangType, op: &BinaryOp) -> bool {
         // No arithmetic/bitwise/shift on enums (their equality goes through the
-        // `Comparison` arm, never here).
-        if matches!(left.base, TypeBase::Enum(_)) || matches!(right.base, TypeBase::Enum(_)) {
+        // `Comparison` arm, never here), and nothing at all on struct or sum
+        // *values*: an aggregate has no scalar ops, and whole-value `==` is
+        // undefined (would need generated comparison functions; sums are
+        // matched, not compared). Without this guard the identity arm of
+        // `types_coercible` waves `P == P` through to a codegen that expects
+        // scalars. Aggregate *pointers* still reach the pointer rules.
+        let aggregate_value = |t: &LangType| {
+            t.pointer_depth == 0
+                && !t.is_array()
+                && matches!(t.base, TypeBase::Struct(_) | TypeBase::Sum(_))
+        };
+        if matches!(left.base, TypeBase::Enum(_))
+            || matches!(right.base, TypeBase::Enum(_))
+            || aggregate_value(left)
+            || aggregate_value(right)
+        {
             return false;
         }
 

@@ -39,10 +39,10 @@ fn main(u32 argc, u8 **argv) -> i32 {
     }
 
     # The in-out case, where `rax` is both the first input and the output.
-    i64 sum = add2(40, 2)
-    if sum != diff {
+    i64 total = add2(40, 2)
+    if total != diff {
         return 2
     }
 
-    return sum as i32
+    return total as i32
 }

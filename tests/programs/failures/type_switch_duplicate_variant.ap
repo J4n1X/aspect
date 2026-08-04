@@ -1,0 +1,15 @@
+# expected: "duplicate case variant 'A'"
+
+sum S {
+    A(i32 x)
+    B
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    S s = S.B
+    switch s {
+        case A(v) { return v }
+        case A(w) { return w }
+        case B { return 0 }
+    }
+}

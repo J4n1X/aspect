@@ -1,0 +1,12 @@
+# expected: "carries a payload", "construct it with arguments"
+# A payload variant referenced without its arguments is an error.
+
+sum Shape {
+    Circle(f64 radius)
+    Dot
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Shape s = Shape.Circle
+    return 0
+}

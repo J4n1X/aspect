@@ -1,0 +1,11 @@
+# expected: "payload field name"
+# Payload fields are named, parameter-style: `Circle(f64 radius)`, never
+# `Circle(f64)`.
+
+sum Shape {
+    Circle(f64)
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

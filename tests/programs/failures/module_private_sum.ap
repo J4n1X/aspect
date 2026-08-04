@@ -1,0 +1,11 @@
+# expected: "sum 'Ballot' is private to module 'palette'", "public sum"
+# compile_args: "-I", "tests/modules"
+# Naming a module-private sum from an importing module is an error, mirroring
+# the enum and type-struct rules. The public twin runs in
+# `module_public_sum.ap`.
+
+$import palette
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return sizeof(Ballot) as i32
+}

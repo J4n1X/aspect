@@ -69,11 +69,17 @@ impl LangTypeExt for LangType {
                     "Void type cannot be used as a value type".to_string(),
                 ))
             }
-            // Struct *values* need the cached named `StructType`, which this
-            // trait can't reach — use `lang_type_to_llvm`. (Pointers decay above.)
+            // Struct and sum *values* need the cached named `StructType`, which
+            // this trait can't reach — use `lang_type_to_llvm`. (Pointers decay
+            // above.)
             TypeBase::Struct(id) => {
                 return Err(TypeLoweringError(format!(
                     "struct#{id} value must be lowered via lang_type_to_llvm"
+                )))
+            }
+            TypeBase::Sum(id) => {
+                return Err(TypeLoweringError(format!(
+                    "sum#{id} value must be lowered via lang_type_to_llvm"
                 )))
             }
             // `fn(...) -> R` *is* a pointer — opaque `ptr` in LLVM. The

@@ -1,0 +1,16 @@
+# expected: "duplicate declaration of 'v'"
+# Chain bindings share one scope — the same name twice is a redeclaration.
+
+sum S {
+    A(i32 x)
+    B
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    S s = S.B
+    S t = S.A(1)
+    if s is A(v) && t is A(v) {
+        return v
+    }
+    return 0
+}

@@ -1,0 +1,16 @@
+# expected: 2
+# expected_warning: "dead"
+# A `default` on a fully-listed enum/sum switch is legal but flagged: it
+# would silently swallow variants added later — the exact failure mode
+# exhaustiveness checking exists to prevent.
+
+enum State { On, Off }
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    State s = State.Off
+    switch s {
+        case On { return 1 }
+        case Off { return 2 }
+        default { return 3 }
+    }
+}

@@ -71,10 +71,10 @@ fn main(u32 argc, u8 **argv) -> i32 {
 
     # getrandom must actually fill the buffer, not just return a count.
     u8[16] rnd
-    for (u64 i = 0; i < 16; i += 1) { rnd[i] = 0 }
+    for u64 i = 0; i < 16; i += 1 { rnd[i] = 0 }
     if sys_getrandom(rnd, 16, 0) != 16 { fails += 1 }
     i32 nonzero = 0
-    for (u64 i = 0; i < 16; i += 1) {
+    for u64 i = 0; i < 16; i += 1 {
         if rnd[i] != 0 { nonzero += 1 }
     }
     if nonzero == 0 { fails += 1 }        # 16 zero bytes is ~2^-128

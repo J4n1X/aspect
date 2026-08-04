@@ -74,6 +74,8 @@ pub fn types_coercible(from: &LangType, to: &LangType) -> bool {
         // also lets a `const Enum` satisfy a non-const `Enum` target). Enum ↔
         // integer needs an `as` cast.
         (TypeBase::Enum(a), TypeBase::Enum(b)) => a == b,
+        // Sums are nominal like enums: same sum only (const-laundering included).
+        (TypeBase::Sum(a), TypeBase::Sum(b)) => a == b,
         _ => false,
     }
 }
@@ -116,6 +118,14 @@ pub fn literal_float_compatible(to: &LangType) -> bool {
 
 #[must_use]
 pub fn cast_valid(from: &LangType, to: &LangType) -> bool {
+    // Sum *values* admit no `as` cast in either direction — `switch`/`is` are
+    // the only observers, and nothing converts into a sum. Pointer-to-sum
+    // casts fall through to the pointer rules like any aggregate pointer.
+    if (matches!(from.base, TypeBase::Sum(_)) && from.pointer_depth == 0)
+        || (matches!(to.base, TypeBase::Sum(_)) && to.pointer_depth == 0)
+    {
+        return false;
+    }
     // Type-struct *values* are aggregates: only the identical struct type
     // "casts" to itself. Pointer-to-struct casts fall through to the pointer
     // rules below.
@@ -176,6 +186,26 @@ mod tests {
         assert!(!types_coercible(&color, &dir));
         assert!(!types_coercible(&color, &LangType::I32));
         assert!(!types_coercible(&LangType::I32, &color));
+    }
+
+    /// A sum coerces to the same sum only, and no `as` cast involves a sum
+    /// value in either direction — not even the identity cast.
+    #[test]
+    fn sum_nominal_no_casts() {
+        let shape = LangType::sum_type(0);
+        let shape2 = LangType::sum_type(0);
+        let other = LangType::sum_type(1);
+        assert!(types_coercible(&shape, &shape2));
+        assert!(types_coercible(&shape.with_const(true), &shape2));
+        assert!(!types_coercible(&shape, &other));
+        assert!(!types_coercible(&shape, &LangType::I32));
+        assert!(!types_coercible(&LangType::I32, &shape));
+        assert!(!cast_valid(&shape, &shape2));
+        assert!(!cast_valid(&shape, &LangType::I32));
+        assert!(!cast_valid(&LangType::I32, &shape));
+        assert!(!cast_valid(&shape, &other));
+        // Pointer-to-sum behaves like any aggregate pointer.
+        assert!(cast_valid(&shape.with_pointer_depth(1), &LangType::U8_PTR));
     }
 
     /// An enum casts to/from an integer and to/from another enum (shared `i32`

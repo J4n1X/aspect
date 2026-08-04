@@ -10,6 +10,18 @@ public enum Suit { Hearts, Diamonds, Clubs, Spades }
 
 enum Secret { Alpha, Beta }
 
+# The sum twins of `Suit`/`Secret`, exercised by `module_public_sum.ap` and
+# the `module_private_sum.ap` failure fixture.
+public sum Signal {
+    Go(i32 code)
+    Halt
+}
+
+sum Ballot {
+    Yes
+    No
+}
+
 # A public function may return an `i32` derived from a private enum's variant —
 # the value crosses the boundary even though the type `Secret` cannot be named
 # by the importer.

@@ -1,0 +1,10 @@
+# expected: "case pattern must be a constant"
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    i32 x = 1
+    i32 y = 2
+    switch x {
+        case y { return 1 }
+        default { return 0 }
+    }
+}

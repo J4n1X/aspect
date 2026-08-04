@@ -1,0 +1,12 @@
+# expected: "cannot enumerate its values", "add a `default`"
+# An integer scrutinee can never list every value — `default` is the only
+# route to coverage.
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    i32 x = 1
+    switch x {
+        case 1 { return 1 }
+        case 2 { return 2 }
+    }
+    return 0
+}

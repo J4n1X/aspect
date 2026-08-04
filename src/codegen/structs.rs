@@ -10,10 +10,13 @@ use crate::codegen::{CodegenError, LangTypeExt, TypeLoweringError};
 use crate::lexer::{LangType, Position, TypeBase};
 use crate::parser::{ExprKind, Expression, Program};
 
-/// True when `ty` is a type-struct passed/stored *by value* (not a pointer or
-/// array). These cross function boundaries via the `sret`/`byval` ABI.
+/// True when `ty` is a type-struct or sum passed/stored *by value* (not a
+/// pointer or array). These cross function boundaries via the `sret`/`byval`
+/// ABI — sums are aggregates exactly like structs there.
 pub(crate) fn is_struct_value(ty: &LangType) -> bool {
-    ty.pointer_depth == 0 && ty.array_size.is_none() && matches!(ty.base, TypeBase::Struct(_))
+    ty.pointer_depth == 0
+        && ty.array_size.is_none()
+        && matches!(ty.base, TypeBase::Struct(_) | TypeBase::Sum(_))
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -51,14 +54,20 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         ty: &LangType,
     ) -> Result<BasicTypeEnum<'ctx>, TypeLoweringError> {
-        if ty.pointer_depth == 0
-            && ty.array_size.is_none()
-            && let TypeBase::Struct(id) = ty.base
-        {
-            let st = self.struct_types.get(&id).ok_or_else(|| {
-                TypeLoweringError(format!("unregistered type-struct id {id}"))
-            })?;
-            return Ok((*st).into());
+        if ty.pointer_depth == 0 && ty.array_size.is_none() {
+            if let TypeBase::Struct(id) = ty.base {
+                let st = self.struct_types.get(&id).ok_or_else(|| {
+                    TypeLoweringError(format!("unregistered type-struct id {id}"))
+                })?;
+                return Ok((*st).into());
+            }
+            if let TypeBase::Sum(id) = ty.base {
+                let st = self
+                    .sum_types
+                    .get(&id)
+                    .ok_or_else(|| TypeLoweringError(format!("unregistered sum id {id}")))?;
+                return Ok((*st).into());
+            }
         }
         ty.to_llvm(self.context)
     }
@@ -131,6 +140,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             TypeBase::FnPtr(_) => Ok(u64::from(target_data.get_pointer_byte_size(None))),
             // An enum is represented as an `i32` — 4 bytes.
             TypeBase::Enum(_) => Ok(4),
+            TypeBase::Sum(id) => {
+                let sum_ty = self.sum_types.get(&id).ok_or_else(|| {
+                    CodegenError::TypeError(format!("unregistered sum id {id} in sizeof"), pos)
+                })?;
+                Ok(target_data.get_store_size(sum_ty))
+            }
         }
     }
 

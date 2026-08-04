@@ -1,0 +1,15 @@
+# expected: 11
+# compile_args: "-I", "tests/modules"
+# `public sum` exports a sum across module boundaries: the importer can name
+# it (`sizeof`), construct its variants, and match on it. The private-sum
+# twin is the failure fixture `module_private_sum.ap`.
+
+$import palette
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Signal s = Signal.Go(3)
+    switch s {
+        case Go(code) { return sizeof(Signal) as i32 + code }    # 8 + 3
+        case Halt { return 0 }
+    }
+}

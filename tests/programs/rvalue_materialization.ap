@@ -16,7 +16,7 @@ type Pair {
     public i32 a
     public i32 b
     public fn make(i32 x, i32 y) -> Pair { return Pair { a = x, b = y } }
-    public const fn sum(this) -> i32 { return this.a + this.b }
+    public const fn total(this) -> i32 { return this.a + this.b }
 }
 
 fn main(u32 argc, u8 **argv) -> i32 {
@@ -26,7 +26,7 @@ fn main(u32 argc, u8 **argv) -> i32 {
     # Method chain on an rvalue receiver — the receiver is itself an sret
     # return and must be materialised before its address can be taken for
     # the next method's `this` parameter.
-    i32 chainResult = Pair.make(30, 12).sum()   # 42
+    i32 chainResult = Pair.make(30, 12).total()   # 42
 
     return fieldResult + chainResult   # 30 + 42 = 72
 }

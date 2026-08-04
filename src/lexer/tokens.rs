@@ -11,6 +11,7 @@ pub enum Keyword {
     Type,
     Enum,
     Struct,
+    Sum,
     Alias,
     Public,
     Export,
@@ -22,6 +23,9 @@ pub enum Keyword {
     Elif,
     For,
     Switch,
+    Case,
+    Default,
+    Is,
     Break,
     Continue,
     As,
@@ -65,6 +69,7 @@ keyword_table! {
     Type => "type",
     Enum => "enum",
     Struct => "struct",
+    Sum => "sum",
     Alias => "alias",
     Public => "public",
     Export => "export",
@@ -76,6 +81,9 @@ keyword_table! {
     Elif => "elif",
     For => "for",
     Switch => "switch",
+    Case => "case",
+    Default => "default",
+    Is => "is",
     Break => "break",
     Continue => "continue",
     As => "as",
@@ -169,6 +177,10 @@ pub enum TypeBase {
     /// is `i32`, but the id makes the type *nominal* — two enums are distinct
     /// types even though both lower to `i32`.
     Enum(u32),
+    /// Interned id into the `ModuleSymbols` sum registry. Like `Struct`, the
+    /// value is an aggregate (`i32` tag + payload storage) whose LLVM shape
+    /// lives in codegen's cache; the id keeps `LangType` `Copy`/`Eq`.
+    Sum(u32),
     /// Interned id into the `ModuleSymbols` function-signature registry.
     /// `fn(args) -> R` *is* the pointer (machine functions are always called
     /// through an address).
@@ -238,6 +250,11 @@ impl LangType {
     #[must_use]
     pub const fn fnptr_type(id: u32) -> Self {
         Self::plain(TypeBase::FnPtr(id), 0, 0)
+    }
+
+    #[must_use]
+    pub const fn sum_type(id: u32) -> Self {
+        Self::plain(TypeBase::Sum(id), 0, 0)
     }
 
     // ── Shape predicates ────────────────────────────────────────────────
@@ -382,6 +399,7 @@ impl fmt::Display for LangType {
             TypeBase::Struct(id) => Some(("struct", id)),
             TypeBase::FnPtr(id) => Some(("fn", id)),
             TypeBase::Enum(id) => Some(("enum", id)),
+            TypeBase::Sum(id) => Some(("sum", id)),
             _ => None,
         };
         if let Some((kind, id)) = nominal {
@@ -395,7 +413,11 @@ impl fmt::Display for LangType {
             TypeBase::SInt => "i",
             TypeBase::UInt | TypeBase::Void => "u",
             TypeBase::SFloat => "f",
-            TypeBase::Bool | TypeBase::Struct(_) | TypeBase::FnPtr(_) | TypeBase::Enum(_) => {
+            TypeBase::Bool
+            | TypeBase::Struct(_)
+            | TypeBase::FnPtr(_)
+            | TypeBase::Enum(_)
+            | TypeBase::Sum(_) => {
                 unreachable!("handled above")
             }
         };

@@ -11,16 +11,16 @@ fn max(i32 a, i32 b) -> i32 {
 
 fn main(u32 argc, u8 **argv) -> i32 {
     # While loop: sum 1..5, then a for loop doubling twice.
-    i32 sum = 0
+    i32 total = 0
     i32 i = 1
     while i <= 5 {
-        sum = sum + i
+        total = total + i
         i = i + 1
     }
-    for (i32 j = 0; j < 2; j = j + 1) {
-        sum = sum * 2
+    for i32 j = 0; j < 2; j = j + 1 {
+        total = total * 2
     }
-    i32 loopResult = sum   # (1+2+3+4+5) * 2 * 2 = 15 * 4 = 60
+    i32 loopResult = total   # (1+2+3+4+5) * 2 * 2 = 15 * 4 = 60
 
     # if/else via a max() helper.
     i32 x = max(15, 20)

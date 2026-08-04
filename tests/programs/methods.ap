@@ -9,7 +9,7 @@ type Pair {
     public fn make(i32 x, i32 y) -> Pair {     # static factory (sret return)
         return Pair { a = x, b = y }
     }
-    public const fn sum(this) -> i32 {         # const instance method
+    public const fn total(this) -> i32 {         # const instance method
         return this.a + this.b
     }
     public fn bump(this, i32 delta) {          # mutating instance method
@@ -40,7 +40,7 @@ fn main(u32 argc, u8 **argv) -> i32 {
     Pair p = Pair.make(10, 20)                 # static call
     p.bump(6)                                  # instance call on a value (autoref)
     Pair* pp = &p
-    i32 methodsResult = pp.sum()               # instance call on a pointer  ⇒ 16+26 = 42
+    i32 methodsResult = pp.total()               # instance call on a pointer  ⇒ 16+26 = 42
 
     # Method-as-value: single fn-ptr variable, then a dispatch table. The
     # mutation done via one method is observable through another, proving the

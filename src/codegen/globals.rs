@@ -31,6 +31,54 @@ impl<'ctx> CodeGenerator<'ctx> {
             )
         };
 
+        // Sum globals with an initializer are declared with the *folded
+        // constant's* anonymous padded type (payload fields at natural types;
+        // see `const_eval`'s SumConstruct arm) — readers load through the
+        // named storage type at the same address, which opaque pointers make
+        // immaterial. The storage alignment is forced explicitly: the padded
+        // type's natural alignment can be smaller when this variant's payload
+        // is lighter than the sum's heaviest.
+        if global.var_type.pointer_depth == 0
+            && !global.var_type.is_array()
+            && matches!(global.var_type.base, crate::lexer::TypeBase::Sum(_))
+            && let Some(init_expr) = &global.initializer
+        {
+            let prev_in_global_init = self.in_global_init;
+            self.in_global_init = true;
+            let folded = const_eval(init_expr, self);
+            self.in_global_init = prev_in_global_init;
+            let folded = folded?;
+
+            let global_var = self.module.add_global(
+                folded.get_type(),
+                Some(AddressSpace::default()),
+                &global.name,
+            );
+            global_var.set_linkage(if global.export {
+                Linkage::External
+            } else {
+                Linkage::Private
+            });
+            global_var.set_initializer(&folded);
+            let align = self
+                .target_machine
+                .get_target_data()
+                .get_abi_alignment(&global_type);
+            global_var.set_alignment(align);
+            if global.var_type.is_const {
+                global_var.set_constant(true);
+            }
+            self.scope.insert_global(
+                global.name.clone(),
+                GlobalVarInfo {
+                    ptr: global_var.as_pointer_value(),
+                    llvm_type: global_type,
+                    lang_type: global.var_type,
+                },
+            );
+            return Ok(());
+        }
+
         let global_var =
             self.module
                 .add_global(global_type, Some(AddressSpace::default()), &global.name);
@@ -115,6 +163,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         pos: Position,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         let elem_lang_type = var_type.element_type();
+        // Same limitation as sum-typed struct fields: the folded constant's
+        // anonymous type can't be an element of a storage-typed array.
+        if elem_lang_type.pointer_depth == 0
+            && matches!(elem_lang_type.base, crate::lexer::TypeBase::Sum(_))
+        {
+            return Err(CodegenError::InvalidOperation(
+                "sum elements are not supported in constant array initializers yet".to_string(),
+                pos,
+            ));
+        }
         // Cache-aware: resolves type-struct elements through the named-struct
         // cache (the context-only `to_llvm` can't).
         let elem_llvm_type = self

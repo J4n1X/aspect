@@ -19,7 +19,7 @@ fn fail_if(bool bad) -> i32 {
 
 # Fill p[0..n) with a size-dependent pattern.
 fn fill(u8* p, u64 n) {
-    for (u64 i = 0; i < n; i += 1) {
+    for u64 i = 0; i < n; i += 1 {
         p[i] = ((i * 31 + n) % 251) as u8
     }
 }
@@ -27,7 +27,7 @@ fn fill(u8* p, u64 n) {
 # 1 if p[0..n) matches fill(_, orig)'s pattern (checking the first `n` bytes
 # that survived a resize from `orig`), else 0.
 fn check(u8* p, u64 n, u64 orig) -> i32 {
-    for (u64 i = 0; i < n; i += 1) {
+    for u64 i = 0; i < n; i += 1 {
         if p[i] != ((i * 31 + orig) % 251) as u8 { return 1 }
     }
     return 0

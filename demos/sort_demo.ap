@@ -44,7 +44,7 @@ fn by_name(u0* a, u0* b) -> i32 {
 }
 
 fn print_people(Person* people, u64 n) {
-    for (u64 i = 0; i < n; i += 1) {
+    for u64 i = 0; i < n; i += 1 {
         print("  ")
         print(people[i].name)
         u64 len = strlen(people[i].name)
@@ -58,7 +58,7 @@ fn print_people(Person* people, u64 n) {
 
 fn print_i32_array(i32* xs, u64 n) {
     print("  ")
-    for (u64 i = 0; i < n; i += 1) {
+    for u64 i = 0; i < n; i += 1 {
         print_i32(xs[i])
         if i + 1 < n { print(" ") }
     }
@@ -66,7 +66,7 @@ fn print_i32_array(i32* xs, u64 n) {
 }
 
 fn is_sorted_i32(i32* xs, u64 n) -> bool {
-    for (u64 i = 1; i < n; i += 1) {
+    for u64 i = 1; i < n; i += 1 {
         if xs[i - 1] > xs[i] { return false }
     }
     return true
@@ -79,7 +79,7 @@ fn main(u32 argc, u8** argv) -> i32 {
     # Shuffle-by-construction: fill from a seeded PRNG, then sort.
     Rng rng = Rng.seeded(1234)
     i32[12] xs
-    for (u64 i = 0; i < 12; i += 1) {
+    for u64 i = 0; i < 12; i += 1 {
         xs[i] = rng.below(100) as i32
     }
     println("random i32s:")
@@ -99,7 +99,7 @@ fn main(u32 argc, u8** argv) -> i32 {
     (u8*)[5] langs = {"rust", "aspect", "c", "zig", "fortran"}
     sort_cstr(langs, 5)
     println("languages, strcmp order:")
-    for (u64 i = 0; i < 5; i += 1) {
+    for u64 i = 0; i < 5; i += 1 {
         print("  ")
         println(langs[i])
     }

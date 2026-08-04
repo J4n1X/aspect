@@ -111,11 +111,14 @@ digit      ::= [0-9]
 Reserved keywords (not usable as identifiers):
 
 ```
-fn  extern  asm  naked  const  type  enum  struct  alias  public  export  sizeof
-while  if  else  elif  for  switch
+fn  extern  asm  naked  const  type  enum  struct  sum  alias  public  export  sizeof
+while  if  else  elif  for  switch  case  default  is
 break  continue  as  return
 true  false  null
 ```
+
+`struct` is reserved for future use. `switch`, `case`, `default` and `is`
+are live — see [Statements](#statements) and [Sums](#sums).
 
 `null` is the null pointer constant — see [The opaque pointer `u0*`](#types-as-tokens).
 
@@ -400,6 +403,7 @@ item-decl ::= 'public'? extern-fn-decl
            | 'public'? alias-decl               # 'public' on an alias is an error
            | 'public'? struct-decl
            | 'public'? enum-decl
+           | 'public'? sum-decl
 # `public` = module visibility (nameable via `$import`); `export` = external
 # linkage (foreign-visible object-file symbol). They are orthogonal and compose.
 # `export extern`, and `export` on a type/alias, are errors — see "Visibility
@@ -448,6 +452,21 @@ enum-variant ::= ident                     # value = declaration-order index (0,
 # `public type`. Variants are separated by commas and/or newlines (either or
 # both). At least one variant is required; there are no explicit `= N` values
 # and no payloads. Enum names may be referenced before their definition (a
+
+sum-decl ::= 'public'? 'sum' ident '{'
+               newline* (sum-variant term newline*)*
+             '}'
+sum-variant ::= ident                                    # payload-less: bare name, no parens
+              | ident '(' sum-field (',' sum-field)* ')' # discriminant = declaration index
+sum-field   ::= type ident                               # named, parameter-style
+# One variant per line (newline- or `;`-separated — the `type` field style, not
+# the enum comma style). `Dot()` (empty parens) and `Rect(f64, f64)` (unnamed
+# fields) are errors. At least one variant is required. `public sum` exports
+# the sum — there is no per-variant visibility. Sums share the one type
+# namespace with type-structs, enums and aliases, and are prescanned like
+# them, so forward references work. No type may store itself by value,
+# directly or through a struct/sum cycle — indirection through a pointer
+# breaks the cycle.
 # name-collection prescan reserves them).
 
 param-list ::= /* empty */
@@ -597,6 +616,62 @@ if c == Color.Green { ... }         # equality against another Color
 integer, valid in runtime and constant (`const`/global-initializer) positions alike.
 Comparisons and assignments use ordinary `i32` operations.
 
+### Sums
+
+A **sum** (`sum Name { Variant(T field, …) … }`) is a tagged sum type: a **distinct
+nominal type** whose value is exactly one of its declared variants, each optionally
+carrying a typed payload. Fully implemented (design:
+`doc/solved/Sum-Types-And-Switch.md`): declaration, `sizeof`, construction,
+`switch` matching with destructuring, and the `is` probe. `switch` and `is` are
+the **only observers** of a sum — no tag read, no payload accessor, no casts.
+
+```
+sum-construct ::= ident '.' ident ('(' expr (',' expr)* ')')?
+# `SumName.Variant(args…)` — an expression of the sum's type, by value. The
+# variant resolves at parse time (unknown variant, wrong arity, parens on a
+# payload-less variant, and a payload variant without arguments are all
+# errors); argument types check like function arguments (ordinary coercions).
+```
+
+```aspect
+sum Shape {
+    Circle(f64 radius)
+    Rect(f64 w, f64 h)
+    Dot                     # payload-less: bare name, never `Dot()`
+}
+```
+
+**Type rules.**
+
+- **Nominal, no casts.** A sum coerces implicitly only to the *same* sum type, and
+  no `as` cast involves a sum value in either direction — matching will be the only
+  observer. Pointers to sums follow the ordinary aggregate-pointer rules.
+- **Values.** Sum values copy, pass and return **by value** (the same `sret`/`byval`
+  ABI as type-structs). No operators are defined on sum *values* — `==` included
+  (sums are matched, not compared; the same rule now also explicitly rejects
+  whole-value `==` on type-structs). Sum construction **folds into global
+  initializers** (the constant is an anonymous padded mirror of the storage
+  layout; the global carries the storage alignment). Two const gaps remain:
+  sum-typed fields in constant struct literals and sum elements in constant
+  array initializers are rejected — initialize those at runtime.
+- **Containment.** Sums may appear as struct fields, array elements, payload fields
+  of other sums, and behind pointers. No type may store itself by value, directly or
+  through a struct/sum cycle (`contains itself by value` error, enforced for
+  type-structs too); a pointer breaks the cycle, which is what makes list/tree
+  nodes work.
+- **Visibility.** `public sum` exports the sum across a module boundary — same
+  model as `public type`/`public enum`, with no per-variant visibility (exhaustive
+  matching needs all variants or none).
+
+**Layout.** Storage is `{ i32 tag, [k x iN] }`: a 4-byte discriminant (variant
+declaration index), then payload space sized and aligned to the largest variant's
+payload struct `{ field…, field }`. Every variant's payload starts at the **same
+uniform offset** (the payload alignment) — never packed into the tag's padding —
+because LLVM's first-class aggregate copies preserve fields, not padding bytes,
+and every payload byte must live inside a real field to survive whole-value
+copies. A payload-less sum is tag-only (4 bytes). `sizeof` reports the final
+padded size; the layout is internal and not a C-interop contract.
+
 ### Statements
 
 ```
@@ -621,7 +696,40 @@ if-stmt ::= 'if' expr newline* block-body
 
 while-stmt ::= 'while' expr newline* block-body
 
-for-stmt ::= 'for' '(' for-init ';' for-cond ';' for-incr ')' newline* block-body
+switch-stmt ::= 'switch' expr newline* '{'
+                  (newline* switch-arm)* (newline* switch-default)? newline*
+                '}'
+switch-arm     ::= 'case' pattern (',' pattern)* newline* block-body
+switch-default ::= 'default' newline* block-body     # must be the last arm
+pattern ::= expr                                     # int/bool literal or enum variant
+          | ident                                    # sum variant (bare: payload ignored)
+          | ident '(' (ident | '_') (',' (ident | '_'))* ')'   # positional binders
+# The scrutinee is evaluated once. Sum/enum variant patterns resolve
+# unqualified against the scrutinee's type (qualified also accepted). A
+# pattern that binds must be the arm's only pattern; binders are copies
+# scoped to the arm. Exhaustiveness: integers require `default`; bool is
+# covered by both literals; enums/sums by listing every variant (a `default`
+# on a fully-listed switch draws a dead-arm warning). The else edge of a
+# fully-listed enum/sum switch is a `llvm.trap` block (forged values halt,
+# never UB). `break`/`continue` in arms bind to the enclosing loop. A
+# coverage-complete switch whose bodies all return satisfies the
+# every-path-returns analysis.
+
+is-expr ::= expr 'is' variant-pattern      # comparison tier, left-associative
+# Two syntactic forms. Bare `Variant` (also `Sum.Variant`): an ordinary bool
+# expression, usable anywhere. Parenthesized `Variant(a, _, b)` — even
+# all-discard — is the BINDING form: not an expression, legal only as a leaf
+# of the root `&&` spine of an if/elif/while condition. Bindings are copies,
+# registered left-to-right (a later conjunct and the success block see them;
+# an earlier conjunct does not), sharing one scope (a repeated name is a
+# redeclaration error), dead when the block ends. Short-circuit `&&`
+# guarantees a binding is initialized whenever it is readable; `||`, `!`,
+# parens and `for` headers reject the binding form. Sums only — enums get
+# "use `==`". No exhaustiveness claim (that is `switch`'s job).
+
+for-stmt ::= 'for' for-init ';' for-cond ';' for-incr newline* block-body
+# The header stays on one line (a newline inside it closes the statement);
+# an empty increment ends at the body's `{`.
 
 for-init ::= /* empty */
            | type-token ident ('=' expr)?   # variable declaration
@@ -1156,7 +1264,7 @@ fn strlen(u8 *str) -> i32 {
 
 ```aspect
 fn memset(u8 *dst, u64 len, u8 c) -> u0 {
-    for (u64 i = 0; i < len; i += 1 as u64) {
+    for u64 i = 0; i < len; i += 1 as u64 {
         dst[i] = c
     }
 }

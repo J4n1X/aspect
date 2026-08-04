@@ -87,7 +87,9 @@ Simple lookup in the flat `functions` HashMap. `ModuleSymbols` also holds type-s
 
 ## Enum Registry (on `ModuleSymbols`)
 
-Enums live in `ModuleSymbols` alongside type-structs, shaped in parallel to the struct registry: `enums_by_id: Vec<EnumInfo>` (index == the `TypeBase::Enum(id)` interned id) and `enums_by_name: HashMap<String, u32>`. An `EnumInfo` carries `{ id, name, file_id, vis, variants: Vec<String>, attrs }` — the variant's *value is its index* into `variants`. Names are reserved by a prescan (`intern_enum`) before the main parse so enums resolve regardless of declaration order; `parse_enum_def` later fills the variants via `set_enum_variants`. Lookups: `enum_id(name)`, `enum_info(id)`, and `enum_variant_index(id, variant)`.
+Enums live in `ModuleSymbols` alongside type-structs, shaped in parallel to the struct registry: `enums_by_id: Vec<EnumInfo>` (index == the `TypeBase::Enum(id)` interned id) and `enums_by_name: HashMap<String, u32>`. An `EnumInfo` carries `{ id, name, file_id, vis, variants: Vec<String> }` — the variant's *value is its index* into `variants`. Names are reserved by a prescan (`intern_enum`) before the main parse so enums resolve regardless of declaration order; `parse_enum_def` later fills the variants via `set_enum_variants`. Lookups: `enum_id(name)`, `enum_info(id)`, and `enum_variant_index(id, variant)`.
+
+Sums follow the same shape a third time: `sums_by_id: Vec<SumInfo>` (index == the `TypeBase::Sum(id)` interned id) and `sums_by_name`. A `SumInfo` carries `{ id, name, file_id, vis, variants: Vec<SumVariant> }`, where each `SumVariant` is `{ name, fields: Vec<(String, LangType)> }` — the variant's *discriminant is its index* into `variants`, and payload fields keep declaration order (matching will be positional). Interned by `intern_sum` in the prescan, filled by `parse_sum_def` via `set_sum_variants`; lookups mirror the enum ones (`sum_id`, `sum_info`, `sum_variant_index`). Type-structs, enums, sums and aliases share one type namespace — each definition parser cross-checks the other three registries and reports `DuplicateType` on a collision.
 
 ## Scope Example
 

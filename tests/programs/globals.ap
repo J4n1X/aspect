@@ -59,7 +59,7 @@ fn main(u32 argc, u8 **argv) -> i32 {
 
     # Global array-of-struct-literals, including the zero-pad tail.
     i32 arrResult = 0
-    for (u64 i = 0; i < 3; i += 1) {
+    for u64 i = 0; i < 3; i += 1 {
         arrResult = arrResult + pairs[i].x + pairs[i].y
     }
     # 1+2 + 3+4 + 5+6 = 21

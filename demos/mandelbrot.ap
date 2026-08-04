@@ -49,9 +49,9 @@ fn main(u32 argc, u8** argv) -> i32 {
     println("")
 
     i32 interior = 0
-    for (i32 row = 0; row < HEIGHT; row += 1) {
+    for i32 row = 0; row < HEIGHT; row += 1 {
         f64 ci = y_min + (row as f64) * dy + dy * 0.5
-        for (i32 col = 0; col < WIDTH; col += 1) {
+        for i32 col = 0; col < WIDTH; col += 1 {
             f64 cr = x_min + (col as f64) * dx + dx * 0.5
             i32 iter = escape_time(cr, ci)
             if iter == MAX_ITER {

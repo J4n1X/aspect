@@ -1,0 +1,13 @@
+# expected: "type mismatch"
+# A variant of a different enum never satisfies the scrutinee's enum.
+
+enum A { X, Y }
+enum B { P, Q }
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    A a = A.X
+    switch a {
+        case B.P { return 1 }
+        default { return 0 }
+    }
+}

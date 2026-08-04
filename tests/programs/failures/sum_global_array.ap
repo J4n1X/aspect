@@ -1,0 +1,12 @@
+# expected: "not supported in constant array initializers"
+
+sum Shape {
+    Dot
+    Mark(i32 v)
+}
+
+Shape[2] g = {Shape.Dot, Shape.Dot}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

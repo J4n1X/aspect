@@ -318,7 +318,7 @@ fn main(u32 argc, u8 **argv) -> i32 {
     # Gauss formula as a const so the expected value is self-documenting
     const i64 SUM_1_100 = 101 * 100 / 2   # = 5050
     i64 for_sum = 0
-    for (i32 k = 1; k <= 100; k += 1) {
+    for i32 k = 1; k <= 100; k += 1 {
         for_sum += k
     }
     check_i64("for sum 1..100", SUM_1_100, for_sum)
@@ -337,7 +337,7 @@ fn main(u32 argc, u8 **argv) -> i32 {
 
     # break early: stop once running sum exceeds 30
     i32 brk_sum = 0
-    for (i32 m = 1; m <= 100; m += 1) {
+    for i32 m = 1; m <= 100; m += 1 {
         brk_sum += m
         if brk_sum > 30 { break }
     }
@@ -437,7 +437,7 @@ fn main(u32 argc, u8 **argv) -> i32 {
     # Dynamic allocation (stack alloca via type[count]).
     const i32 dyn_n = 6
     i32 *dyn = i32[dyn_n]
-    for (i32 di = 0; di < dyn_n; di += 1) {
+    for i32 di = 0; di < dyn_n; di += 1 {
         dyn[di] = di + 1
     }
     check_i64("dynamic alloc sum=21", 21, sum_i32(dyn, dyn_n))
@@ -467,7 +467,7 @@ fn main(u32 argc, u8 **argv) -> i32 {
     u8[5] greeting = {72, 101, 108, 108, 111}
     u8 *gp = greeting
     u64 sum8 = 0
-    for (u32 gi = 0; gi < 5; gi += 1) {
+    for u32 gi = 0; gi < 5; gi += 1 {
         sum8 += gp[gi]
     }
     check_u64("u8* walk 'Hello' sum=500", 500, sum8)
@@ -529,7 +529,7 @@ fn main(u32 argc, u8 **argv) -> i32 {
 
     # f64 loop accumulation (0.1 ten times -> ~1.0)
     f64 acc = 0.0
-    for (i32 fi = 0; fi < 10; fi += 1) {
+    for i32 fi = 0; fi < 10; fi += 1 {
         acc += 0.1
     }
     check_i64("f64 0.1*10 > 0.99", 1, acc > 0.99)
@@ -564,7 +564,7 @@ fn main(u32 argc, u8 **argv) -> i32 {
 
     # Variable declared in for-init is scoped to the loop
     i32 loop_escape = 0
-    for (i32 li = 0; li < 5; li += 1) {
+    for i32 li = 0; li < 5; li += 1 {
         loop_escape += li
     }
     check_i64("for-init scope sum=10", 10, loop_escape)

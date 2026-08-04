@@ -1,0 +1,17 @@
+# expected: "cannot apply operator 'comparison'", "sum#"
+# Whole-value `==` is not defined on sums — match them (switch/`is`, later
+# stages) instead of comparing.
+
+sum Flag {
+    On
+    Off
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Flag a = Flag.On
+    Flag b = Flag.Off
+    if a == b {
+        return 1
+    }
+    return 0
+}

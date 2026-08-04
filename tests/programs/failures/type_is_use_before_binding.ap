@@ -1,0 +1,16 @@
+# expected: "undefined variable 'r'"
+# Bindings register in textual order — a conjunct *before* the binding
+# conjunct cannot read it.
+
+sum S {
+    A(i32 x)
+    B
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    S s = S.A(1)
+    if r > 0 && s is A(r) {
+        return r
+    }
+    return 0
+}

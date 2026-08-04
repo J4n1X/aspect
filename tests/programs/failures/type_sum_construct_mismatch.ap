@@ -1,0 +1,13 @@
+# expected: "type mismatch", "f64"
+# Construction arguments type-check against the variant's payload fields with
+# the ordinary coercion rules — a string does not become an f64.
+
+sum Shape {
+    Circle(f64 radius)
+    Dot
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Shape s = Shape.Circle("big")
+    return 0
+}

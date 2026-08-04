@@ -48,10 +48,14 @@ impl Parser {
             .expect("type-struct name reserved during prescan");
 
         // A non-empty field set means this name was already defined; a name
-        // also interned as an enum is a cross-namespace collision.
-        if !self.module.struct_info(id).fields.is_empty() || self.module.enum_id(&name).is_some() {
+        // also interned as an enum or sum is a cross-namespace collision.
+        if !self.module.struct_info(id).fields.is_empty()
+            || self.module.enum_id(&name).is_some()
+            || self.module.sum_id(&name).is_some()
+        {
             return Err(ParserError::DuplicateType(name, pos));
         }
+        self.struct_decl_pos.insert(id, pos);
 
         token!(OpenBrace);
 
@@ -131,10 +135,12 @@ impl Parser {
             .expect("enum name reserved during prescan");
 
         // A non-empty variant set means this name was already defined; a name
-        // also interned as a type-struct or alias is a cross-namespace collision.
-        // (Rejecting empty enums below keeps that set a faithful sentinel.)
+        // also interned as a type-struct, sum or alias is a cross-namespace
+        // collision. (Rejecting empty enums below keeps that set a faithful
+        // sentinel.)
         if !self.module.enum_info(id).variants.is_empty()
             || self.module.struct_id(&name).is_some()
+            || self.module.sum_id(&name).is_some()
             || self.module.resolve_alias(&name).is_some()
         {
             return Err(ParserError::DuplicateType(name, pos));
@@ -169,6 +175,208 @@ impl Parser {
 
         self.module.set_enum_variants(id, variants);
         Ok(())
+    }
+
+    /// `sum Name { Variant(T field, ...) ... }`. One variant per line; a
+    /// payload-less variant is a bare name (no parens); payload fields are
+    /// named, parameter-style. Like an enum, a sum has no AST node — only a
+    /// symbol-table entry (construction and `switch` observe it later).
+    #[parse_rule]
+    pub(crate) fn parse_sum_def(&mut self) -> Result<(), ParserError> {
+        use crate::symbol::module::SumVariant;
+
+        let pos = pos!();
+        kw!(Sum);
+        let name = ident!();
+        let id = self
+            .module
+            .sum_id(&name)
+            .expect("sum name reserved during prescan");
+
+        // A non-empty variant set means this name was already defined; a name
+        // also interned as a type-struct, enum or alias is a cross-namespace
+        // collision. (Rejecting empty sums below keeps the sentinel faithful.)
+        if !self.module.sum_info(id).variants.is_empty()
+            || self.module.struct_id(&name).is_some()
+            || self.module.enum_id(&name).is_some()
+            || self.module.resolve_alias(&name).is_some()
+        {
+            return Err(ParserError::DuplicateType(name, pos));
+        }
+
+        token!(OpenBrace);
+
+        let mut variants: Vec<SumVariant> = Vec::new();
+        loop {
+            skip_nl!();
+            if self.check(&TokenKind::CloseBrace) || self.is_at_end() {
+                break;
+            }
+            let variant_pos = self.peek().pos;
+            let variant_name = ident!();
+            if variants.iter().any(|v| v.name == variant_name) {
+                return Err(ParserError::DuplicateDeclaration(variant_name, variant_pos));
+            }
+
+            let mut fields: Vec<(String, LangType)> = Vec::new();
+            if self.match_token(&[TokenKind::OpenParen]) {
+                if self.check(&TokenKind::CloseParen) {
+                    return Err(ParserError::UnexpectedToken(
+                        format!(
+                            "empty payload parens on variant '{variant_name}' — a payload-less variant is a bare name"
+                        ),
+                        self.peek().pos,
+                    ));
+                }
+                loop {
+                    let field_type = self.parse_type()?;
+                    if !matches!(self.peek().kind, TokenKind::Identifier(_)) {
+                        return Err(ParserError::ExpectedToken(
+                            "payload field name — fields are named, parameter-style".to_string(),
+                            format!("{}", self.peek().kind),
+                            self.peek().pos,
+                        ));
+                    }
+                    let field_name = ident!();
+                    if fields.iter().any(|(n, _)| n == &field_name) {
+                        return Err(ParserError::DuplicateDeclaration(
+                            field_name,
+                            variant_pos,
+                        ));
+                    }
+                    fields.push((field_name, field_type));
+                    if !self.match_token(&[TokenKind::Comma]) {
+                        break;
+                    }
+                }
+                token!(CloseParen);
+            }
+            variants.push(SumVariant {
+                name: variant_name,
+                fields,
+            });
+
+            // One variant per line — a same-line sibling is rejected here.
+            if !self.check(&TokenKind::CloseBrace)
+                && !self.match_token(&[TokenKind::Newline, TokenKind::Semicolon])
+            {
+                return Err(ParserError::ExpectedToken(
+                    "newline after sum variant (one variant per line)".to_string(),
+                    format!("{}", self.peek().kind),
+                    self.peek().pos,
+                ));
+            }
+        }
+        // A sum with no variants is uninhabited, so it is rejected — mirrors
+        // the enum rule, diagnostic pointing at the `}`.
+        if variants.is_empty() {
+            return Err(ParserError::ExpectedToken(
+                "at least one sum variant".to_string(),
+                format!("{}", self.peek().kind),
+                pos,
+            ));
+        }
+        token!(CloseBrace);
+
+        self.module.set_sum_variants(id, variants);
+        self.sum_decl_pos.insert(id, pos);
+        Ok(())
+    }
+
+    /// Post-pass-1 check: no type-struct or sum may store itself by value,
+    /// directly or through a struct/sum cycle — the layout would be infinite.
+    /// Arrays count (an array is by-value storage); any pointer depth breaks
+    /// the cycle. Runs once after every layout is final, pushing one error per
+    /// distinct cycle-closing type.
+    pub(crate) fn check_byvalue_containment_cycles(&mut self) {
+        use crate::symbol::module::ModuleSymbols;
+        use std::collections::HashMap;
+
+        #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+        enum Node {
+            Struct(u32),
+            Sum(u32),
+        }
+
+        fn edges(module: &ModuleSymbols, node: Node) -> Vec<Node> {
+            let field_types: Vec<LangType> = match node {
+                Node::Struct(id) => module
+                    .struct_info(id)
+                    .fields
+                    .iter()
+                    .map(|f| f.ty)
+                    .collect(),
+                Node::Sum(id) => module
+                    .sum_info(id)
+                    .variants
+                    .iter()
+                    .flat_map(|v| v.fields.iter().map(|(_, ty)| *ty))
+                    .collect(),
+            };
+            field_types
+                .into_iter()
+                .filter(|ty| ty.pointer_depth == 0)
+                .filter_map(|ty| match ty.base {
+                    TypeBase::Struct(id) => Some(Node::Struct(id)),
+                    TypeBase::Sum(id) => Some(Node::Sum(id)),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        // Colors: absent = unvisited, false = on the current DFS path (gray),
+        // true = fully explored (black). A gray re-entry closes a cycle.
+        fn visit(
+            module: &ModuleSymbols,
+            colors: &mut HashMap<Node, bool>,
+            cyclic: &mut Vec<Node>,
+            node: Node,
+        ) {
+            match colors.get(&node) {
+                Some(false) => {
+                    if !cyclic.contains(&node) {
+                        cyclic.push(node);
+                    }
+                    return;
+                }
+                Some(true) => return,
+                None => {}
+            }
+            colors.insert(node, false);
+            for next in edges(module, node) {
+                visit(module, colors, cyclic, next);
+            }
+            colors.insert(node, true);
+        }
+
+        let mut colors = HashMap::new();
+        let mut cyclic = Vec::new();
+        let roots: Vec<Node> = self
+            .module
+            .structs()
+            .map(|s| Node::Struct(s.id))
+            .chain(self.module.sums().map(|s| Node::Sum(s.id)))
+            .collect();
+        for root in roots {
+            visit(&self.module, &mut colors, &mut cyclic, root);
+        }
+
+        for node in cyclic {
+            let (name, pos) = match node {
+                Node::Struct(id) => (
+                    self.module.struct_info(id).name.clone(),
+                    self.struct_decl_pos.get(&id).copied(),
+                ),
+                Node::Sum(id) => (
+                    self.module.sum_info(id).name.clone(),
+                    self.sum_decl_pos.get(&id).copied(),
+                ),
+            };
+            self.errors.push(ParserError::RecursiveByValue(
+                name,
+                pos.unwrap_or_else(|| crate::lexer::Position::new(0, 0)),
+            ));
+        }
     }
 
     /// A method is `[const] fn IDENT (`; a function-pointer field type is

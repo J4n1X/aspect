@@ -216,7 +216,7 @@ fn main(u32 argc, u8 **argv) -> i32 {
 
     i32[3] scores = {90, 85, 100}
     i32 total = 0
-    for (i32 i = 0; i < 3; i += 1) {
+    for i32 i = 0; i < 3; i += 1 {
         total += scores[i]
     }
     print("total: ")
@@ -290,15 +290,15 @@ i32 result = a \ ; + b
 Identifiers are `[A-Za-z_][A-Za-z0-9_]*`. Reserved keywords:
 
 ```
-fn  extern  const  type  struct  alias  public  sizeof
-while  if  else  elif  for  switch
+fn  extern  asm  naked  const  type  enum  struct  sum  alias  public  export  sizeof
+while  if  else  elif  for  switch  case  default  is
 break  continue  as  return
-true  false
+true  false  null
 ```
 
-`struct` and `switch` are reserved for future use — today, type-structs
-are declared with `type`, not `struct`, and there is no `switch`
-statement; `if`/`elif`/`else` is the only branching construct.
+`struct` is reserved for future use — type-structs are declared with
+`type`. Note that `sum` and `is` were previously valid identifiers — an
+accumulator named `sum` must now be called something else.
 
 ---
 
@@ -619,6 +619,69 @@ Color g_theme = Color.Blue     # folded to a constant initializer
 Add `public` to share an enum across modules — `public enum Suit { ... }` — with
 the same visibility model as `public type` (see [§12 Modules](#12-modules)).
 
+### Sum types (in development)
+
+A `sum` is a tagged sum type: a distinct nominal type whose value is exactly
+one of its declared variants, each optionally carrying a typed payload. This
+is the substrate for `Result`/`Option`-style code (design:
+`doc/solved/Sum-Types-And-Switch.md` — fully implemented). `switch` and
+`is` are the only observers of a sum — there is no tag read and no
+payload accessor — see [§7 Control flow](#7-control-flow) for both:
+
+```aspect
+sum Shape {
+    Circle(f64 radius)         # payload fields are named, parameter-style
+    Rect(f64 w, f64 h)
+    Dot                        # payload-less: a bare name, never `Dot()`
+}
+```
+
+One variant per line (like `type` fields, unlike enum's comma list). At least
+one variant is required. `public sum` shares it across modules — there is no
+per-variant visibility. Sums live in the one type namespace with type-structs,
+enums and aliases, and forward references work the same way.
+
+Construction reads as a call on the variant, through the sum's name:
+
+```aspect
+Shape a = Shape.Circle(2.5)       # arguments check like function arguments
+Shape d = Shape.Dot               # payload-less: bare name, never Dot()
+Shape b = a                       # sums are values: whole-value copy
+```
+
+Arity and argument types are checked against the variant's fields with the
+ordinary coercion rules (widening fine, narrowing needs `as`). Sum values
+copy, pass and return **by value** exactly like type-structs, sit in
+struct fields and arrays by value, and construction folds into **global
+initializers** (`Shape g = Shape.Dot` at file scope works; the two
+remaining const gaps are sum-typed *fields* inside constant struct
+literals and sum *elements* in constant array initializers — initialize
+those at runtime). What you *cannot* do: compare sums (`a == b` is a type
+error — sums are matched, not compared) or cast them (`as` never involves
+a sum value, in either direction).
+
+Storage is a 4-byte tag (the variant's declaration index) followed by payload
+space sized for the largest variant, so `sizeof(Shape)` is 24 on x86-64
+(tag + padding + two `f64`). A payload-less sum is 4 bytes. Sums are nominal
+like enums: no implicit conversion to anything else, and — unlike enums — no
+`as` casts at all, in either direction.
+
+A sum can sit in a struct field, an array, or another sum's payload by value.
+The one restriction is that **no type may store itself by value**, directly or
+through a struct/sum cycle — the layout would be infinite. The compiler
+rejects such cycles (`contains itself by value`); self-reference through a
+pointer is the fix, and is what makes list and tree nodes work:
+
+```aspect
+sum List {
+    Cons(i32 head, List* tail)     # fine: the payload holds a pointer
+    Nil
+}
+```
+
+Matching is covered in [§7](#7-control-flow): `switch` for exhaustive
+coverage, `is` for single-variant probes.
+
 ---
 
 ## 5. Operators and expressions
@@ -733,11 +796,11 @@ while n > 0 {
     n -= 1
 }
 
-for (i32 i = 0; i < 10; i += 1) {
+for i32 i = 0; i < 10; i += 1 {
     process(i)
 }
 
-for (;;) {          # all three clauses are optional
+for ;; {          # all three clauses are optional
     if done() { break }
 }
 ```
@@ -746,8 +809,88 @@ for (;;) {          # all three clauses are optional
 through value blocks to reach the enclosing loop.
 
 One nuance: inside a `for` header, only `;` separates the three clauses
-— a newline there would close the header early, so keep `for (...)` on
+— a newline there would close the header early, so keep `for ...` on
 one line.
+
+### switch
+
+`switch` is the exhaustive matcher — over integers, bools, enums, and
+sums. No parens around the scrutinee, no colons after `case`, mandatory
+braces on every arm, **no fall-through**: each arm is a block, and after
+it runs, control leaves the switch.
+
+```aspect
+switch code {
+    case 1, 2 { println("warn") }      # comma-separated constant patterns
+    case -1 { println("err") }
+    default { println("ok") }          # `default` must be the last arm
+}
+
+switch shape {                          # Shape from §4: Circle/Rect/Dot
+    case Circle(r) { area = r * r * 3.14159 }
+    case Rect(w, _) { area = w * w }    # `_` discards a position
+    case Dot { area = 0.0 }             # bare variant: no payload to bind
+}
+```
+
+The rules, one per scrutinee class — all instances of "a switch must
+cover its scrutinee; `default` covers the rest":
+
+- **Integers** can't be enumerated, so `default` is **required**.
+- **Bool** is covered by `true` + `false` (or `default`).
+- **Enums and sums** are covered by listing every variant — and that's
+  the payback: add a variant next year and every switch that must now
+  handle it becomes a compile error naming what's missing. A `default`
+  waives that checking (legal, but on a fully-listed switch it's flagged
+  as a dead arm). A value forged past an enum's range with `as` hits a
+  trap at runtime rather than undefined behavior.
+
+Sum patterns bind payload fields positionally, as **copies** — ordinary
+mutable locals scoped to the arm; writing one never writes the sum.
+Patterns resolve unqualified against the scrutinee (`case Circle(r)`,
+not `case Shape.Circle(r)` — though the qualified form works too), and
+a pattern that binds must be the arm's only pattern. `case` labels
+accept integer literals (including `$define`-expanded ones), `true`/
+`false`, and enum variants; matching through a `Shape*` is
+`switch *p`.
+
+Two things worth internalizing: `break`/`continue` inside an arm bind to
+the enclosing **loop**, not the switch (there is no fall-through to
+break out of); and a coverage-complete switch whose arms all `return`
+satisfies the every-path-returns rule, so it can end a function or a
+value block by itself.
+
+### is
+
+Where `switch` claims coverage, `is` claims interest in **one** variant —
+the tool for "if it's a Circle, give me the radius" without a full
+switch:
+
+```aspect
+bool round = s is Circle              # bare variant: an ordinary bool, usable anywhere
+
+if s is Circle(r) && r > 2.0 {        # binding form: only in if/elif/while conditions
+    use(r)                            # r is a copy, dead after this block
+}
+
+while node is Cons(head, tail) {      # the list-walk idiom: re-binds each iteration
+    total += head
+    node = *tail
+}
+```
+
+The two forms are told apart **syntactically**: a bare `Variant` is an
+expression; anything parenthesized — even all-discard `Circle(_)` — is
+the binding form, which is *not* an expression. A binding `is` may only
+be a top-level `&&`-conjunct of an `if`/`elif`/`while` condition:
+bindings flow to later conjuncts and the block (short-circuiting
+guarantees they're initialized when read), all chain bindings share one
+scope, and `||`, `!`, parens, and `for` headers reject it — where
+"matched" and "binding readable" could diverge. `is` makes **no
+exhaustiveness claim**: add a variant next year and `is` sites are not
+flagged — the same contract as `default`, and its whole point. Choose
+`switch` when you want the compiler to march you to every unhandled
+variant; choose `is` when you genuinely care about one.
 
 ---
 
@@ -1063,8 +1206,9 @@ read-only accessors (see `len()`/`c_str()` on `String` in the stdlib).
 
 Type names are pre-registered before any bodies are parsed, so a struct
 can reference itself or another struct defined later, as long as it's
-through a pointer (a struct can't contain itself by value, only C's
-usual restriction):
+through a pointer. A struct can't contain itself by value — directly or
+through a struct/sum cycle — and the compiler rejects the attempt
+(`contains itself by value`); C's usual restriction, but enforced:
 
 ```aspect
 type Node {
@@ -1553,8 +1697,11 @@ Aspect:
   there isn't one yet (see `TODO.md`).
 - **No destructors.** Every stdlib type that owns heap memory needs an
   explicit `.destroy()` call, or it leaks.
-- **`switch` isn't implemented.** It's a reserved keyword for future
-  use; `if`/`elif`/`else` is the only branching construct today.
+- **`switch` has no fall-through and is not a `break` target.** Arms are
+  blocks; `break`/`continue` inside an arm bind to the enclosing *loop* —
+  the inverse of C muscle memory. And a `default` on a fully-listed
+  enum/sum switch draws a dead-arm warning: it would silently swallow
+  variants added later.
 
 ---
 

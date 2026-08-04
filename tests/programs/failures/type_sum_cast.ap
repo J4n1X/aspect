@@ -1,0 +1,12 @@
+# expected: "cannot cast", "sum#"
+# No `as` cast involves a sum value in either direction — `switch`/`is` are
+# the only observers, and nothing converts into a sum.
+
+sum Shape {
+    Dot
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Shape s = 0 as Shape
+    return 0
+}

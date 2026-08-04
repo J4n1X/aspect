@@ -1,0 +1,11 @@
+# expected: "'Shape.Rect' expects 2 arguments but got 1"
+
+sum Shape {
+    Rect(f64 w, f64 h)
+    Dot
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Shape s = Shape.Rect(3.0)
+    return 0
+}

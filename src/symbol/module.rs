@@ -99,6 +99,36 @@ pub struct EnumInfo {
     pub variants: Vec<String>,
 }
 
+/// One variant of a `sum` type: its name and payload fields in declaration
+/// (and binding) order. A payload-less variant has an empty `fields`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SumVariant {
+    pub name: String,
+    /// `(name, type)` pairs. Names are required at declaration for
+    /// diagnostics/documentation; matching is positional.
+    pub fields: Vec<(String, LangType)>,
+}
+
+/// A registered `sum` type. Shaped in parallel to [`StructInfo`]/[`EnumInfo`]
+/// (id, `file_id`, `vis`) so the visibility check treats all three item kinds
+/// uniformly. The discriminant of a value is the variant's index into
+/// `variants`, lowered as `i32` at offset 0.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SumInfo {
+    pub id: u32,
+    pub name: String,
+    /// `Position::file_id` of the declaring file — provenance for the
+    /// import-visibility check.
+    pub file_id: u32,
+    /// `public sum` makes the sum nameable from other modules. Fixed at
+    /// intern time, like [`StructInfo::vis`]. There is no per-variant
+    /// visibility: exhaustive matching needs all variants or none.
+    pub vis: Visibility,
+    /// Variants in declaration order; the index *is* the discriminant value.
+    /// Empty until [`ModuleSymbols::set_sum_variants`].
+    pub variants: Vec<SumVariant>,
+}
+
 /// A distinct function-pointer signature (`fn(params) -> return_type`).
 /// Two FnPtr ids are equal iff their `FnPtrSig`s compare equal.
 #[derive(Debug, Clone, PartialEq)]
@@ -128,6 +158,10 @@ pub struct ModuleSymbols {
     enums_by_id: Vec<EnumInfo>,
     /// Enum name -> id.
     enums_by_name: HashMap<String, u32>,
+    /// Sums indexed by id (index into the vec == the id).
+    sums_by_id: Vec<SumInfo>,
+    /// Sum name -> id.
+    sums_by_name: HashMap<String, u32>,
     /// Alias name -> the type it resolves to plus its declaring file.
     aliases: HashMap<String, AliasInfo>,
     /// Function-pointer signatures, interned by structural identity.
@@ -290,6 +324,56 @@ impl ModuleSymbols {
             .variants
             .iter()
             .position(|v| v == variant)
+    }
+
+    // ── Sums ──────────────────────────────────────────────────────────────────
+
+    /// The sum twin of [`Self::intern_struct`]: prescan-called so sum names
+    /// resolve regardless of order; returns the existing id if already interned.
+    pub fn intern_sum(&mut self, name: &str, file_id: u32, vis: Visibility) -> u32 {
+        if let Some(&id) = self.sums_by_name.get(name) {
+            return id;
+        }
+        let id = u32::try_from(self.sums_by_id.len()).expect("number of sums exceeds u32::MAX");
+        self.sums_by_id.push(SumInfo {
+            id,
+            name: name.to_string(),
+            file_id,
+            vis,
+            variants: Vec::new(),
+        });
+        self.sums_by_name.insert(name.to_string(), id);
+        id
+    }
+
+    #[must_use]
+    pub fn sum_id(&self, name: &str) -> Option<u32> {
+        self.sums_by_name.get(name).copied()
+    }
+
+    #[must_use]
+    pub fn sum_info(&self, id: u32) -> &SumInfo {
+        &self.sums_by_id[id as usize]
+    }
+
+    /// All registered sums, in id order.
+    pub fn sums(&self) -> impl Iterator<Item = &SumInfo> {
+        self.sums_by_id.iter()
+    }
+
+    /// Replace a sum's variant list (finalising its `sum` body).
+    pub fn set_sum_variants(&mut self, id: u32, variants: Vec<SumVariant>) {
+        self.sums_by_id[id as usize].variants = variants;
+    }
+
+    /// The discriminant (index) of a variant by name, or `None` if the sum
+    /// has no such variant.
+    #[must_use]
+    pub fn sum_variant_index(&self, id: u32, variant: &str) -> Option<usize> {
+        self.sums_by_id[id as usize]
+            .variants
+            .iter()
+            .position(|v| v.name == variant)
     }
 
     // ── Aliases ───────────────────────────────────────────────────────────────

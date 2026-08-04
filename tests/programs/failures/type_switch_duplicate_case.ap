@@ -1,0 +1,11 @@
+# expected: "duplicate case value 16"
+# Values are compared after evaluation: 0x10 duplicates 16.
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    i32 x = 3
+    switch x {
+        case 16 { return 1 }
+        case 0x10 { return 2 }
+        default { return 0 }
+    }
+}

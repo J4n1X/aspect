@@ -1,0 +1,118 @@
+# expected: 215
+# requires_arch: ARCH_X86_64
+#-
+  Sum types, Stages A+B: declarations, storage layout + sizeof, construction,
+  whole-value copies, byval pass / sret return, sums embedded in structs and
+  arrays, pointer-to-sum.
+
+  Layout facts asserted (x86-64): `{ i32 tag, [k x iN] }` with the payload at
+  a UNIFORM offset (the max payload alignment) for every variant — never
+  packed into the tag's padding — so whole-value copies preserve payloads by
+  construction. There is no `switch` yet (Stage C/D), so payload correctness
+  is observed by peeking through `u8*` casts at the pinned offsets; when
+  destructuring lands, these peeks can migrate to `case`/`is`.
+
+  Sections sum to the expected value: sizes 160 + construction 42 +
+  embedding 13 = 215.
+-#
+
+sum Shape {
+    Circle(f64 radius)
+    Rect(f64 w, f64 h)
+    Dot
+}
+
+sum Tiny {
+    A(u8 x)
+    B
+}
+
+sum Flags {
+    On
+    Off
+    Maybe
+}
+
+type Wrap {
+    public i32 k
+    public Shape s
+}
+
+sum Nested {
+    W(Wrap w)
+    N
+}
+
+# Self-reference through a pointer is fine — only by-value containment is
+# rejected (see the parser_*_contains_self fixtures).
+sum List {
+    Cons(i32 head, List* tail)
+    Nil
+}
+
+sum Arr {
+    Xs(i32[4] xs)
+    None
+}
+
+fn pick(Shape s) -> Shape {           # byval param, sret return
+    return s
+}
+
+fn sizes() -> i32 {
+    u64 shape = sizeof(Shape)     # 8 (tag+pad to align 8) + 16 (f64,f64) = 24
+    u64 tiny = sizeof(Tiny)       # 4 + 4 (u8 payload in one i32 unit)    = 8
+    u64 flags = sizeof(Flags)     # tag only                              = 4
+    u64 wrap = sizeof(Wrap)       # {i32, pad4, Shape(24)}                = 32
+    u64 nested = sizeof(Nested)   # 8 + Wrap(32)                          = 40
+    u64 list = sizeof(List)       # 8 + {i32, pad4, ptr}(16)              = 24
+    u64 arr = sizeof(Arr)         # 4 + [4 x i32](16)                     = 20
+    u64 ptr = sizeof(Shape*)      # any pointer                           = 8
+    return (shape + tiny + flags + wrap + nested + list + arr + ptr) as i32
+}
+
+# Construct all three variant shapes, copy, and round-trip through a byval
+# call; verify tags and payloads through the pinned layout. Returns 42.
+fn construction() -> i32 {
+    Shape a = Shape.Circle(2.5)
+    Shape b = a                              # whole-value copy
+    Shape c = pick(Shape.Rect(3.0, 4.0))     # byval pass + sret return
+    Shape d = Shape.Dot
+
+    u8 *pb = &b as u8*
+    u8 *pc = &c as u8*
+    u8 *pd = &d as u8*
+    bool ok = *(pb as i32*) == 0 && *((pb + 8) as f64*) == 2.5 \
+        && *(pc as i32*) == 1 && *((pc + 8) as f64*) == 3.0 \
+        && *((pc + 16) as f64*) == 4.0 \
+        && *(pd as i32*) == 2
+    if ok {
+        return 42
+    }
+    return 1
+}
+
+# Sums embedded by value in a struct field and an array; pointer-to-sum.
+# Returns 13.
+fn embedding() -> i32 {
+    Wrap w = Wrap { k = 7, s = Shape.Circle(1.5) }
+    Shape[2] pair
+    pair[0] = Shape.Rect(5.0, 6.0)
+    pair[1] = w.s                            # copy out of a struct field
+    Shape *sp = &pair[1]
+
+    u8 *q0 = &pair[0] as u8*
+    u8 *q1 = sp as u8*
+    bool ok = w.k == 7 \
+        && *(q0 as i32*) == 1 && *((q0 + 8) as f64*) == 5.0 \
+        && *((q0 + 16) as f64*) == 6.0 \
+        && *(q1 as i32*) == 0 && *((q1 + 8) as f64*) == 1.5
+    if ok {
+        return 13
+    }
+    return 1
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return sizes() + construction() + embedding()
+}

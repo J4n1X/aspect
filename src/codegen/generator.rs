@@ -39,6 +39,17 @@ pub struct CodeGenerator<'ctx> {
     /// Named LLVM struct type per type-struct id (built in the registration pass).
     pub(crate) struct_types: HashMap<u32, inkwell::types::StructType<'ctx>>,
 
+    /// Named LLVM storage type per sum id: `{ i32 tag, [k x iN] }` sized and
+    /// aligned to the largest variant payload, payload at a uniform offset.
+    /// Built opaque before struct bodies (so struct fields may hold sums by
+    /// value), filled in after them.
+    pub(crate) sum_types: HashMap<u32, inkwell::types::StructType<'ctx>>,
+
+    /// Per sum id, per variant (declaration order): the payload field types in
+    /// binding order — a codegen-local copy of the shared registry, mirroring
+    /// `struct_fields` (the walker is not threaded the `Program`).
+    pub(crate) sum_variant_fields: HashMap<u32, Vec<Vec<LangType>>>,
+
     /// `(field name, field type)` in GEP-index order — a codegen-local copy of
     /// the shared registry (the walker is not threaded the `Program`).
     pub(crate) struct_fields: HashMap<u32, Vec<(String, LangType)>>,
@@ -181,6 +192,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             current_sret: None,
             struct_types: HashMap::new(),
             struct_fields: HashMap::new(),
+            sum_types: HashMap::new(),
+            sum_variant_fields: HashMap::new(),
             fnptr_sigs: Vec::new(),
             source_files: Vec::new(),
             scope: ScopeStack::new(),
@@ -208,9 +221,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.generate_string_literal(i, s);
         }
 
-        // Register type-struct LLVM types before anything references them.
+        // Register type-struct and sum LLVM types before anything references
+        // them. Sum opaques come first so struct fields can hold sums by
+        // value; sum *bodies* come after struct bodies for the same reason in
+        // reverse (a payload view can't be sized until its members are).
+        self.register_sums_opaque(program);
         if let Err(e) = self.register_structs(program) {
             anyhow::bail!("{}: failed to register type-struct layouts", self.format_error(&e));
+        }
+        if let Err(e) = self.register_sum_bodies(program) {
+            anyhow::bail!("{}: failed to register sum layouts", self.format_error(&e));
         }
 
         // Seed the codegen-local FnPtr signature cache from the shared registry.

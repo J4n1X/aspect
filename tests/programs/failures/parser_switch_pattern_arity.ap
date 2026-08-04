@@ -1,0 +1,14 @@
+# expected: "binds 1 of 2 payload fields", "use `_` to discard"
+
+sum S {
+    Pair(i32 a, i32 b)
+    Unit
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    S s = S.Unit
+    switch s {
+        case Pair(a) { return a }
+        case Unit { return 0 }
+    }
+}

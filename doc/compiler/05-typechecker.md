@@ -193,6 +193,41 @@ All functions are pure (no side effects):
    ordering and arithmetic on enums are rejected (`InvalidBinaryOperation`). The
    distinct-type identity is the whole point of an enum — see the handbook's Enums
    section.
+9. **Sums are nominal, stricter than enums**: a `Sum(a)` coerces only to the *same*
+   `Sum(a)`, and `cast_valid` rejects **any** `as` cast whose source or target is a
+   sum *value* (identity included) — `switch` (and later `is`) are the only
+   observers of a sum. Pointer-to-sum casts fall through to the ordinary pointer
+   rules, like any aggregate pointer.
+
+### Switch checking (`check_switch`)
+
+Scrutinee classes: plain integers, `bool`, enums, sums — floats are rejected
+with a use-if/elif hint, pointers and other types outright. Constant patterns
+are `check_expression`-ed against the scrutinee type (so literal fitting and
+enum nominality come free) and must be literals or enum values
+(`NonConstantPattern` otherwise); duplicates are compared **after** evaluation
+(`0x10` duplicates `16`). Arm bodies are checked with the pattern's binders
+defined in a fresh scope. Exhaustiveness is one rule — "a switch must cover
+its scrutinee; `default` covers the rest": integers require `default`
+(`SwitchMissingDefault`); bool needs both literals; enums/sums need every
+variant listed (`SwitchNonExhaustive` names the missing ones) — and a
+`default` on a fully-listed enum/sum switch draws a dead-arm **warning**
+(`TypeWarning`, non-fatal). `stmt_always_returns` counts a switch as
+returning iff it is coverage-complete (the parser-computed `complete` flag,
+or a `default`) and every body always returns — this is what lets a switch
+end a function or satisfy a value block.
+
+### `is` conditions (`check_condition_with_bindings`)
+
+`if`/`while` open **one** checker scope spanning condition + then-block/body
+(mirroring the parser; the else gets its own). The condition walk treats the
+root `&&` spine specially: `IsBinding` leaves synth their scrutinee, stamp
+`bool`, and `define_var` their binders left-to-right — which is why a later
+conjunct sees an earlier conjunct's bindings and an earlier one errors with
+undefined-variable. Any `IsBinding` that reaches ordinary `synth_expression`
+(expression positions, `for` headers, under `||` operands the parser didn't
+already reject) gets `IsBindingNotExpression`. The bare `Is` form is just a
+`bool`-typed expression.
 
 ### Literal Compatibility
 

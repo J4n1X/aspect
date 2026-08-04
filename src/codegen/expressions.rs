@@ -99,6 +99,83 @@ fn emit_pointer_arithmetic<'ctx>(
     }
 }
 
+/// Lower `&&`/`||` with real short-circuit control flow: the right operand
+/// evaluates in its own block, entered only when the left doesn't already
+/// decide the result; a phi merges the two paths as `i1`.
+fn emit_short_circuit<'ctx>(
+    cg: &mut CodeGenerator<'ctx>,
+    op: &BinaryOp,
+    left: &Expression,
+    right: &Expression,
+    pos: Position,
+) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+    let function = cg
+        .current_function
+        .ok_or(CodegenError::UnexpectedStatement(pos))?;
+
+    let left_val = walk_expression(left, cg)?;
+    let left_i1 = cg.value_to_bool(left.pos, left_val)?;
+    let left_end = cg.builder.get_insert_block().expect("builder positioned");
+
+    let rhs_bb = cg.context.append_basic_block(function, "sc.rhs");
+    let merge_bb = cg.context.append_basic_block(function, "sc.end");
+    match op {
+        BinaryOp::LogicalAnd => cg
+            .builder
+            .build_conditional_branch(left_i1, rhs_bb, merge_bb)?,
+        _ => cg
+            .builder
+            .build_conditional_branch(left_i1, merge_bb, rhs_bb)?,
+    };
+
+    cg.builder.position_at_end(rhs_bb);
+    let right_val = walk_expression(right, cg)?;
+    let right_i1 = cg.value_to_bool(right.pos, right_val)?;
+    // Nested control flow (a further `&&`, an `is` binding block) may have
+    // moved the insert point — the phi edge is wherever the RHS ended.
+    let rhs_end = cg.builder.get_insert_block().expect("builder positioned");
+    cg.builder.build_unconditional_branch(merge_bb)?;
+
+    cg.builder.position_at_end(merge_bb);
+    let phi = cg.builder.build_phi(cg.context.bool_type(), "sc")?;
+    phi.add_incoming(&[(&left_i1, left_end), (&right_i1, rhs_end)]);
+    Ok(phi.as_basic_value())
+}
+
+/// Shared spine of both `is` forms: evaluate the sum scrutinee once into an
+/// entry-block slot, load the tag, compare against the variant's constant.
+/// Returns the `i1` and the slot (the binding form GEPs payloads out of it).
+fn emit_sum_probe<'ctx>(
+    cg: &mut CodeGenerator<'ctx>,
+    scrutinee: &Expression,
+    sum_id: u32,
+    variant: u32,
+    pos: Position,
+) -> Result<(inkwell::values::IntValue<'ctx>, PointerValue<'ctx>), CodegenError> {
+    let function = cg
+        .current_function
+        .ok_or(CodegenError::UnexpectedStatement(pos))?;
+    let storage = *cg
+        .sum_types
+        .get(&sum_id)
+        .ok_or_else(|| CodegenError::TypeError(format!("unregistered sum id {sum_id}"), pos))?;
+    let value = walk_expression(scrutinee, cg)?;
+    let slot = cg.build_entry_alloca(function, storage.into(), "is.scrut", pos)?;
+    cg.builder.build_store(slot, value)?;
+    let tag_ptr = cg.builder.build_struct_gep(storage, slot, 0, "is.tag")?;
+    let tag = cg
+        .builder
+        .build_load(cg.context.i32_type(), tag_ptr, "tag")?
+        .into_int_value();
+    let matched = cg.builder.build_int_compare(
+        inkwell::IntPredicate::EQ,
+        tag,
+        cg.context.i32_type().const_int(u64::from(variant), false),
+        "is",
+    )?;
+    Ok((matched, slot))
+}
+
 // ─── Main walker ──────────────────────────────────────────────────────────────
 
 /// The runtime-only walker; compile-time folding lives in
@@ -179,6 +256,13 @@ pub(crate) fn walk_expression<'ctx>(
         }
 
         ExprKind::Binary { left, op, right } => {
+            // `&&`/`||` short-circuit: the right operand must not evaluate
+            // when the left already decides — both for C semantics
+            // (`p != null && check(*p)`) and because an `is`-chain conjunct
+            // may read bindings its predecessor only stores on the true edge.
+            if matches!(op, BinaryOp::LogicalAnd | BinaryOp::LogicalOr) {
+                return emit_short_circuit(cg, op, left, right, expr.pos);
+            }
             let left_val = walk_expression(left, cg)?;
             let right_val = walk_expression(right, cg)?;
 
@@ -248,11 +332,15 @@ pub(crate) fn walk_expression<'ctx>(
                 Ok(ptr.into())
             }
             _ => {
-                // An rvalue struct (e.g. a method-call receiver in
-                // `make(...).method()` or `&SomeLiteral{...}`) is materialised
-                // into a temporary slot so its address can be taken.
+                // An rvalue struct or sum (e.g. a method-call receiver in
+                // `make(...).method()`, `&SomeLiteral{...}`, or
+                // `&Shape.Circle(...)`) is materialised into a temporary slot
+                // so its address can be taken.
                 if inner.expr_type.pointer_depth == 0
-                    && matches!(inner.expr_type.base, TypeBase::Struct(_))
+                    && matches!(
+                        inner.expr_type.base,
+                        TypeBase::Struct(_) | TypeBase::Sum(_)
+                    )
                 {
                     let val = walk_expression(inner, cg)?;
                     let struct_ty = cg
@@ -386,6 +474,152 @@ pub(crate) fn walk_expression<'ctx>(
             Ok(agg.into())
         }
 
+        ExprKind::SumConstruct {
+            sum_id,
+            variant,
+            args,
+        } => {
+            let storage = *cg.sum_types.get(sum_id).ok_or_else(|| {
+                CodegenError::TypeError(format!("unregistered sum id {sum_id}"), expr.pos)
+            })?;
+            // Materialise in a temp: the payload is written through the
+            // variant's bare payload struct at field 1's (uniform) offset, so
+            // insertvalue on the storage type can't be used — the storage's
+            // field 1 is the opaque `[k x iN]` array, not the field types.
+            let tmp = cg.builder.build_alloca(storage, "sum.tmp")?;
+            let tag_ptr = cg.builder.build_struct_gep(storage, tmp, 0, "sum.tag")?;
+            cg.builder.build_store(
+                tag_ptr,
+                cg.context.i32_type().const_int(u64::from(*variant), false),
+            )?;
+            if !args.is_empty() {
+                let payload_ptr =
+                    cg.builder.build_struct_gep(storage, tmp, 1, "sum.payload")?;
+                let payload_ty = cg
+                    .sum_payload_type(*sum_id, *variant as usize)
+                    .map_err(|e| e.with_pos(expr.pos))?
+                    .expect("variant with args has a payload type");
+                let field_tys = cg.sum_variant_fields[sum_id][*variant as usize].clone();
+                for (i, (arg, fty)) in args.iter().zip(field_tys).enumerate() {
+                    let fptr = cg.builder.build_struct_gep(
+                        payload_ty,
+                        payload_ptr,
+                        u32::try_from(i).expect("payload field index fits u32"),
+                        "sum.field",
+                    )?;
+                    if fty.is_array() {
+                        // Array payloads arrive decayed to a pointer — copy
+                        // the elements into the payload slot.
+                        let src = cg.generate_coerced_value(arg, None)?.into_pointer_value();
+                        let bytes = cg.sizeof_lang_type(&fty, arg.pos)?;
+                        let arr_ty = cg
+                            .lang_type_to_llvm_array(&fty)
+                            .map_err(|e| e.with_pos(arg.pos))?;
+                        let align = cg
+                            .target_machine
+                            .get_target_data()
+                            .get_abi_alignment(&arr_ty);
+                        cg.builder.build_memcpy(
+                            fptr,
+                            align,
+                            src,
+                            align,
+                            cg.context.i64_type().const_int(bytes, false),
+                        )?;
+                    } else {
+                        let val = cg.generate_coerced_value(arg, Some(&fty))?;
+                        cg.builder.build_store(fptr, val)?;
+                    }
+                }
+            }
+            Ok(cg.builder.build_load(storage, tmp, "sum.val")?)
+        }
+
+        ExprKind::Is {
+            scrutinee,
+            sum_id,
+            variant,
+        } => {
+            let (matched, _slot) = emit_sum_probe(cg, scrutinee, *sum_id, *variant, expr.pos)?;
+            Ok(matched.into())
+        }
+
+        ExprKind::IsBinding {
+            scrutinee,
+            sum_id,
+            variant,
+            binders,
+        } => {
+            let function = cg
+                .current_function
+                .ok_or(CodegenError::UnexpectedStatement(expr.pos))?;
+            let (matched, slot) = emit_sum_probe(cg, scrutinee, *sum_id, *variant, expr.pos)?;
+
+            // Binder allocas exist unconditionally (entry block); the copies
+            // run only on the matched edge, so a later `&&`-conjunct — which
+            // short-circuiting guarantees only evaluates after a match — reads
+            // initialized locals, and the success block does too.
+            if binders.iter().any(Option::is_some) {
+                let bind_bb = cg.context.append_basic_block(function, "is.bind");
+                let cont_bb = cg.context.append_basic_block(function, "is.cont");
+                let storage = cg.sum_types[sum_id];
+                let payload_ty = cg
+                    .sum_payload_type(*sum_id, *variant as usize)
+                    .map_err(|e| e.with_pos(expr.pos))?
+                    .expect("binding pattern on a payload-less variant");
+
+                let mut copies = Vec::new();
+                for (i, binder) in binders.iter().enumerate() {
+                    let Some((name, field_ty)) = binder else { continue };
+                    let llvm_ty = if field_ty.is_array() {
+                        cg.lang_type_to_llvm_array(field_ty)
+                            .map_err(|e| e.with_pos(expr.pos))?
+                            .into()
+                    } else {
+                        cg.lang_type_to_llvm(field_ty)
+                            .map_err(|e| e.with_pos(expr.pos))?
+                    };
+                    let alloca = cg.build_entry_alloca(function, llvm_ty, name, expr.pos)?;
+                    cg.add_variable(name.clone(), alloca, llvm_ty, *field_ty, None);
+                    copies.push((i, alloca, llvm_ty, *field_ty));
+                }
+
+                cg.builder.build_conditional_branch(matched, bind_bb, cont_bb)?;
+                cg.builder.position_at_end(bind_bb);
+                let payload_ptr = cg
+                    .builder
+                    .build_struct_gep(storage, slot, 1, "is.payload")?;
+                for (i, alloca, llvm_ty, field_ty) in copies {
+                    let field_ptr = cg.builder.build_struct_gep(
+                        payload_ty,
+                        payload_ptr,
+                        u32::try_from(i).expect("payload field index fits u32"),
+                        "is.field",
+                    )?;
+                    if field_ty.is_array() {
+                        let bytes = cg.sizeof_lang_type(&field_ty, expr.pos)?;
+                        let align = cg
+                            .target_machine
+                            .get_target_data()
+                            .get_abi_alignment(&llvm_ty);
+                        cg.builder.build_memcpy(
+                            alloca,
+                            align,
+                            field_ptr,
+                            align,
+                            cg.context.i64_type().const_int(bytes, false),
+                        )?;
+                    } else {
+                        let v = cg.builder.build_load(llvm_ty, field_ptr, "is.load")?;
+                        cg.builder.build_store(alloca, v)?;
+                    }
+                }
+                cg.builder.build_unconditional_branch(cont_bb)?;
+                cg.builder.position_at_end(cont_bb);
+            }
+            Ok(matched.into())
+        }
+
         // A bare function name is a link-time-constant address.
         ExprKind::FunctionRef(name) => {
             let function = cg
@@ -469,12 +703,12 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let val = walk_expression(expr, self)?;
 
-        // Auto-widen to target if types differ. Struct values are aggregates —
-        // they are never scalar-cast; the value is stored/copied as-is.
+        // Auto-widen to target if types differ. Struct and sum values are
+        // aggregates — never scalar-cast; the value is stored/copied as-is.
         if let Some(target_ty) = target
             && target_ty.pointer_depth == 0
             && !target_ty.is_array()
-            && !matches!(target_ty.base, TypeBase::Struct(_))
+            && !matches!(target_ty.base, TypeBase::Struct(_) | TypeBase::Sum(_))
         {
             let target_llvm = target_ty
                 .to_llvm(self.context)

@@ -1,0 +1,11 @@
+# expected: "sum 'Shape' has no variant 'Square'"
+
+sum Shape {
+    Circle(f64 radius)
+    Dot
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Shape s = Shape.Square
+    return 0
+}

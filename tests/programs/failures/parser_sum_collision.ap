@@ -1,0 +1,14 @@
+# expected: "duplicate type 'Shape'"
+# Type-structs, enums, sums and aliases share one type namespace.
+
+type Shape {
+    i32 kind
+}
+
+sum Shape {
+    Circle(f64 radius)
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

@@ -1,0 +1,11 @@
+# expected: "one variant per line"
+# Variants are newline-separated (the `type` field style, not the enum comma
+# style) — two on one line are rejected.
+
+sum Flags {
+    On Off
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

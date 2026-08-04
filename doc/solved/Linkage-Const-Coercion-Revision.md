@@ -139,7 +139,7 @@ The same coercion gate (`types_coercible`) is reused by `binary_op_types_valid` 
 
 - Doc rewrites (not footnotes): `doc/handbook.md` §4 "Pointers" and "The opaque pointer `u0*`", and `doc/compiler/09-syntax-reference.md`'s array-decay and `u0*` sections, all currently document the *opposite* of the new rules as canonical.
 - Test plan: positive/negative regression per adopted rule, a failure fixture per new diagnostic, and a full corpus run (in addition to the `lib/std`/`demos` migration sweep) to confirm nothing else in `tests/programs/**` relied on a removed coercion.
-- Heads-up, no action needed now: `doc/plans/Areas-And-Refinements.md` (design-accepted, not implemented) would eventually rewrite the same `malloc`-idiom call sites this proposal's rule 3 forces churn on, for unrelated reasons — worth a one-line cross-reference so a future implementer isn't surprised by a second rewrite of the same sites later.
+- ~~Heads-up: `doc/plans/Areas-And-Refinements.md` would eventually rewrite the same `malloc`-idiom call sites this proposal's rule 3 churns.~~ **Moot as of 2026-07-31:** the areas design was dropped (see `doc/plans/Pay-As-You-Go-Correctness.md` § out of scope) — no second call-site rewrite is coming.
 
 ---
 
@@ -179,7 +179,7 @@ Reviewer agrees with scoping to case (b), not case (c): the docs explicitly docu
 - **B's Dereference-staleness fix is a prerequisite for C's rule 4 being sound**, not just for B's own `DerefAssign` check: once `const T* -> T*` requires a cast (C rule 4), the same stale-parse-time-stamp gap in the `Dereference` synth arm could make a cast look unnecessary at a field-access-then-deref chain. **Sequence B ahead of C if both proceed.**
 - **B (deref writes) and C's rule 4 (const-removal needs a cast) both land on the same const-coercion mechanism blamed for the historical 396-macro-leak revert** (see Proposal B's Q3). The merged proposal needs one shared answer for why this attempt won't recur, not two independent ones.
 - **A is independent** of B/C/D — no shared code paths. Both A and B/C touch `doc/compiler/09-syntax-reference.md`'s "Notable constraints" chapter — sequence doc edits to avoid clobbering each other if implemented concurrently.
-- `doc/plans/Areas-And-Refinements.md` doesn't conflict with any of the four, but its eventual allocator rewrite touches the same call sites as C's rule 3 — see the note under Proposal C.
+- ~~`doc/plans/Areas-And-Refinements.md`'s eventual allocator rewrite touches the same call sites as C's rule 3.~~ Areas dropped 2026-07-31 (see note under Proposal C) — no conflict remains.
 
 ---
 
@@ -193,5 +193,5 @@ Reviewer agrees with scoping to case (b), not case (c): the docs explicitly docu
 ## Next steps
 
 1. Fill in the `Decision:` blanks above.
-2. Send this doc back to the `language-designer` subagent for a final confirmation pass — in particular Proposal B's Q3 (the 396-macro-leak history) and Proposal C's Q1 (rule 3) are the two answers most likely to change the shape of the implementation.
+2. Send this doc back through the language design review for a final confirmation pass — in particular Proposal B's Q3 (the 396-macro-leak history) and Proposal C's Q1 (rule 3) are the two answers most likely to change the shape of the implementation.
 3. Once confirmed, implement in the order above; each proposal gets its own runtime/failure test fixtures per the "Required for implementation" notes.

@@ -24,6 +24,13 @@ pub enum ParserError {
         pos: Position,
     },
 
+    #[error("sum '{sum_name}' has no variant '{variant}' at {pos}")]
+    UnknownSumVariant {
+        sum_name: String,
+        variant: String,
+        pos: Position,
+    },
+
     #[error("{0} at {1}")]
     MethodCallForm(String, Position),
 
@@ -69,6 +76,21 @@ pub enum ParserError {
         referring: String,
         pos: Position,
     },
+
+    /// The defining module is imported, but the sum itself was not exported
+    /// (`public sum`).
+    #[error("sum '{name}' is private to {defining} and cannot be used from {referring} — declare it `public sum` to export it at {pos}")]
+    PrivateSum {
+        name: String,
+        defining: String,
+        referring: String,
+        pos: Position,
+    },
+
+    /// A type-struct or sum stores itself by value, directly or through a
+    /// struct/sum cycle — its layout would be infinite.
+    #[error("type '{0}' contains itself by value — break the cycle with a pointer at {1}")]
+    RecursiveByValue(String, Position),
 
     /// The defining module is imported, but this free function or global was
     /// not exported to the module namespace (`public`).
@@ -179,6 +201,21 @@ impl ParserError {
         pos: Position,
     ) -> Self {
         ParserError::PrivateEnum {
+            name: name.into(),
+            defining: Self::describe_module(defining_module),
+            referring: Self::describe_module(referring_module),
+            pos,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn private_sum(
+        name: impl Into<String>,
+        defining_module: &str,
+        referring_module: &str,
+        pos: Position,
+    ) -> Self {
+        ParserError::PrivateSum {
             name: name.into(),
             defining: Self::describe_module(defining_module),
             referring: Self::describe_module(referring_module),

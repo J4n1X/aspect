@@ -1,0 +1,15 @@
+# expected: "does not handle variants 'B', 'C'", "add the missing cases or a `default`"
+
+sum S {
+    A(i32 x)
+    B
+    C
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    S s = S.B
+    switch s {
+        case A(v) { return v }
+    }
+    return 0
+}

@@ -1,0 +1,17 @@
+# expected: "cannot apply operator 'comparison'", "struct#"
+# Whole-value `==` is not defined on type-structs either — compare fields.
+# (Previously this crashed the compiler: aggregate identity satisfied the
+# coercion check and codegen expected a scalar.)
+
+type P {
+    public i32 x
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    P a = P { x = 1 }
+    P b = P { x = 2 }
+    if a == b {
+        return 1
+    }
+    return 0
+}

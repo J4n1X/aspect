@@ -1,0 +1,38 @@
+# expected: 21
+#-
+  `&&`/`||` short-circuit: the right operand must not evaluate when the left
+  decides the result. Verified with a counting side effect and with the
+  null-guard idiom this exists to protect. (These were eagerly evaluated
+  once — the counter proves the lowering branches.)
+-#
+
+i32 calls = 0
+
+fn bump() -> bool {
+    calls = calls + 1
+    return true
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    bool a = false && bump()     # rhs must not run
+    bool b = true || bump()      # rhs must not run
+    bool c = true && bump()      # rhs runs: calls = 1
+    bool d = false || bump()     # rhs runs: calls = 2
+
+    # The guard idiom: deref only behind the null check.
+    i32 x = 17
+    i32 *p = &x
+    i32 *q = 0 as i32*
+    i32 guarded = 0
+    if p != null && *p == 17 {
+        guarded += 1
+    }
+    if q != null && *q == 17 {
+        guarded += 100
+    }
+
+    if a || b == false || c == false || d == false {
+        return 0
+    }
+    return calls * 10 + guarded    # 20 + 1 = 21
+}

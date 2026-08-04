@@ -1,0 +1,66 @@
+# expected: 233
+#-
+  `switch` on the constant-pattern scrutinee classes: integers (multi-pattern
+  arms, negative labels, mandatory `default`), bool (both literals =
+  exhaustive, no `default` needed), and enums (fully listed = exhaustive;
+  unqualified variant patterns resolve against the scrutinee, qualified ones
+  are also accepted). Also: a value block wrapping a coverage-complete
+  switch, and `break` inside an arm binding to the enclosing loop (a switch
+  is not a break target — there is no fall-through to break out of).
+  Sum destructuring lives in sum_match.ap.
+-#
+
+enum Color { Red, Green, Blue }
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    i32 total = 0
+
+    # Integers: comma-separated patterns, a negative label, and `default`.
+    i32 code = -2
+    switch code {
+        case 1, 2 { total += 10 }
+        case -2 { total += 20 }
+        default { total += 30 }
+    }
+    # total = 20
+
+    # Bool: both literals cover the type.
+    bool flag = true
+    switch flag {
+        case true { total += 5 }
+        case false { total += 9 }
+    }
+    # total = 25
+
+    # Enum: fully listed, no default. Patterns resolve unqualified against
+    # the scrutinee's enum; the qualified spelling works too.
+    Color c = Color.Green
+    switch c {
+        case Red { total += 100 }
+        case Green { total += 200 }
+        case Color.Blue { total += 300 }
+    }
+    # total = 225
+
+    # A coverage-complete switch (int + default) satisfies the value block's
+    # every-path-returns rule.
+    i32 kind = {
+        switch code {
+            case -2 { return 5 }
+            default { return 1 }
+        }
+    }
+    total += kind
+    # total = 230
+
+    # `break` in an arm exits the loop, not the switch.
+    for i32 i = 0; i < 10; i += 1 {
+        switch i {
+            case 3 { break }
+            default { total += 1 }
+        }
+    }
+    # total = 230 + 3 = 233
+
+    return total
+}

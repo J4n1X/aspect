@@ -1,0 +1,9 @@
+# expected: "at least one sum variant"
+# A sum with no variants is uninhabited — rejected like an empty enum.
+
+sum Nothing {
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

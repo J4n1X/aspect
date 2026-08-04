@@ -183,7 +183,10 @@ pub struct Statement {
 | `Return(Option<Expression>)` | Return (optional value) | `return 42` |
 | `If { condition, then_block, else_block }` | Conditional | `if x > 0 { ... }` |
 | `While { condition, body }` | While loop | `while x < 10 { ... }` |
-| `For { init, condition, increment, body }` | For loop | `for (i32 i = 0; i < 10; i += 1) { ... }` |
+| `For { init, condition, increment, body }` | For loop | `for i32 i = 0; i < 10; i += 1 { ... }` |
+| `Switch { scrutinee, arms, default, complete }` | Switch statement; `complete` = arms alone cover the scrutinee (parser-computed, read by the termination analysis) | `switch s { case Circle(r) { ... } default { ... } }` |
+
+`ExprKind` additions for the `is` probe: `Is { scrutinee, sum_id, variant }` — the bare-variant form, an ordinary `bool` expression — and `IsBinding { scrutinee, sum_id, variant, binders }` — the parenthesized binding form, **not** an expression (legal only as a leaf of an if/elif/while condition's root `&&` spine; the parser polices parens and `||`, the checker's synthesis arm everything else).
 | `VarDecl { var_type, name, initializer }` | Variable declaration | `i32 x = 10` |
 | `VarAssign { name, value }` | Variable assignment | `x = 20` |
 | `DerefAssign { target, value }` | Dereference assignment | `*ptr = 42` or `arr[i] = val` |

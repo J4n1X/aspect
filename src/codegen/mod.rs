@@ -8,6 +8,7 @@ pub mod globals;
 pub mod scope;
 pub mod statements;
 pub mod structs;
+pub mod sums;
 pub mod types;
 pub mod value_emitter;
 

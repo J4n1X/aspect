@@ -1,0 +1,14 @@
+# expected: "not an expression", "if/elif/while condition"
+# The binding form has no value — only the bare-variant form is an
+# expression (`bool b = s is A`).
+
+sum S {
+    A(i32 x)
+    B
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    S s = S.B
+    bool b = s is A(v)
+    return 0
+}

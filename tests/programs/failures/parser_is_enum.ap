@@ -1,0 +1,11 @@
+# expected: "does not apply to enums", "=="
+
+enum Color { Red, Green }
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Color c = Color.Red
+    if c is Red {
+        return 1
+    }
+    return 0
+}

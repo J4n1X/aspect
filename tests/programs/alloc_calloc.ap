@@ -23,7 +23,7 @@ fn main(u32 argc, u8** argv) -> i32 {
     # Dirty a block, free it, then calloc the same footprint: the bytes the
     # earlier write left behind must come back zeroed.
     u8* dirty = malloc(128)
-    for (u64 i = 0; i < 128; i += 1) {
+    for u64 i = 0; i < 128; i += 1 {
         dirty[i] = 0xAB as u8
     }
     free(dirty)
@@ -32,7 +32,7 @@ fn main(u32 argc, u8** argv) -> i32 {
     fails += fail_if(c == null)
     if c != null {
         bool allzero = true
-        for (u64 i = 0; i < 128; i += 1) {
+        for u64 i = 0; i < 128; i += 1 {
             if c[i] != 0 { allzero = false }
         }
         fails += fail_if(!allzero)
@@ -47,7 +47,7 @@ fn main(u32 argc, u8** argv) -> i32 {
     fails += fail_if(big == null)
     if big != null {
         bool allzero = true
-        for (u64 i = 0; i < n; i += 1) {
+        for u64 i = 0; i < n; i += 1 {
             if big[i] != 0 { allzero = false break }
         }
         fails += fail_if(!allzero)

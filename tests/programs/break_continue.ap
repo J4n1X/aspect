@@ -1,25 +1,26 @@
-# expected: 47
-# Test break and continue
+# expected: 56
+# Test break and continue; also the paren-less `for` header's optional
+# clauses (empty increment, and the all-empty `for ;; {` idiom + break).
 fn main(u32 argc, u8 **argv) -> i32 {
-    i32 sum = 0
+    i32 total = 0
 
     # Test break: sum 1..5, break at 4
-    for (i32 i = 1; i <= 10; i = i + 1) {
+    for i32 i = 1; i <= 10; i = i + 1 {
         if i == 5 {
             break
         }
-        sum = sum + i
+        total = total + i
     }
-    # sum = 1+2+3+4 = 10
+    # total = 1+2+3+4 = 10
 
     # Test continue: skip even numbers
-    for (i32 j = 1; j <= 5; j = j + 1) {
+    for i32 j = 1; j <= 5; j = j + 1 {
         if j % 2 == 0 {
             continue
         }
-        sum = sum + j
+        total = total + j
     }
-    # sum = 10 + 1 + 3 + 5 = 19
+    # total = 10 + 1 + 3 + 5 = 19
 
     # Test break in while loop
     i32 k = 0
@@ -29,8 +30,8 @@ fn main(u32 argc, u8 **argv) -> i32 {
             break
         }
     }
-    # k = 3, sum = 19 + 3 = 22
-    sum = sum + k
+    # k = 3, total = 19 + 3 = 22
+    total = total + k
 
     # Regression: `continue` inside a `for` loop must jump to the increment
     # step, not directly back to the condition. If it skipped the increment,
@@ -38,11 +39,25 @@ fn main(u32 argc, u8 **argv) -> i32 {
     # value and the program would never terminate. Sums odd values 1..=10:
     # 1 + 3 + 5 + 7 + 9 = 25.
     i32 forSum = 0
-    for (i32 m = 1; m <= 10; m = m + 1) {
+    for i32 m = 1; m <= 10; m = m + 1 {
         if m % 2 == 0 { continue }
         forSum = forSum + m
     }
-    sum = sum + forSum
+    total = total + forSum
+    # total = 22 + 25 = 47
 
-    return sum  # 22 + 25 = 47
+    # Empty increment clause: the step lives in the body.
+    for i32 n = 0; n < 3; {
+        total = total + 2
+        n += 1
+    }
+    # total = 47 + 6 = 53
+
+    # All three clauses empty — the `for ;; {` infinite-loop idiom.
+    for ;; {
+        total = total + 3
+        break
+    }
+
+    return total  # 53 + 3 = 56
 }

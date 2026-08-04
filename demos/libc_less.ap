@@ -26,11 +26,11 @@ fn main(u32 argc, u8 **argv, u8** envp) -> i32 {
   }
 
   println("Passed Arguments:")
-  for (u32 i = 0; i < argc; i+=1) {
+  for u32 i = 0; i < argc; i+=1 {
     println(argv[i])
   }
   println("Environment Variables:")
-  for (u32 i = 0; envp[i] != null; i+=1){
+  for u32 i = 0; envp[i] != null; i+=1 {
     println(envp[i])
   }
   return 0;

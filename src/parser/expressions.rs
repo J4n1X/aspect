@@ -98,6 +98,11 @@ pub struct Parser {
     /// variable scope, whose `Symbol` carries no visibility, so the
     /// reference-site gate reads it here.
     pub(crate) global_vis: std::collections::HashMap<String, crate::symbol::module::Visibility>,
+    /// Declaration position per type-struct/sum id, recorded when the body
+    /// parses — the by-value-containment cycle check reports here, since the
+    /// registry itself stores no positions.
+    pub(crate) struct_decl_pos: std::collections::HashMap<u32, Position>,
+    pub(crate) sum_decl_pos: std::collections::HashMap<u32, Position>,
 }
 
 impl Parser {
@@ -117,6 +122,8 @@ impl Parser {
             file_modules: Vec::new(),
             module_imports: std::collections::HashMap::new(),
             global_vis: std::collections::HashMap::new(),
+            struct_decl_pos: std::collections::HashMap::new(),
+            sum_decl_pos: std::collections::HashMap::new(),
         }
     }
 
@@ -197,6 +204,21 @@ impl Parser {
         let use_module = self.module_of_file(use_pos.file_id);
         if info.vis == crate::symbol::module::Visibility::Private && def_module != use_module {
             return Err(ParserError::private_type(
+                &info.name, def_module, use_module, use_pos,
+            ));
+        }
+        Ok(())
+    }
+
+    /// The sum twin of [`Self::check_struct_visibility`]: the import rule plus
+    /// a cross-module use requiring `public sum`.
+    fn check_sum_visibility(&self, id: u32, use_pos: Position) -> Result<(), ParserError> {
+        let info = self.module.sum_info(id);
+        self.check_import_visibility("sum", &info.name, info.file_id, use_pos)?;
+        let def_module = self.module_of_file(info.file_id);
+        let use_module = self.module_of_file(use_pos.file_id);
+        if info.vis == crate::symbol::module::Visibility::Private && def_module != use_module {
+            return Err(ParserError::private_sum(
                 &info.name, def_module, use_module, use_pos,
             ));
         }
@@ -425,15 +447,38 @@ impl Parser {
     fn parse_expr_prec(&mut self, min_prec: i32) -> Result<Expression, ParserError> {
         let mut left = self.parse_cast_or_alloc()?;
 
-        while let Some((op, prec, right_assoc)) = INFIX_OPS
-            .iter()
-            .find(|e| self.check(&e.token) && e.prec >= min_prec)
-            .map(|entry| (entry.op, entry.prec, entry.right_assoc))
-        {
+        loop {
+            // `is` sits at the comparison tier (3), left-associative like the
+            // rest — `a is B is C` folds left and fails on the bool scrutinee.
+            if self.check_keyword(&Keyword::Is) && min_prec <= 3 {
+                self.advance();
+                left = self.parse_is_suffix(left)?;
+                continue;
+            }
+            let Some((op, prec, right_assoc)) = INFIX_OPS
+                .iter()
+                .find(|e| self.check(&e.token) && e.prec >= min_prec)
+                .map(|entry| (entry.op, entry.prec, entry.right_assoc))
+            else {
+                break;
+            };
             self.advance();
             let next_min = if right_assoc { prec } else { prec + 1 };
             let right = self.parse_expr_prec(next_min)?;
             let pos = left.pos;
+
+            // A binding `is` may not sit under `||` — "matched" and "binding
+            // readable" diverge there. Direct and `&&`-nested placements both
+            // arrive here; parens were already policed at the primary.
+            if matches!(op, OpKind::Binary(BinaryOp::LogicalOr))
+                && let Some(bad) = Self::find_is_binding(&left).or_else(|| Self::find_is_binding(&right))
+            {
+                return Err(ParserError::UnexpectedToken(
+                    "a binding `is` is not an expression — write it as an unparenthesized `&&`-conjunct of an if/elif/while condition (`||` cannot guarantee the binding matched)"
+                        .to_string(),
+                    bad,
+                ));
+            }
 
             left = match op {
                 OpKind::Binary(bop) => {
@@ -476,6 +521,139 @@ impl Parser {
         }
 
         Ok(left)
+    }
+
+    /// `left is Variant` / `left is Variant(a, _, b)` — the `is` keyword is
+    /// already consumed. Bare variants build the binding-free bool expression;
+    /// a parenthesized pattern builds the condition-restricted binding form,
+    /// registering its binders into the current parse-time scope in textual
+    /// order (which is what lets later `&&`-conjuncts and the success block
+    /// reference them).
+    fn parse_is_suffix(&mut self, scrutinee: Expression) -> Result<Expression, ParserError> {
+        let pos = scrutinee.pos;
+        let pat_pos = self.peek().pos;
+        let s_ty = scrutinee.expr_type;
+
+        let sum_id = if s_ty.pointer_depth == 0 && !s_ty.is_array() {
+            match s_ty.base {
+                TypeBase::Sum(id) => id,
+                TypeBase::Enum(_) => {
+                    return Err(ParserError::UnexpectedToken(
+                        "`is` does not apply to enums — compare with `==` against `Enum.Variant`"
+                            .to_string(),
+                        pat_pos,
+                    ));
+                }
+                _ => {
+                    return Err(ParserError::UnexpectedToken(
+                        "`is` probes a sum value — the scrutinee is not a sum (dereference pointers: `*p is …`)"
+                            .to_string(),
+                        pat_pos,
+                    ));
+                }
+            }
+        } else {
+            return Err(ParserError::UnexpectedToken(
+                "`is` probes a sum value — the scrutinee is not a sum (dereference pointers: `*p is …`)"
+                    .to_string(),
+                pat_pos,
+            ));
+        };
+
+        let sum_name = self.module.sum_info(sum_id).name.clone();
+        let mut variant_name = self.parse_ident("variant pattern after `is`")?;
+        if variant_name == "_" {
+            return Err(ParserError::UnexpectedToken(
+                format!("sum '{sum_name}' has no variant '_' — `is` probes one named variant"),
+                pat_pos,
+            ));
+        }
+        if variant_name == sum_name && self.match_token(&[TokenKind::Dot]) {
+            variant_name = self.parse_ident("variant name")?;
+        }
+        let Some(idx) = self.module.sum_variant_index(sum_id, &variant_name) else {
+            return Err(ParserError::UnknownSumVariant {
+                sum_name,
+                variant: variant_name,
+                pos: pat_pos,
+            });
+        };
+        let variant = u32::try_from(idx).expect("variant index fits u32");
+        let field_types: Vec<LangType> = self.module.sum_info(sum_id).variants[idx]
+            .fields
+            .iter()
+            .map(|(_, ty)| *ty)
+            .collect();
+
+        if !self.match_token(&[TokenKind::OpenParen]) {
+            return Ok(Expression::new(
+                ExprKind::Is {
+                    scrutinee: Box::new(scrutinee),
+                    sum_id,
+                    variant,
+                },
+                LangType::BOOL,
+                pos,
+            ));
+        }
+
+        if self.check(&TokenKind::CloseParen) {
+            return Err(ParserError::UnexpectedToken(
+                format!(
+                    "empty pattern parens on '{variant_name}' — a bare `{variant_name}` ignores the payload"
+                ),
+                self.peek().pos,
+            ));
+        }
+        let names = self.parse_comma_separated(&TokenKind::CloseParen, |p| {
+            p.parse_ident("binding name or `_`")
+        })?;
+        if names.len() != field_types.len() {
+            return Err(ParserError::UnexpectedToken(
+                format!(
+                    "pattern '{variant_name}' binds {} of {} payload fields — bind every field positionally (use `_` to discard)",
+                    names.len(),
+                    field_types.len()
+                ),
+                pat_pos,
+            ));
+        }
+        let binders: Vec<Option<(String, LangType)>> = names
+            .into_iter()
+            .zip(field_types)
+            .map(|(n, ty)| if n == "_" { None } else { Some((n, ty)) })
+            .collect();
+        for (name, ty) in binders.iter().flatten() {
+            self.symbol_table_mut()
+                .add_variable(name.clone(), *ty, pat_pos)
+                .map_err(|e| ParserError::from_symbol(e, pat_pos))?;
+        }
+        Ok(Expression::new(
+            ExprKind::IsBinding {
+                scrutinee: Box::new(scrutinee),
+                sum_id,
+                variant,
+                binders,
+            },
+            LangType::BOOL,
+            pos,
+        ))
+    }
+
+    /// Position of a binding `is` anywhere in `expr`'s `&&`/comparison
+    /// spine, if one exists. Used to police `||` placement — parens and
+    /// non-condition contexts are policed elsewhere.
+    fn find_is_binding(expr: &Expression) -> Option<Position> {
+        match &expr.kind {
+            ExprKind::IsBinding { .. } => Some(expr.pos),
+            ExprKind::Binary { left, right, .. } => {
+                Self::find_is_binding(left).or_else(|| Self::find_is_binding(right))
+            }
+            ExprKind::Comparison { left, right, .. } => {
+                Self::find_is_binding(left).or_else(|| Self::find_is_binding(right))
+            }
+            _ => None,
+        }
     }
 
     fn parse_cast_or_alloc(&mut self) -> Result<Expression, ParserError> {
@@ -801,6 +979,16 @@ impl Parser {
                 self.advance();
                 let expr = self.parse_expression()?;
                 self.expect(&TokenKind::CloseParen, ")")?;
+                // Parens flip a binding `is` into expression position — the
+                // C-muscle-memory spelling `if (s is Circle(r)) {` must not
+                // silently change meaning, so it errors with the fix.
+                if matches!(expr.kind, ExprKind::IsBinding { .. }) {
+                    return Err(ParserError::UnexpectedToken(
+                        "a binding `is` is not an expression — write it as an unparenthesized `&&`-conjunct of an if/elif/while condition"
+                            .to_string(),
+                        expr.pos,
+                    ));
+                }
                 Ok(expr)
             }
             // A brace expression: list initializer (`{1, 2, 3}`) or
@@ -924,6 +1112,8 @@ impl Parser {
                         self.check_struct_visibility(id, pos)?;
                     } else if let TypeBase::Enum(id) = info.ty.base {
                         self.check_enum_visibility(id, pos)?;
+                    } else if let TypeBase::Sum(id) = info.ty.base {
+                        self.check_sum_visibility(id, pos)?;
                     }
                     info.ty
                 } else if let Some(id) = self.module.struct_id(&name) {
@@ -932,6 +1122,9 @@ impl Parser {
                 } else if let Some(id) = self.module.enum_id(&name) {
                     self.check_enum_visibility(id, pos)?;
                     LangType::enum_type(id)
+                } else if let Some(id) = self.module.sum_id(&name) {
+                    self.check_sum_visibility(id, pos)?;
+                    LangType::sum_type(id)
                 } else {
                     return Err(ParserError::UndefinedType(name, pos));
                 };
@@ -1016,7 +1209,8 @@ impl Parser {
         };
         let known = self.module.resolve_alias(name).is_some()
             || self.module.struct_id(name).is_some()
-            || self.module.enum_id(name).is_some();
+            || self.module.enum_id(name).is_some()
+            || self.module.sum_id(name).is_some();
         if known {
             // Known type: skip optional `[N]` array modifier, then any pointer
             // modifiers, then require the variable name.
@@ -1189,6 +1383,75 @@ impl Parser {
                     });
                 }
             }
+        }
+
+        // Sum construction `SumName.Variant(args…)` / bare `SumName.Variant`:
+        // `base` names a known sum, not shadowed by a local. The variant is
+        // resolved (and arity checked) here, like enum variants; argument
+        // *types* are the checker's job.
+        if let ExprKind::Variable(var_name) = &base.kind
+            && let Some(id) = self.module.sum_id(var_name)
+            && self.symbol_table.lookup_variable(var_name).is_none()
+        {
+            self.check_sum_visibility(id, pos)?;
+            let sum_name = self.module.sum_info(id).name.clone();
+            let Some(idx) = self.module.sum_variant_index(id, &name) else {
+                return Err(ParserError::UnknownSumVariant {
+                    sum_name,
+                    variant: name,
+                    pos,
+                });
+            };
+            let field_count = self.module.sum_info(id).variants[idx].fields.len();
+            let ty = LangType::sum_type(id);
+            let variant = u32::try_from(idx).expect("variant index fits u32");
+
+            if self.match_token(&[TokenKind::OpenParen]) {
+                if field_count == 0 {
+                    return Err(ParserError::UnexpectedToken(
+                        format!(
+                            "variant '{name}' of sum '{sum_name}' carries no payload — construct it as a bare name: {sum_name}.{name}"
+                        ),
+                        pos,
+                    ));
+                }
+                let args =
+                    self.parse_comma_separated(&TokenKind::CloseParen, Self::parse_expression)?;
+                if args.len() != field_count {
+                    return Err(ParserError::ArgumentCountMismatch(
+                        format!("{sum_name}.{name}"),
+                        field_count,
+                        args.len(),
+                        pos,
+                    ));
+                }
+                return Ok(Expression::new(
+                    ExprKind::SumConstruct {
+                        sum_id: id,
+                        variant,
+                        args,
+                    },
+                    ty,
+                    pos,
+                ));
+            }
+            if field_count > 0 {
+                return Err(ParserError::UnexpectedToken(
+                    format!(
+                        "variant '{name}' of sum '{sum_name}' carries a payload — construct it with arguments: {sum_name}.{name}(…)"
+                    ),
+                    pos,
+                ));
+            }
+            return Ok(Expression::new(
+                ExprKind::SumConstruct {
+                    sum_id: id,
+                    variant,
+                    args: Vec::new(),
+                },
+                ty,
+                pos,
+            ));
         }
 
         // Static method as a function-pointer *value*: `Type.method` with no

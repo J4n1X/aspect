@@ -72,7 +72,7 @@ rule fn linear(Program p, Type anchor) -> Judgments {
     u8* open_name = ""
     u8* close_name = ""
     FnList methods = anchor.struct_methods()
-    for (u64 i = 0; i < methods.count(); i += 1 as u64) {
+    for u64 i = 0; i < methods.count(); i += 1 as u64 {
         Fn m = methods.at(i)
         if str_ends_with(m.name(), "$open") {
             open_name = m.name()
@@ -87,13 +87,13 @@ rule fn linear(Program p, Type anchor) -> Judgments {
 
     # More opens than closes: the surplus opens are never closed — a leak.
     if opens.count() > closes.count() {
-        for (u64 i = closes.count(); i < opens.count(); i += 1 as u64) {
+        for u64 i = closes.count(); i < opens.count(); i += 1 as u64 {
             js.error(opens.at(i).pos(), "connection opened here is never closed; this resource may leak (linear rule)")
         }
     }
     # More closes than opens: the surplus closes free something twice.
     if closes.count() > opens.count() {
-        for (u64 i = opens.count(); i < closes.count(); i += 1 as u64) {
+        for u64 i = opens.count(); i < closes.count(); i += 1 as u64 {
             js.error(closes.at(i).pos(), "close() here has no matching open(); possible double-free (linear rule)")
         }
     }
@@ -105,7 +105,7 @@ rule fn linear(Program p, Type anchor) -> Judgments {
 rule fn no_raw_free(Program p, Type anchor) -> Judgments {
     Judgments js = Judgments.new()
     ExprList frees = p.call_sites_of("free")
-    for (u64 i = 0; i < frees.count(); i += 1 as u64) {
+    for u64 i = 0; i < frees.count(); i += 1 as u64 {
         js.error(frees.at(i).pos(), "calling raw free() is forbidden; release the resource through Conn.close() (no_raw_free rule)")
     }
     return js
@@ -115,7 +115,7 @@ rule fn no_raw_free(Program p, Type anchor) -> Judgments {
 rule fn sealed_boundary(Program p, Type anchor) -> Judgments {
     Judgments js = Judgments.new()
     FnList fns = p.functions()
-    for (u64 i = 0; i < fns.count(); i += 1 as u64) {
+    for u64 i = 0; i < fns.count(); i += 1 as u64 {
         Fn f = fns.at(i)
         if f.is_extern() {
             if f.is_public() {
@@ -133,7 +133,7 @@ rule fn sealed_boundary(Program p, Type anchor) -> Judgments {
 rule fn dead_api(Program p, Type anchor) -> Judgments {
     Judgments js = Judgments.new()
     FnList methods = anchor.struct_methods()
-    for (u64 i = 0; i < methods.count(); i += 1 as u64) {
+    for u64 i = 0; i < methods.count(); i += 1 as u64 {
         Fn m = methods.at(i)
         if m.is_public() {
             ExprList uses = p.call_sites_of(m.name())

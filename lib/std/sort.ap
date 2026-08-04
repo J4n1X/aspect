@@ -36,7 +36,7 @@ alias Comparator fn(u0*, u0*) -> i32
 
 # Byte-wise element swap — no temp allocation, works for any element size.
 fn swap_bytes(u8* a, u8* b, u64 size) {
-    for (u64 k = 0; k < size; k += 1) {
+    for u64 k = 0; k < size; k += 1 {
         u8 t = a[k]
         a[k] = b[k]
         b[k] = t
@@ -45,7 +45,7 @@ fn swap_bytes(u8* a, u8* b, u64 size) {
 
 # Insertion sort on elements [lo, hi] (inclusive). Fast for short runs.
 fn insertion_range(u8* base, u64 lo, u64 hi, u64 size, Comparator cmp) {
-    for (u64 i = lo + 1; i <= hi; i += 1) {
+    for u64 i = lo + 1; i <= hi; i += 1 {
         u64 j = i
         while j > lo {
             u8* prev = base + (j - 1) * size
@@ -71,7 +71,7 @@ fn quicksort_range(u8* base, u64 lo, u64 hi, u64 size, Comparator cmp) {
     u8* pivot = base + hi * size
 
     u64 store = lo
-    for (u64 i = lo; i < hi; i += 1) {
+    for u64 i = lo; i < hi; i += 1 {
         if cmp(base + i * size, pivot) < 0 {
             swap_bytes(base + i * size, base + store * size, size)
             store = store + 1

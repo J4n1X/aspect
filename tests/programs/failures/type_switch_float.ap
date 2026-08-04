@@ -1,0 +1,8 @@
+# expected: "cannot switch on 'f64'", "use if/elif"
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    f64 x = 1.0
+    switch x {
+        default { return 0 }
+    }
+}

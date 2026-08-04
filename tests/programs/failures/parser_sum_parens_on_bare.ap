@@ -1,0 +1,13 @@
+# expected: "carries no payload", "bare name"
+# A payload-less variant is constructed as a bare name, never with parens —
+# the construction-site twin of the declaration rule (parser_sum_empty_parens).
+
+sum Shape {
+    Circle(f64 radius)
+    Dot
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Shape s = Shape.Dot()
+    return 0
+}

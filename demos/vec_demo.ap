@@ -22,10 +22,10 @@ fn main(u32 argc, u8** argv) -> i32 {
     i32 popped = v.pop()
 
     # Sum the remaining 19 elements by index.
-    i32 sum = 0
+    i32 total = 0
     u64 k = 0
     while k < v.len() {
-        sum = sum + v.at(k)
+        total = total + v.at(k)
         k = k + 1
     }
 
@@ -33,9 +33,9 @@ fn main(u32 argc, u8** argv) -> i32 {
     println_u64(v.len())
     print("popped:           ")
     println_i32(popped)
-    print("sum of remaining: ")
-    println_i32(sum)
+    print("total of remaining: ")
+    println_i32(total)
 
     v.destroy()
-    return sum + popped     # 190 + 20 = 210
+    return total + popped     # 190 + 20 = 210
 }

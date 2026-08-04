@@ -1,0 +1,17 @@
+# expected: "contains itself by value", "break the cycle with a pointer"
+# A by-value cycle *through* a struct is still a cycle: the sum holds the
+# struct, the struct holds the sum. Forward references mean the cycle only
+# closes after the whole top level is parsed — the check runs then.
+
+sum Packet {
+    Wrapped(Holder h)
+    Empty
+}
+
+type Holder {
+    Packet p
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

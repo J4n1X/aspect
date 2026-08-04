@@ -200,6 +200,68 @@ pub(crate) fn const_eval<'ctx>(
             expr.pos,
         )),
 
+        // Foldable only as a *global* initializer (a local constructs at
+        // runtime — `try_fold` just falls through). The constant's type is an
+        // anonymous padded mirror of the `{ i32 tag, [k x iN] }` storage:
+        // payload fields keep their natural types, and explicit `[N x i8]`
+        // padding pins every offset to the uniform layout — no endianness
+        // games serializing fields into the unit array.
+        ExprKind::SumConstruct {
+            sum_id,
+            variant,
+            args,
+        } => {
+            if !cg.in_global_init {
+                return Err(CodegenError::InvalidOperation(
+                    "sum construction is not a constant expression".to_string(),
+                    expr.pos,
+                ));
+            }
+            let storage = *cg.sum_types.get(sum_id).ok_or_else(|| {
+                CodegenError::TypeError(format!("unregistered sum id {sum_id}"), expr.pos)
+            })?;
+            let target_data = cg.target_machine.get_target_data();
+            let total = target_data.get_store_size(&storage);
+            let tag = cg.context.i32_type().const_int(u64::from(*variant), false);
+            let field_tys = cg.sum_variant_fields[sum_id][*variant as usize].clone();
+
+            let mut members: Vec<BasicValueEnum> = vec![tag.into()];
+            if field_tys.is_empty() {
+                if total > 4 {
+                    let pad = u32::try_from(total - 4).expect("padding fits u32");
+                    members.push(cg.context.i8_type().array_type(pad).const_zero().into());
+                }
+            } else {
+                let payload_ty = cg
+                    .sum_payload_type(*sum_id, *variant as usize)
+                    .map_err(|e| e.with_pos(expr.pos))?
+                    .expect("variant with args has a payload type");
+                let payload_size = target_data.get_store_size(&payload_ty);
+                let payload_off = u64::from(target_data.get_abi_alignment(&storage));
+                if payload_off > 4 {
+                    let pad = u32::try_from(payload_off - 4).expect("padding fits u32");
+                    members.push(cg.context.i8_type().array_type(pad).const_zero().into());
+                }
+                let mut fields = Vec::with_capacity(args.len());
+                for (arg, fty) in args.iter().zip(field_tys) {
+                    fields.push(const_coerced_value(arg, cg, Some(&fty))?);
+                }
+                members.push(cg.context.const_struct(&fields, false).into());
+                let tail = total - payload_off - payload_size;
+                if tail > 0 {
+                    let tail = u32::try_from(tail).expect("padding fits u32");
+                    members.push(cg.context.i8_type().array_type(tail).const_zero().into());
+                }
+            }
+            Ok(cg.context.const_struct(&members, false).into())
+        }
+
+        // No sum value exists at compile time to probe.
+        ExprKind::Is { .. } | ExprKind::IsBinding { .. } => Err(CodegenError::InvalidOperation(
+            "`is` is not supported in constant expressions".to_string(),
+            expr.pos,
+        )),
+
         ExprKind::StructLiteral { struct_id, fields } => {
             let struct_ty = *cg.struct_types.get(struct_id).ok_or_else(|| {
                 CodegenError::TypeError(
@@ -211,6 +273,18 @@ pub(crate) fn const_eval<'ctx>(
             let layout = cg.struct_fields[struct_id].clone();
             let mut vals = Vec::with_capacity(layout.len());
             for (fname, fty) in &layout {
+                // A folded sum has an anonymous padded type that can't embed
+                // in a named struct constant (member types must match).
+                if fty.pointer_depth == 0
+                    && !fty.is_array()
+                    && matches!(fty.base, crate::lexer::TypeBase::Sum(_))
+                {
+                    return Err(CodegenError::InvalidOperation(
+                        "sum-typed fields are not supported in constant struct initializers yet"
+                            .to_string(),
+                        expr.pos,
+                    ));
+                }
                 match fields.iter().find(|(n, _)| n == fname) {
                     Some((_, fexpr)) => vals.push(const_coerced_value(fexpr, cg, Some(fty))?),
                     None => {
@@ -288,7 +362,7 @@ fn const_coerced_value<'ctx>(
     if let Some(target_ty) = target
         && target_ty.pointer_depth == 0
         && !target_ty.is_array()
-        && !matches!(target_ty.base, TypeBase::Struct(_))
+        && !matches!(target_ty.base, TypeBase::Struct(_) | TypeBase::Sum(_))
     {
         let target_llvm = target_ty
             .to_llvm(cg.context)

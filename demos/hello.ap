@@ -20,11 +20,11 @@ fn main(u32 argc, u8** argv) -> i32 {
     xs[1] = 20
     xs[2] = 12
 
-    i32 sum = xs[0] + xs[1] + xs[2]
+    i32 total = xs[0] + xs[1] + xs[2]
     free_ptr(xs)                                  # i32* coerces to u8*
 
-    print("sum is ")
-    println_i32(sum)
+    print("total is ")
+    println_i32(total)
 
-    return sum                                    # 42
+    return total                                    # 42
 }

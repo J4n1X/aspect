@@ -1,0 +1,19 @@
+# expected: "not supported in constant struct initializers"
+# A folded sum's anonymous padded type can't embed in a named struct
+# constant — deferred, not fundamental.
+
+sum Shape {
+    Dot
+    Mark(i32 v)
+}
+
+type Wrap {
+    public i32 k
+    public Shape s
+}
+
+Wrap g = Wrap { k = 1, s = Shape.Dot }
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

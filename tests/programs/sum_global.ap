@@ -1,0 +1,40 @@
+# expected: 1111
+#-
+  Sum construction folds into global initializers: the constant is emitted
+  with an anonymous padded mirror of the storage layout (payload fields at
+  their natural types), the global carries the storage alignment, and
+  readers observe it through `is`/`switch` like any sum. Mutable sum
+  globals stay reassignable; `const` ones fold with multi-field payloads.
+  (Sum-typed fields/elements inside constant struct/array initializers are
+  still deferred — see the sum_global_struct_field / sum_global_array
+  fixtures.)
+-#
+
+sum Shape {
+    Circle(f64 radius)
+    Rect(f64 w, f64 h)
+    Dot
+}
+
+Shape g_circle = Shape.Circle(2.5)
+Shape g_dot = Shape.Dot
+const Shape g_rect = Shape.Rect(3.0, 4.0)
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    i32 total = 0
+    if g_circle is Circle(r) && r == 2.5 {
+        total += 1
+    }
+    switch g_dot {
+        case Dot { total += 10 }
+        default { }
+    }
+    if g_rect is Rect(w, h) && w == 3.0 && h == 4.0 {
+        total += 100
+    }
+    g_circle = Shape.Dot
+    if g_circle is Dot {
+        total += 1000
+    }
+    return total
+}

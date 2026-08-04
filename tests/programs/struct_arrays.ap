@@ -41,7 +41,7 @@ fn main(u32 argc, u8** argv) -> i32 {
 
     # field access through a subscript, in a loop
     i64 total = 0
-    for (u64 i = 0; i < 3; i += 1) {
+    for u64 i = 0; i < 3; i += 1 {
         total = total + pairs[i].a          # 1 + 3 + 5 = 9
     }
     total = total + pairs[2].b              # + 60 = 69

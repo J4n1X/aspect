@@ -108,7 +108,7 @@ public type MapStrI64 {
         this.cap = new_cap
 
         u64 mask = new_cap - 1
-        for (u64 j = 0; j < old_cap; j += 1) {
+        for u64 j = 0; j < old_cap; j += 1 {
             u8* k = old_keys[j]
             if k != null {
                 u64 i = MapStrI64.fnv1a(k) & mask
@@ -143,7 +143,7 @@ public type MapStrI64 {
     # Visit every live entry in slot order. The callback must not mutate
     # the map (no put/destroy) while iterating.
     public fn for_each(this, fn(u8*, i64) visit) {
-        for (u64 i = 0; i < this.cap; i += 1) {
+        for u64 i = 0; i < this.cap; i += 1 {
             if this.keys[i] != null {
                 visit(this.keys[i], this.vals[i])
             }
@@ -152,7 +152,7 @@ public type MapStrI64 {
 
     # Free the key copies and both slot arrays.
     public fn destroy(this) {
-        for (u64 i = 0; i < this.cap; i += 1) {
+        for u64 i = 0; i < this.cap; i += 1 {
             if this.keys[i] != null {
                 free(this.keys[i])
             }

@@ -21,7 +21,7 @@ fn main(u32 argc, u8 **argv) -> i32 {
     total = total - 40
     $endif
 
-    for (u32 i = 0; i < 3; i += 1) {
+    for u32 i = 0; i < 3; i += 1 {
         if (i > 0) {
             $ifdef DEFINITELY_NOT_DEFINED
             total = total + 100

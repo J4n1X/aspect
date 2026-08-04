@@ -44,7 +44,7 @@ type Board {
 
     public const fn population(this) -> i64 {
         i64 n = 0
-        for (i64 i = 0; i < this.w * this.h; i += 1) {
+        for i64 i = 0; i < this.w * this.h; i += 1 {
             n = n + (this.cells[i] as i64)
         }
         return n
@@ -52,8 +52,8 @@ type Board {
 
     const fn live_neighbors(this, i64 x, i64 y) -> i64 {
         i64 n = 0
-        for (i64 dy = 0 - 1; dy <= 1; dy += 1) {
-            for (i64 dx = 0 - 1; dx <= 1; dx += 1) {
+        for i64 dy = 0 - 1; dy <= 1; dy += 1 {
+            for i64 dx = 0 - 1; dx <= 1; dx += 1 {
                 if dx != 0 || dy != 0 {
                     n = n + (this.at(x + dx, y + dy) as i64)
                 }
@@ -64,8 +64,8 @@ type Board {
 
     # One generation: B3/S23, written into `next` (same dimensions).
     public const fn step_into(this, Board* next) {
-        for (i64 y = 0; y < this.h; y += 1) {
-            for (i64 x = 0; x < this.w; x += 1) {
+        for i64 y = 0; y < this.h; y += 1 {
+            for i64 x = 0; x < this.w; x += 1 {
                 i64 n = this.live_neighbors(x, y)
                 u8 alive = this.at(x, y)
                 u8 out = 0
@@ -84,8 +84,8 @@ type Board {
     }
 
     public const fn render(this) {
-        for (i64 y = 0; y < this.h; y += 1) {
-            for (i64 x = 0; x < this.w; x += 1) {
+        for i64 y = 0; y < this.h; y += 1 {
+            for i64 x = 0; x < this.w; x += 1 {
                 if this.at(x, y) == 1 {
                     print_char(35)              # '#'
                 } else {
@@ -99,8 +99,8 @@ type Board {
     # ~18% random soup away from the centre, R-pentomino in the middle.
     public fn seed(this, u64 rng_seed) {
         Rng rng = Rng.seeded(rng_seed)
-        for (i64 y = 0; y < this.h; y += 1) {
-            for (i64 x = 0; x < this.w; x += 1) {
+        for i64 y = 0; y < this.h; y += 1 {
+            for i64 x = 0; x < this.w; x += 1 {
                 i64 cx = x - this.w / 2
                 i64 cy = y - this.h / 2
                 # keep a calm 16x10 window around the centre
@@ -151,7 +151,7 @@ fn main(u32 argc, u8** argv) -> i32 {
     cur.seed(20260713)
 
     if animate {
-        for (i64 gen = 0; gen <= 200; gen += 1) {
+        for i64 gen = 0; gen <= 200; gen += 1 {
             clear_screen()
             show_generation(&cur, gen)
             usleep(50000)
@@ -160,7 +160,7 @@ fn main(u32 argc, u8** argv) -> i32 {
         }
     } else {
         # Three snapshots: the soup, mid-boil, and the settling field.
-        for (i64 gen = 0; gen <= 60; gen += 1) {
+        for i64 gen = 0; gen <= 60; gen += 1 {
             if gen == 0 || gen == 30 || gen == 60 {
                 show_generation(&cur, gen)
                 println("")

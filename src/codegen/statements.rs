@@ -34,6 +34,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 else_block,
             } => self.generate_if_statement(condition, then_block, else_block.as_deref()),
             StatementKind::While { condition, body } => self.generate_while_loop(condition, body),
+            StatementKind::Switch {
+                scrutinee,
+                arms,
+                default,
+                ..
+            } => self.generate_switch(scrutinee, arms, default.as_deref(), stmt.pos),
             StatementKind::For {
                 init,
                 condition,
@@ -92,7 +98,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Allocate `name` of `llvm_type` at the top of `function`'s entry block
     /// (before its first instruction), then restore the builder's insert
     /// position. Entry-block allocas are what let mem2reg promote locals.
-    fn build_entry_alloca(
+    pub(crate) fn build_entry_alloca(
         &self,
         function: FunctionValue<'ctx>,
         llvm_type: BasicTypeEnum<'ctx>,
@@ -294,6 +300,215 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
+    /// Lower a `switch`: evaluate the scrutinee exactly once, LLVM `switch`
+    /// over the discriminant (a sum's `i32` tag, or the int/bool/enum value),
+    /// per-arm blocks with payload bindings copied out of the scrutinee slot.
+    /// The else edge is the `default` block when present; otherwise a
+    /// `llvm.trap` block — the checker guarantees `default` exists unless the
+    /// arms are coverage-complete, so the trap is only reachable through a
+    /// forged tag (`u0*` bridge, stale pointer) or an out-of-range `as`-cast
+    /// enum, and one cold trap beats undefined behavior. `llvm.trap` (`ud2`),
+    /// never libc `abort()`: freestanding targets link no libc.
+    pub(crate) fn generate_switch(
+        &mut self,
+        scrutinee: &Expression,
+        arms: &[crate::parser::SwitchArm],
+        default: Option<&[Statement]>,
+        pos: crate::lexer::Position,
+    ) -> Result<(), CodegenError> {
+        use crate::parser::{LiteralValue, SwitchPattern};
+
+        let function = self
+            .current_function
+            .ok_or(CodegenError::UnexpectedStatement(pos))?;
+        let s_ty = scrutinee.expr_type;
+
+        // Discriminant, plus (for sums) the slot arm bindings read from.
+        let mut sum_slot = None;
+        let disc = if s_ty.pointer_depth == 0
+            && !s_ty.is_array()
+            && let crate::lexer::TypeBase::Sum(sum_id) = s_ty.base
+        {
+            let storage = *self.sum_types.get(&sum_id).ok_or_else(|| {
+                CodegenError::TypeError(format!("unregistered sum id {sum_id}"), pos)
+            })?;
+            let value = self.generate_expression(scrutinee)?;
+            let slot = self.build_entry_alloca(function, storage.into(), "switch.scrut", pos)?;
+            self.builder.build_store(slot, value)?;
+            let tag_ptr = self
+                .builder
+                .build_struct_gep(storage, slot, 0, "switch.tag")?;
+            sum_slot = Some((slot, sum_id));
+            self.builder
+                .build_load(self.context.i32_type(), tag_ptr, "tag")?
+                .into_int_value()
+        } else {
+            let v = self.generate_expression(scrutinee)?.into_int_value();
+            // Bool variables load as `i8` (comparisons already yield `i1`) —
+            // normalize so the switch constants share one width.
+            if s_ty.base == crate::lexer::TypeBase::Bool && v.get_type().get_bit_width() > 1 {
+                self.builder.build_int_compare(
+                    inkwell::IntPredicate::NE,
+                    v,
+                    v.get_type().const_zero(),
+                    "switch.bool",
+                )?
+            } else {
+                v
+            }
+        };
+
+        let else_bb = self.context.append_basic_block(
+            function,
+            if default.is_some() {
+                "switch.default"
+            } else {
+                "switch.trap"
+            },
+        );
+        let merge_bb = self.context.append_basic_block(function, "switch.end");
+
+        let disc_ty = disc.get_type();
+        let mut cases = Vec::new();
+        let mut arm_blocks = Vec::with_capacity(arms.len());
+        for arm in arms {
+            let bb = self.context.append_basic_block(function, "switch.case");
+            for pattern in &arm.patterns {
+                let const_val = match pattern {
+                    SwitchPattern::SumVariant { variant, .. } => {
+                        disc_ty.const_int(u64::from(*variant), false)
+                    }
+                    SwitchPattern::Const(e) => match &e.kind {
+                        ExprKind::Literal(LiteralValue::Integer(v)) => {
+                            // `as u64` keeps the two's-complement bits; LLVM
+                            // truncates to the discriminant width, so negative
+                            // labels land correctly at any width.
+                            disc_ty.const_int(*v as u64, false)
+                        }
+                        ExprKind::Literal(LiteralValue::Bool(b)) => {
+                            disc_ty.const_int(u64::from(*b), false)
+                        }
+                        ExprKind::EnumValue { value, .. } => {
+                            disc_ty.const_int(*value as u64, false)
+                        }
+                        _ => {
+                            return Err(CodegenError::InvalidOperation(
+                                "non-constant case pattern survived checking".to_string(),
+                                e.pos,
+                            ))
+                        }
+                    },
+                };
+                cases.push((const_val, bb));
+            }
+            arm_blocks.push(bb);
+        }
+        self.builder.build_switch(disc, else_bb, &cases)?;
+
+        for (arm, bb) in arms.iter().zip(arm_blocks) {
+            self.builder.position_at_end(bb);
+            self.enter_scope();
+            // Bindings are copies: GEP the payload through the variant's bare
+            // payload struct at storage field 1 (the uniform offset) and copy
+            // each bound field into its own local.
+            if let Some(SwitchPattern::SumVariant { variant, binders }) = arm.patterns.first()
+                && binders.iter().any(Option::is_some)
+            {
+                let (slot, sum_id) =
+                    sum_slot.expect("binding pattern without a sum scrutinee");
+                let storage = self.sum_types[&sum_id];
+                let payload_ptr = self
+                    .builder
+                    .build_struct_gep(storage, slot, 1, "switch.payload")?;
+                let payload_ty = self
+                    .sum_payload_type(sum_id, *variant as usize)
+                    .map_err(|e| e.with_pos(arm.pos))?
+                    .expect("binding pattern on a payload-less variant");
+                for (i, binder) in binders.iter().enumerate() {
+                    let Some((name, field_ty)) = binder else { continue };
+                    let field_ptr = self.builder.build_struct_gep(
+                        payload_ty,
+                        payload_ptr,
+                        u32::try_from(i).expect("payload field index fits u32"),
+                        name,
+                    )?;
+                    if field_ty.is_array() {
+                        let arr_ty = self
+                            .lang_type_to_llvm_array(field_ty)
+                            .map_err(|e| e.with_pos(arm.pos))?;
+                        let alloca =
+                            self.build_entry_alloca(function, arr_ty.into(), name, arm.pos)?;
+                        let bytes = self.sizeof_lang_type(field_ty, arm.pos)?;
+                        let align = self
+                            .target_machine
+                            .get_target_data()
+                            .get_abi_alignment(&arr_ty);
+                        self.builder.build_memcpy(
+                            alloca,
+                            align,
+                            field_ptr,
+                            align,
+                            self.context.i64_type().const_int(bytes, false),
+                        )?;
+                        self.add_variable(name.clone(), alloca, arr_ty.into(), *field_ty, None);
+                    } else {
+                        let llvm_ty = self
+                            .lang_type_to_llvm(field_ty)
+                            .map_err(|e| e.with_pos(arm.pos))?;
+                        let alloca =
+                            self.build_entry_alloca(function, llvm_ty, name, arm.pos)?;
+                        let v = self.builder.build_load(llvm_ty, field_ptr, name)?;
+                        self.builder.build_store(alloca, v)?;
+                        self.add_variable(name.clone(), alloca, llvm_ty, *field_ty, None);
+                    }
+                }
+            }
+            for stmt in &arm.body {
+                self.generate_statement(stmt)?;
+            }
+            self.exit_scope();
+            if self
+                .builder
+                .get_insert_block()
+                .and_then(|b| b.get_terminator())
+                .is_none()
+            {
+                self.builder.build_unconditional_branch(merge_bb)?;
+            }
+        }
+
+        self.builder.position_at_end(else_bb);
+        if let Some(default_body) = default {
+            self.enter_scope();
+            for stmt in default_body {
+                self.generate_statement(stmt)?;
+            }
+            self.exit_scope();
+            if self
+                .builder
+                .get_insert_block()
+                .and_then(|b| b.get_terminator())
+                .is_none()
+            {
+                self.builder.build_unconditional_branch(merge_bb)?;
+            }
+        } else {
+            let trap = inkwell::intrinsics::Intrinsic::find("llvm.trap")
+                .and_then(|i| i.get_declaration(&self.module, &[]))
+                .ok_or_else(|| {
+                    CodegenError::InvalidOperation(
+                        "llvm.trap intrinsic unavailable".to_string(),
+                        pos,
+                    )
+                })?;
+            self.builder.build_call(trap, &[], "")?;
+            self.builder.build_unreachable()?;
+        }
+
+        self.builder.position_at_end(merge_bb);
+        Ok(())
+    }
+
     pub(crate) fn generate_block(&mut self, statements: &[Statement]) -> Result<(), CodegenError> {
         self.enter_scope();
         for stmt in statements {
@@ -364,6 +579,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             .current_function
             .ok_or(CodegenError::UnexpectedStatement(condition.pos))?;
 
+        // One scope spans condition + then-block (not else): `is` bindings
+        // registered while lowering the condition are visible exactly there,
+        // and body-local declarations can't clobber outer names (the checker
+        // scopes these blocks; codegen must mirror it — tri-scope invariant).
+        self.enter_scope();
         let cond_value = self.generate_expression(condition)?;
         let cond_int = self.value_to_bool(condition.pos, cond_value)?;
 
@@ -378,15 +598,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         for stmt in then_block {
             self.generate_statement(stmt)?;
         }
+        self.exit_scope();
         if !self.block_has_terminator() {
             self.builder.build_unconditional_branch(merge_bb)?;
         }
 
         self.builder.position_at_end(else_bb);
         if let Some(else_stmts) = else_block {
+            self.enter_scope();
             for stmt in else_stmts {
                 self.generate_statement(stmt)?;
             }
+            self.exit_scope();
         }
         if !self.block_has_terminator() {
             self.builder.build_unconditional_branch(merge_bb)?;
@@ -414,6 +637,10 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         self.builder.build_unconditional_branch(cond_bb)?;
 
+        // One scope spans condition + body, mirroring the checker: `is`
+        // bindings from the condition are re-stored each iteration and
+        // visible in the body; body locals can't clobber outer names.
+        self.enter_scope();
         self.builder.position_at_end(cond_bb);
         let cond_value = self.generate_expression(condition)?;
         let cond_int = self.value_to_bool(condition.pos, cond_value)?;
@@ -424,6 +651,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         for stmt in body {
             self.generate_statement(stmt)?;
         }
+        self.exit_scope();
         if !self.block_has_terminator() {
             self.builder.build_unconditional_branch(cond_bb)?;
         }
@@ -569,5 +797,49 @@ impl<'ctx> CodeGenerator<'ctx> {
         expr: &Expression,
     ) -> Option<BasicValueEnum<'ctx>> {
         const_eval(expr, self).ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::codegen::CodeGenerator;
+    use crate::parser::Parser;
+    use crate::target::TargetSpec;
+    use crate::typechecker::TypeChecker;
+    use inkwell::context::Context;
+
+    fn ir_for(source: &str, context: &Context) -> String {
+        let tokens = crate::lexer::tokenize(source.to_string()).expect("lex");
+        let mut parser = Parser::new(tokens);
+        let mut program = parser.parse_program().expect("parse");
+        let mut tc = TypeChecker::new();
+        tc.check_program(&mut program).expect("typecheck");
+        let mut codegen = CodeGenerator::new(context, "switch_test", &TargetSpec::host())
+            .expect("codegen setup");
+        codegen.generate(&program).expect("generate");
+        codegen.print_ir_to_string()
+    }
+
+    /// The else edge of a fully-listed sum switch is a `llvm.trap` block — a
+    /// forged tag halts instead of undefined behavior — and it must be
+    /// `llvm.trap`, never libc `abort` (freestanding targets link no libc).
+    /// A corpus program can't assert this: an executed trap would kill the
+    /// in-process JIT harness.
+    #[test]
+    fn complete_sum_switch_has_trap_edge() {
+        let src = "sum S {\n    A(i32 x)\n    B\n}\n\nfn main(u32 argc, u8 **argv) -> i32 {\n    S s = S.A(1)\n    switch s {\n        case A(v) { return v }\n        case B { return 0 }\n    }\n}\n";
+        let ctx = Context::create();
+        let ir = ir_for(src, &ctx);
+        assert!(ir.contains("llvm.trap"), "missing trap edge:\n{ir}");
+        assert!(!ir.contains("@abort"), "trap edge must not call libc abort:\n{ir}");
+    }
+
+    /// With a `default`, the else edge is the default block — no trap.
+    #[test]
+    fn defaulted_switch_has_no_trap() {
+        let src = "fn main(u32 argc, u8 **argv) -> i32 {\n    i32 x = 1\n    switch x {\n        case 1 { return 1 }\n        default { return 0 }\n    }\n}\n";
+        let ctx = Context::create();
+        let ir = ir_for(src, &ctx);
+        assert!(!ir.contains("llvm.trap"), "unexpected trap edge:\n{ir}");
     }
 }

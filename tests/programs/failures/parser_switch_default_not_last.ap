@@ -1,0 +1,9 @@
+# expected: "`default` must be the last arm"
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    i32 x = 1
+    switch x {
+        default { return 0 }
+        case 1 { return 1 }
+    }
+}

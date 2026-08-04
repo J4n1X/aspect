@@ -1,0 +1,16 @@
+# expected: "has no variant '_'", "use `default`"
+# Rust muscle memory: the wildcard pattern is spelled `default` here.
+
+sum S {
+    A
+    B
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    S s = S.A
+    switch s {
+        case A { return 1 }
+        case _ { return 0 }
+    }
+    return 0
+}

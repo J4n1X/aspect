@@ -1,0 +1,16 @@
+# expected: "not an expression", "if/elif/while condition"
+# Binding `is` is deliberately excluded from `for` headers — the `while`
+# form covers the walk pattern.
+
+sum S {
+    A(i32 x)
+    B
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    S s = S.A(3)
+    for ; s is A(v); {
+        return v
+    }
+    return 0
+}

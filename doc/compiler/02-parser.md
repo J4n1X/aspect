@@ -38,8 +38,25 @@ pub struct Parser {
     file_modules: Vec<String>,
     /// Module → its *direct* imports; drives the import-visibility check.
     module_imports: HashMap<String, Vec<String>>,
+    /// Declaration positions per type-struct/sum id — the registry stores no
+    /// positions, so the by-value-containment cycle check reports here.
+    struct_decl_pos: HashMap<u32, Position>,
+    sum_decl_pos: HashMap<u32, Position>,
 }
 ```
+
+Type-shape declarations are handled by `parse_struct_def`, `parse_enum_def` and
+`parse_sum_def` (all in `declarations.rs`), each backed by a prescan
+(`prescan_type_names` / `prescan_enum_names` / `prescan_sum_names`) that
+reserves the name before the main parse so forward references resolve. A sum
+(`sum Shape { Circle(f64 radius) … }`) parses like an enum with
+parameter-style payload fields per variant — one variant per line — and, like
+an enum, produces no AST node, only a `SumInfo` registry entry. After pass 1,
+`check_byvalue_containment_cycles` walks the by-value containment graph over
+all type-structs and sums (arrays included; any pointer depth breaks an edge)
+and reports `RecursiveByValue` for each cycle — forward references mean a
+cycle may only close once the whole top level is parsed, which is why this is
+a whole-program pass and not a per-declaration check.
 
 The parser owns the token vec and tracks position via `current: usize`.
 `symbol_table` holds only **transient per-function variable scopes** and is
@@ -169,7 +186,51 @@ expression or assignment.
 
 ### For Loops
 
-`for (init; condition; increment) { body }` — has its own scope. The `;` is a section
+### `is` and condition scoping
+
+`is` parses as an infix at the comparison tier (`parse_is_suffix`), resolving
+its variant against the scrutinee's parse-time type. A parenthesized pattern
+builds the binding form and registers its binders into the current scope
+immediately — textual order, which is what lets later `&&`-conjuncts and the
+block reference them. To make binders die with the block,
+`parse_if_statement`/`parse_elif_body`/`parse_while_statement` wrap
+condition + body in **one** parse-time scope (the `for`-header pattern; the
+else-branch is outside it). Placement policing at parse time: a parenthesized
+binding form errors at the paren primary, and folding a `||` whose operands
+contain a binding `is` errors at the fold — everything else (expression
+positions, `for` headers) is caught by the checker's `IsBinding` synthesis
+arm.
+
+### The tri-scope invariant
+
+Variable references stay **name strings** in the AST — no resolved symbol id —
+so three phases re-resolve names lexically and each keeps its own scope stack:
+the parser's transient `SymbolTable` (type stamping for `.`-resolution and
+pattern resolution; redeclaration errors; discarded after parse), the
+checker's scopes (the authority on undefined-variable errors), and codegen's
+`ScopeStack` (allocas). **Every scoped construct must implement its scoping in
+all three walks** — `for` headers, value blocks, and switch arms each do — and
+nothing enforces this mechanically: omitting one shows up as stale types or
+wrong-variable resolution, not a crash. (A future refactor could resolve names
+once and stamp slot ids on `Variable` nodes, collapsing the other two.)
+
+### Switch
+
+`switch scrutinee { case … { } … default { } }` — `parse_switch_statement` /
+`parse_switch_arm` / `parse_switch_pattern` (all driven by the scrutinee's
+parse-time `expr_type`): sum scrutinees take variant patterns with positional
+binders (`_` discards; bare variant = ignore payload), everything else takes
+constant expressions, with bare enum variant names resolved against the
+scrutinee's enum. Arm bindings are registered into the parse-time symbol
+table (a fresh scope) *before* the body parses — that is what lets the body
+reference them. The parser also computes `complete` (dedup-aware variant/
+literal coverage) so the checker's registry-less termination analysis can
+read it, and enforces `default`-last plus the binding-pattern-stands-alone
+rule.
+
+### For Loops
+
+`for init; condition; increment { body }` — has its own scope. The `;` is a section
 delimiter consumed by the for-loop parser itself, so the sections must be parsed
 *without* consuming a terminator. That is what the `_inner` pair is for:
 `parse_var_decl_inner()` and `parse_expression_or_assign_inner()` parse the bare

@@ -70,7 +70,7 @@ fn main(u32 argc, u8** argv) -> i32 {
     }
 
     MapStrI64 freq = MapStrI64.new()
-    for (u64 i = 0; i < 4; i += 1) {
+    for u64 i = 0; i < 4; i += 1 {
         count_words(&freq, text[i])
     }
 
@@ -83,7 +83,7 @@ fn main(u32 argc, u8** argv) -> i32 {
     i64 total = 0
     i64 top_count = 0
     u8* top_word = null
-    for (u64 i = 0; i < g_word_count; i += 1) {
+    for u64 i = 0; i < g_word_count; i += 1 {
         u8* w = g_words[i]
         i64 n = freq.get_or(w, 0)
         total = total + n

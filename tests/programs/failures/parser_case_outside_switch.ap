@@ -1,0 +1,6 @@
+# expected: "only appear inside a `switch`"
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    case 1 { return 1 }
+    return 0
+}

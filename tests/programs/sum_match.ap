@@ -1,0 +1,76 @@
+# expected: 84
+#-
+  `switch` destructuring of sums: positional bindings (copies), `_` discards,
+  bare-variant patterns ignoring the payload, and recursion through
+  pointer-indirected payloads — the mini expression tree the design doc
+  promises. No layout peeking here: destructuring is the real observer, so
+  this file is target-independent (contrast sum_types.ap).
+-#
+
+sum Node {
+    Lit(i32 v)
+    Add(Node* l, Node* r)
+    Neg(Node* e)
+}
+
+fn eval(Node* n) -> i32 {
+    switch *n {
+        case Lit(v) { return v }
+        case Add(l, r) { return eval(l) + eval(r) }
+        case Neg(e) { return 0 - eval(e) }
+    }
+}
+
+sum Probe {
+    Pair(i32 a, i32 b)
+    Unit
+}
+
+# `_` discards a position; a bare variant ignores the payload entirely.
+fn classify(Probe p) -> i32 {
+    switch p {
+        case Pair(x, _) { return x }
+        case Unit { return -1 }
+    }
+}
+
+# Comma-listed patterns are legal on sums while nothing binds — bare
+# variants and all-discard parens alike (a pattern that binds must stand
+# alone; see parser_switch_binding_in_list). Coverage counts across the
+# list, so this is exhaustive with no default.
+fn coarse(Probe p) -> i32 {
+    switch p {
+        case Pair(_, _), Unit { return 1 }
+    }
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Node a = Node.Lit(20)
+    Node b = Node.Lit(22)
+    Node plus = Node.Add(&a, &b)
+    Node minus = Node.Neg(&plus)
+
+    i32 tree = eval(&plus) - eval(&minus)      # 42 - (-42) = 84
+
+    # Bindings are copies: mutating one never writes the sum.
+    i32 probeSum = classify(Probe.Pair(9, 1)) + classify(Probe.Unit)   # 9 + -1 = 8
+    Probe keep = Probe.Pair(3, 4)
+    switch keep {
+        case Pair(x, _) {
+            x = 999                             # copy mutates; `keep` does not
+        }
+        case Unit { }
+    }
+    switch keep {
+        case Probe.Pair(x, y) {                 # qualified pattern, same resolution
+            probeSum += x + y                   # still 3 + 4
+        }
+        default { }                             # exercises sum + default (legal: not all listed... all listed + default would warn)
+    }
+    probeSum += coarse(Probe.Pair(5, 6)) + coarse(Probe.Unit)   # +2
+    # probeSum = 8 + 7 + 2 = 17; gated so the file returns 84 exactly
+    if probeSum != 17 {
+        return 0
+    }
+    return tree
+}

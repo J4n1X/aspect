@@ -41,11 +41,11 @@ fn main(u32 argc, u8** argv) -> i32 {
 
     # And it is fully usable across the former boundary.
     if big != null {
-        for (u64 i = 0; i < 120; i += 1) {
+        for u64 i = 0; i < 120; i += 1 {
             big[i] = ((i * 5 + 1) % 251) as u8
         }
         bool ok = true
-        for (u64 i = 0; i < 120; i += 1) {
+        for u64 i = 0; i < 120; i += 1 {
             if big[i] != ((i * 5 + 1) % 251) as u8 { ok = false }
         }
         fails += fail_if(!ok)

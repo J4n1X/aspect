@@ -251,11 +251,11 @@ fn main(u32 argc, u8** argv) -> i32 {
     }
 
     i64 fact = vm_execute("factorial(12), bytecode countdown loop:", factorial, 32)
-    i64 sum = vm_execute("sum 1..=1000, same skeleton with ADD:", summation, 32)
+    i64 total = vm_execute("sum 1..=1000, same skeleton with ADD:", summation, 32)
 
     i32 fails = 0
     if fact != 479001600 { fails += 1 }
-    if sum != 500500 { fails += 1 }
+    if total != 500500 { fails += 1 }
     if fails == 0 {
         println("both programs verified")
     }

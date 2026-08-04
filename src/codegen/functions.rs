@@ -120,13 +120,14 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// `sret(%Struct)` / `byval(%Struct)` type attribute for a struct value type.
     fn struct_abi_attribute(&self, kind: &str, ty: &LangType) -> Attribute {
-        let TypeBase::Struct(id) = ty.base else {
-            unreachable!("struct_abi_attribute called on non-struct type");
+        let aggregate_ty = match ty.base {
+            TypeBase::Struct(id) => self.struct_types[&id],
+            TypeBase::Sum(id) => self.sum_types[&id],
+            _ => unreachable!("struct_abi_attribute called on non-aggregate type"),
         };
-        let struct_ty = self.struct_types[&id];
         self.context.create_type_attribute(
             Attribute::get_named_enum_kind_id(kind),
-            struct_ty.as_any_type_enum(),
+            aggregate_ty.as_any_type_enum(),
         )
     }
 
