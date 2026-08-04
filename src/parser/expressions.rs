@@ -93,7 +93,7 @@ pub struct Parser {
     /// the `meta` query layer can resolve a position to its module.
     pub(crate) file_modules: Vec<String>,
     /// Module → its *direct* imports, driving the import-visibility check.
-    module_imports: std::collections::HashMap<String, Vec<String>>,
+    pub(crate) module_imports: std::collections::HashMap<String, Vec<String>>,
     /// Global-variable name → module visibility: globals live in the outermost
     /// variable scope, whose `Symbol` carries no visibility, so the
     /// reference-site gate reads it here.
@@ -154,118 +154,6 @@ impl Parser {
         self.file_modules = modules.into_iter().map(|(_, module)| module).collect();
         self.module_imports = imports;
         self
-    }
-
-    /// The module the file `file_id` belongs to. Files without an entry —
-    /// including every file when no module info was threaded — belong to the
-    /// anonymous root module `""`.
-    fn module_of_file(&self, file_id: u32) -> &str {
-        self.file_modules
-            .get(file_id as usize)
-            .map_or("", String::as_str)
-    }
-
-    /// Enforce import visibility for one resolved reference: a symbol defined
-    /// in a file of module N may be referenced from a file of module M iff
-    /// `N == M` or N is a *direct* import of M (imports do not trickle down).
-    /// `def_file_id` is the symbol's defining file; `use_pos` is the use site
-    /// (whose `file_id` determines the referring module).
-    fn check_import_visibility(
-        &self,
-        kind: &'static str,
-        name: &str,
-        def_file_id: u32,
-        use_pos: Position,
-    ) -> Result<(), ParserError> {
-        let def_module = self.module_of_file(def_file_id);
-        let use_module = self.module_of_file(use_pos.file_id);
-        if def_module == use_module
-            || self
-                .module_imports
-                .get(use_module)
-                .is_some_and(|imports| imports.iter().any(|import| import == def_module))
-        {
-            return Ok(());
-        }
-        Err(ParserError::not_imported(
-            kind, name, def_module, use_module, use_pos,
-        ))
-    }
-
-    /// Two gates for naming a type-struct (or calling its methods): the general
-    /// import rule, plus a cross-module use additionally requiring `public
-    /// type`. A member's own `public` is capped by the type's — a public method
-    /// of a private type is module-visible only. Values of a foreign private
-    /// type may still *flow* through outside code.
-    fn check_struct_visibility(&self, id: u32, use_pos: Position) -> Result<(), ParserError> {
-        let info = self.module.struct_info(id);
-        self.check_import_visibility("type-struct", &info.name, info.file_id, use_pos)?;
-        let def_module = self.module_of_file(info.file_id);
-        let use_module = self.module_of_file(use_pos.file_id);
-        if info.vis == crate::symbol::module::Visibility::Private && def_module != use_module {
-            return Err(ParserError::private_type(
-                &info.name, def_module, use_module, use_pos,
-            ));
-        }
-        Ok(())
-    }
-
-    /// The sum twin of [`Self::check_struct_visibility`]: the import rule plus
-    /// a cross-module use requiring `public sum`.
-    fn check_sum_visibility(&self, id: u32, use_pos: Position) -> Result<(), ParserError> {
-        let info = self.module.sum_info(id);
-        self.check_import_visibility("sum", &info.name, info.file_id, use_pos)?;
-        let def_module = self.module_of_file(info.file_id);
-        let use_module = self.module_of_file(use_pos.file_id);
-        if info.vis == crate::symbol::module::Visibility::Private && def_module != use_module {
-            return Err(ParserError::private_sum(
-                &info.name, def_module, use_module, use_pos,
-            ));
-        }
-        Ok(())
-    }
-
-    /// The enum twin of [`Self::check_struct_visibility`]: the import rule plus
-    /// a cross-module use requiring `public enum`.
-    fn check_enum_visibility(&self, id: u32, use_pos: Position) -> Result<(), ParserError> {
-        let info = self.module.enum_info(id);
-        self.check_import_visibility("enum", &info.name, info.file_id, use_pos)?;
-        let def_module = self.module_of_file(info.file_id);
-        let use_module = self.module_of_file(use_pos.file_id);
-        if info.vis == crate::symbol::module::Visibility::Private && def_module != use_module {
-            return Err(ParserError::private_enum(
-                &info.name, def_module, use_module, use_pos,
-            ));
-        }
-        Ok(())
-    }
-
-    /// The free-function/global analogue of [`Self::check_struct_visibility`]:
-    /// the import rule plus a cross-module use requiring `public`.
-    ///
-    /// Mangled method names (containing `$`) are exempt from the `public` gate:
-    /// a method's cross-module reach is governed by its type's visibility and
-    /// its own `MethodSig.vis`, checked in the type checker.
-    fn check_name_visibility(
-        &self,
-        kind: &'static str,
-        name: &str,
-        def_file_id: u32,
-        vis: crate::symbol::module::Visibility,
-        use_pos: Position,
-    ) -> Result<(), ParserError> {
-        self.check_import_visibility(kind, name, def_file_id, use_pos)?;
-        if name.contains('$') {
-            return Ok(());
-        }
-        let def_module = self.module_of_file(def_file_id);
-        let use_module = self.module_of_file(use_pos.file_id);
-        if vis == crate::symbol::module::Visibility::Private && def_module != use_module {
-            return Err(ParserError::private_symbol(
-                kind, name, def_module, use_module, use_pos,
-            ));
-        }
-        Ok(())
     }
 
     /// Format a single error prefixed with the source file the error came
@@ -692,115 +580,125 @@ impl Parser {
         let pos = self.peek().pos;
 
         match &self.peek().kind {
-            TokenKind::Ampersand => {
-                self.advance();
-                let expr = self.parse_unary()?;
-
-                // `&func` for a function name is the function-pointer value
-                // itself — no extra indirection. Collapse to keep the AST tidy
-                // and avoid a meaningless `Reference(FunctionRef(...))` shape.
-                if matches!(expr.kind, ExprKind::FunctionRef(_)) {
-                    return Ok(expr);
-                }
-
-                let mut result_type = expr.expr_type;
-                result_type.pointer_depth += 1;
-
-                Ok(Expression::new(
-                    ExprKind::Reference(Box::new(expr)),
-                    result_type,
-                    pos,
-                ))
-            }
-            TokenKind::Asterisk => {
-                self.advance();
-                let expr = self.parse_unary()?;
-
-                if expr.expr_type.pointer_depth == 0 {
-                    return Err(ParserError::InvalidDereference(pos));
-                }
-
-                let mut result_type = expr.expr_type;
-                result_type.pointer_depth -= 1;
-
-                Ok(Expression::new(
-                    ExprKind::Dereference(Box::new(expr)),
-                    result_type,
-                    pos,
-                ))
-            }
-            TokenKind::Minus => {
-                self.advance();
-                let expr = self.parse_unary()?;
-
-                // Fold negation into a numeric literal so `-128` becomes one
-                // node, letting it coerce to narrow signed types (i8) uncast.
-                match &expr.kind {
-                    ExprKind::Literal(LiteralValue::Integer(val)) => {
-                        let neg = -(*val);
-                        let expr_type = if neg >= i32::MIN as i64 && neg <= i32::MAX as i64 {
-                            LangType::I32
-                        } else {
-                            LangType::I64
-                        };
-                        return Ok(Expression::new(
-                            ExprKind::Literal(LiteralValue::Integer(neg)),
-                            expr_type,
-                            pos,
-                        ));
-                    }
-                    ExprKind::Literal(LiteralValue::Float(val)) => {
-                        return Ok(Expression::new(
-                            ExprKind::Literal(LiteralValue::Float(-(*val))),
-                            expr.expr_type,
-                            pos,
-                        ));
-                    }
-                    _ => {}
-                }
-
-                // General case: unary minus as 0 - expr
-                let result_type = expr.expr_type;
-                let zero = Expression::new(
-                    ExprKind::Literal(LiteralValue::Integer(0)),
-                    result_type,
-                    pos,
-                );
-
-                Ok(Expression::new(
-                    ExprKind::Binary {
-                        left: Box::new(zero),
-                        op: BinaryOp::Sub,
-                        right: Box::new(expr),
-                    },
-                    result_type,
-                    pos,
-                ))
-            }
-            TokenKind::LogicalNot => {
-                self.advance();
-                let expr = self.parse_unary()?;
-                let result_type = LangType::BOOL;
-
-                Ok(Expression::new(
-                    ExprKind::UnaryNot(Box::new(expr)),
-                    result_type,
-                    pos,
-                ))
-            }
-            TokenKind::Tilde => {
-                self.advance();
-                let expr = self.parse_unary()?;
-                let result_type = expr.expr_type;
-
-                Ok(Expression::new(
-                    ExprKind::BitwiseNot(Box::new(expr)),
-                    result_type,
-                    pos,
-                ))
-            }
+            TokenKind::Ampersand => self.parse_reference(pos),
+            TokenKind::Asterisk => self.parse_dereference(pos),
+            TokenKind::Minus => self.parse_negation(pos),
+            TokenKind::LogicalNot => self.parse_logical_not(pos),
+            TokenKind::Tilde => self.parse_bitwise_not(pos),
             _ => self.parse_postfix(),
         }
+    }
+
+    fn parse_reference(&mut self, pos: Position) -> Result<Expression, ParserError> {
+        self.advance();
+        let expr = self.parse_unary()?;
+
+        // `&func` for a function name is the function-pointer value
+        // itself — no extra indirection. Collapse to keep the AST tidy
+        // and avoid a meaningless `Reference(FunctionRef(...))` shape.
+        if matches!(expr.kind, ExprKind::FunctionRef(_)) {
+            return Ok(expr);
+        }
+
+        let mut result_type = expr.expr_type;
+        result_type.pointer_depth += 1;
+
+        Ok(Expression::new(
+            ExprKind::Reference(Box::new(expr)),
+            result_type,
+            pos,
+        ))
+    }
+
+    fn parse_dereference(&mut self, pos: Position) -> Result<Expression, ParserError> {
+        self.advance();
+        let expr = self.parse_unary()?;
+
+        if expr.expr_type.pointer_depth == 0 {
+            return Err(ParserError::InvalidDereference(pos));
+        }
+
+        let mut result_type = expr.expr_type;
+        result_type.pointer_depth -= 1;
+
+        Ok(Expression::new(
+            ExprKind::Dereference(Box::new(expr)),
+            result_type,
+            pos,
+        ))
+    }
+
+    fn parse_negation(&mut self, pos: Position) -> Result<Expression, ParserError> {
+        self.advance();
+        let expr = self.parse_unary()?;
+
+        // Fold negation into a numeric literal so `-128` becomes one
+        // node, letting it coerce to narrow signed types (i8) uncast.
+        match &expr.kind {
+            ExprKind::Literal(LiteralValue::Integer(val)) => {
+                let neg = -(*val);
+                let expr_type = if neg >= i32::MIN as i64 && neg <= i32::MAX as i64 {
+                    LangType::I32
+                } else {
+                    LangType::I64
+                };
+                return Ok(Expression::new(
+                    ExprKind::Literal(LiteralValue::Integer(neg)),
+                    expr_type,
+                    pos,
+                ));
+            }
+            ExprKind::Literal(LiteralValue::Float(val)) => {
+                return Ok(Expression::new(
+                    ExprKind::Literal(LiteralValue::Float(-(*val))),
+                    expr.expr_type,
+                    pos,
+                ));
+            }
+            _ => {}
+        }
+
+        // General case: unary minus as 0 - expr
+        let result_type = expr.expr_type;
+        let zero = Expression::new(
+            ExprKind::Literal(LiteralValue::Integer(0)),
+            result_type,
+            pos,
+        );
+
+        Ok(Expression::new(
+            ExprKind::Binary {
+                left: Box::new(zero),
+                op: BinaryOp::Sub,
+                right: Box::new(expr),
+            },
+            result_type,
+            pos,
+        ))
+    }
+
+    fn parse_logical_not(&mut self, pos: Position) -> Result<Expression, ParserError> {
+        self.advance();
+        let expr = self.parse_unary()?;
+        let result_type = LangType::BOOL;
+
+        Ok(Expression::new(
+            ExprKind::UnaryNot(Box::new(expr)),
+            result_type,
+            pos,
+        ))
+    }
+
+    fn parse_bitwise_not(&mut self, pos: Position) -> Result<Expression, ParserError> {
+        self.advance();
+        let expr = self.parse_unary()?;
+        let result_type = expr.expr_type;
+
+        Ok(Expression::new(
+            ExprKind::BitwiseNot(Box::new(expr)),
+            result_type,
+            pos,
+        ))
     }
 
     /// Loops so chained operations like `arr[i][j]` or `f()()` parse correctly.
@@ -1079,217 +977,6 @@ impl Parser {
         ))
     }
 
-    pub(crate) fn parse_type(&mut self) -> Result<LangType, ParserError> {
-        let pos = self.peek().pos;
-        let kind = self.peek().kind.clone();
-        match kind {
-            // A bare `const` keyword reaches here only for a *named* base or a
-            // re-split builtin (`const u8[MAX]` after define substitution) — the
-            // scanner fuses `const` with built-in scalar spellings. `const` is a
-            // single flag over the whole resolved type.
-            TokenKind::Keyword(Keyword::Const) => {
-                self.advance();
-                let inner = self.parse_type()?;
-                Ok(inner.with_const(true))
-            }
-            // Usually pre-folded (`u8[10]*` is one token), but the scanner only
-            // folds `[N]` for literal N — `u8[MAX_SIZE]` reaches us as `u8` `[`
-            // `1024` `]` after define substitution, so re-apply the modifiers.
-            TokenKind::LangType(lang_type) => {
-                self.advance();
-                Ok(self.apply_type_modifiers(lang_type))
-            }
-            // Named types (aliases, type-structs) lex as bare identifiers, so
-            // resolve them against the module table — enforcing import
-            // visibility against each name's declaring file.
-            TokenKind::Identifier(name) => {
-                self.advance();
-                let base = if let Some(info) = self.module.alias_info(&name) {
-                    self.check_import_visibility("type alias", &name, info.file_id, pos)?;
-                    // Aliasing does not launder module visibility, so the
-                    // underlying type is checked as if named directly.
-                    if let TypeBase::Struct(id) = info.ty.base {
-                        self.check_struct_visibility(id, pos)?;
-                    } else if let TypeBase::Enum(id) = info.ty.base {
-                        self.check_enum_visibility(id, pos)?;
-                    } else if let TypeBase::Sum(id) = info.ty.base {
-                        self.check_sum_visibility(id, pos)?;
-                    }
-                    info.ty
-                } else if let Some(id) = self.module.struct_id(&name) {
-                    self.check_struct_visibility(id, pos)?;
-                    LangType::struct_type(id)
-                } else if let Some(id) = self.module.enum_id(&name) {
-                    self.check_enum_visibility(id, pos)?;
-                    LangType::enum_type(id)
-                } else if let Some(id) = self.module.sum_id(&name) {
-                    self.check_sum_visibility(id, pos)?;
-                    LangType::sum_type(id)
-                } else {
-                    return Err(ParserError::UndefinedType(name, pos));
-                };
-                Ok(self.apply_type_modifiers(base))
-            }
-            // Parens are the only way to spell "array of pointers" (`(i32*)[3]`)
-            // or "array of fn-pointers": the lexer greedily folds `T[N]`/`T*`
-            // into the preceding type token.
-            TokenKind::OpenParen => {
-                self.advance();
-                let inner = self.parse_type()?;
-                self.expect(&TokenKind::CloseParen, ")")?;
-                Ok(self.apply_type_modifiers(inner))
-            }
-            // Function-pointer type: `fn(T1, T2, ...) -> R` (or `fn(...)` for
-            // a `void`/`u0` return). `fn` here is always followed by `(` — a
-            // function *definition* would have an identifier between them.
-            TokenKind::Keyword(Keyword::Fn) => {
-                self.advance();
-                self.expect(&TokenKind::OpenParen, "(")?;
-                let params = self.parse_comma_separated(&TokenKind::CloseParen, Self::parse_type)?;
-                let return_type = if self.match_token(&[TokenKind::Arrow]) {
-                    self.parse_type()?
-                } else {
-                    LangType::VOID
-                };
-                let id = self.module.intern_fnptr(params, return_type);
-                let base = LangType::fnptr_type(id);
-                Ok(self.apply_type_modifiers(base))
-            }
-            _ => Err(ParserError::ExpectedToken(
-                "type".to_string(),
-                format!("{}", self.peek().kind),
-                self.peek().pos,
-            )),
-        }
-    }
-
-    /// Attaches `[N]`/`*` modifiers to a named type (built-in types arrive
-    /// pre-folded). Stacks on any depth the resolved type already carries
-    /// (`alias P u8*` then `P*` yields `pointer_depth == 2`).
-    fn apply_type_modifiers(&mut self, mut ty: LangType) -> LangType {
-        // Array suffix first, then pointer depth (the lexer's order). Restore
-        // the cursor on a malformed `[` so a later index `[i]` isn't consumed.
-        if ty.array_size.is_none() && self.check(&TokenKind::OpenBracket) {
-            let saved_current = self.current;
-            self.advance();
-            if let TokenKind::Integer(n) = self.peek().kind {
-                let n_val = n;
-                self.advance();
-                if self.check(&TokenKind::CloseBracket) {
-                    self.advance();
-                    if let Ok(size) = u32::try_from(n_val) {
-                        ty = ty.with_array_size(size);
-                    } else {
-                        self.current = saved_current;
-                    }
-                } else {
-                    self.current = saved_current;
-                }
-            } else {
-                self.current = saved_current;
-            }
-        }
-        let mut depth = ty.pointer_depth;
-        while self.check(&TokenKind::Asterisk) {
-            self.advance();
-            depth += 1;
-        }
-        ty.with_pointer_depth(depth)
-    }
-
-    /// True when the upcoming tokens begin a *named-type* local declaration:
-    /// `<TypeName> [*...] <ident>` where `<TypeName>` is a known alias or
-    /// type-struct. Used by the statement dispatcher to tell declarations apart
-    /// from assignments / expression statements that merely start with an
-    /// identifier. Type names are never values, so `Type *x` is unambiguously a
-    /// pointer declaration (not a multiplication).
-    pub(crate) fn starts_named_var_decl(&self) -> bool {
-        let TokenKind::Identifier(name) = &self.peek().kind else {
-            return false;
-        };
-        let known = self.module.resolve_alias(name).is_some()
-            || self.module.struct_id(name).is_some()
-            || self.module.enum_id(name).is_some()
-            || self.module.sum_id(name).is_some();
-        if known {
-            // Known type: skip optional `[N]` array modifier, then any pointer
-            // modifiers, then require the variable name.
-            self.type_suffix_then_ident(self.current + 1)
-        } else {
-            // An unknown identifier directly followed by another identifier is
-            // only ever a declaration with an undeclared/misspelled type — route
-            // it so `parse_type` reports a precise "undefined type". (`a * b` is
-            // a multiplication, not a decl, thanks to the operator between them.)
-            matches!(
-                self.tokens.get(self.current + 1).map(|t| &t.kind),
-                Some(TokenKind::Identifier(_))
-            )
-        }
-    }
-
-    /// True when the upcoming tokens begin a *function-pointer* variable
-    /// declaration: `fn(...)...` followed eventually by a variable name. Used
-    /// by the statement dispatcher (a function *definition* is top-level only,
-    /// so any `fn(` in statement position is a fn-ptr type).
-    pub(crate) fn starts_fnptr_var_decl(&self) -> bool {
-        matches!(self.peek().kind, TokenKind::Keyword(Keyword::Fn))
-            && matches!(
-                self.tokens.get(self.current + 1).map(|t| &t.kind),
-                Some(TokenKind::OpenParen)
-            )
-    }
-
-    /// True when the upcoming tokens begin a *parenthesised-type* variable
-    /// declaration: `(...)` (a grouped type) optionally followed by `[N]`
-    /// and/or `*` modifiers, then a variable name. Distinguishes a type
-    /// `(T)[N]* ident = ...` from a parenthesised expression statement.
-    pub(crate) fn starts_grouped_var_decl(&self) -> bool {
-        if !matches!(self.peek().kind, TokenKind::OpenParen) {
-            return false;
-        }
-        // Walk past balanced parens to find what follows the group.
-        let mut i = self.current;
-        let mut depth: u32 = 0;
-        loop {
-            let Some(t) = self.tokens.get(i) else {
-                return false;
-            };
-            match &t.kind {
-                TokenKind::OpenParen => depth += 1,
-                TokenKind::CloseParen => {
-                    depth -= 1;
-                    if depth == 0 {
-                        i += 1;
-                        break;
-                    }
-                }
-                TokenKind::Eof => return false,
-                _ => {}
-            }
-            i += 1;
-        }
-        // Optional type suffix, then the variable name must follow.
-        self.type_suffix_then_ident(i)
-    }
-
-    /// Lookahead helper shared by the `starts_*_var_decl` predicates: from
-    /// token index `i`, skip an optional `[N]` array suffix and any number of
-    /// `*` pointer modifiers; `true` when an identifier follows. Does not
-    /// consume tokens.
-    fn type_suffix_then_ident(&self, mut i: usize) -> bool {
-        let kind_at = |i: usize| self.tokens.get(i).map(|t| &t.kind);
-        if matches!(kind_at(i), Some(TokenKind::OpenBracket))
-            && matches!(kind_at(i + 1), Some(TokenKind::Integer(_)))
-            && matches!(kind_at(i + 2), Some(TokenKind::CloseBracket))
-        {
-            i += 3;
-        }
-        while matches!(kind_at(i), Some(TokenKind::Asterisk)) {
-            i += 1;
-        }
-        matches!(kind_at(i), Some(TokenKind::Identifier(_)))
-    }
-
     // NOTE: parse_alloc is kept for backward compatibility with dynamic allocations
     // For preallocated arrays, use the type[size] syntax in variable declarations
     pub(crate) fn parse_alloc(&mut self) -> Result<Expression, ParserError> {
@@ -1338,289 +1025,6 @@ impl Parser {
         }
     }
 
-    /// The `.` was already consumed. Distinguishes `base.method(args)` (a
-    /// method call desugared to `FunctionCall` with mangled name `Type$method`)
-    /// from `base.field` (a `FieldAccess`).
-    fn parse_dot_postfix(&mut self, base: Expression) -> Result<Expression, ParserError> {
-        let pos = base.pos;
-        let name = self.parse_ident("field or method name")?;
-
-        // Method call only when `name` is actually a method of the base's type;
-        // otherwise (e.g. `.callback(` on a fn-pointer *field*) fall through to
-        // field access and let the postfix loop emit an indirect call.
-        if self.check(&TokenKind::OpenParen) && self.identifier_is_method_of_base(&base, &name) {
-            self.advance();
-            let args = self.parse_comma_separated(&TokenKind::CloseParen, Self::parse_expression)?;
-            return self.build_method_call(base, &name, args, pos);
-        }
-
-        // Enum variant value `EnumName.Variant`: `base` names a known enum, not
-        // shadowed by a local. Resolves to a compile-time constant (the
-        // variant's index); an unknown variant is a precise parse error.
-        if let ExprKind::Variable(var_name) = &base.kind
-            && let Some(id) = self.module.enum_id(var_name)
-            && self.symbol_table.lookup_variable(var_name).is_none()
-        {
-            self.check_enum_visibility(id, pos)?;
-            match self.module.enum_variant_index(id, &name) {
-                Some(idx) => {
-                    let ty = LangType::enum_type(id);
-                    return Ok(Expression::new(
-                        ExprKind::EnumValue {
-                            enum_id: id,
-                            value: idx as i64,
-                        },
-                        ty,
-                        pos,
-                    ));
-                }
-                None => {
-                    let enum_name = self.module.enum_info(id).name.clone();
-                    return Err(ParserError::UnknownVariant {
-                        enum_name,
-                        variant: name,
-                        pos,
-                    });
-                }
-            }
-        }
-
-        // Sum construction `SumName.Variant(args…)` / bare `SumName.Variant`:
-        // `base` names a known sum, not shadowed by a local. The variant is
-        // resolved (and arity checked) here, like enum variants; argument
-        // *types* are the checker's job.
-        if let ExprKind::Variable(var_name) = &base.kind
-            && let Some(id) = self.module.sum_id(var_name)
-            && self.symbol_table.lookup_variable(var_name).is_none()
-        {
-            self.check_sum_visibility(id, pos)?;
-            let sum_name = self.module.sum_info(id).name.clone();
-            let Some(idx) = self.module.sum_variant_index(id, &name) else {
-                return Err(ParserError::UnknownSumVariant {
-                    sum_name,
-                    variant: name,
-                    pos,
-                });
-            };
-            let field_count = self.module.sum_info(id).variants[idx].fields.len();
-            let ty = LangType::sum_type(id);
-            let variant = u32::try_from(idx).expect("variant index fits u32");
-
-            if self.match_token(&[TokenKind::OpenParen]) {
-                if field_count == 0 {
-                    return Err(ParserError::UnexpectedToken(
-                        format!(
-                            "variant '{name}' of sum '{sum_name}' carries no payload — construct it as a bare name: {sum_name}.{name}"
-                        ),
-                        pos,
-                    ));
-                }
-                let args =
-                    self.parse_comma_separated(&TokenKind::CloseParen, Self::parse_expression)?;
-                if args.len() != field_count {
-                    return Err(ParserError::ArgumentCountMismatch(
-                        format!("{sum_name}.{name}"),
-                        field_count,
-                        args.len(),
-                        pos,
-                    ));
-                }
-                return Ok(Expression::new(
-                    ExprKind::SumConstruct {
-                        sum_id: id,
-                        variant,
-                        args,
-                    },
-                    ty,
-                    pos,
-                ));
-            }
-            if field_count > 0 {
-                return Err(ParserError::UnexpectedToken(
-                    format!(
-                        "variant '{name}' of sum '{sum_name}' carries a payload — construct it with arguments: {sum_name}.{name}(…)"
-                    ),
-                    pos,
-                ));
-            }
-            return Ok(Expression::new(
-                ExprKind::SumConstruct {
-                    sum_id: id,
-                    variant,
-                    args: Vec::new(),
-                },
-                ty,
-                pos,
-            ));
-        }
-
-        // Static method as a function-pointer *value*: `Type.method` with no
-        // following call. Typed from the mangled function's *actual* signature
-        // — whose first parameter is already the receiver `Type*` — so the
-        // value is `fn(Type*, ...) -> R`. The bound form (`instance.method` as
-        // a value) is out of scope and falls through to field access.
-        if let ExprKind::Variable(var_name) = &base.kind
-            && let Some(id) = self.module.struct_id(var_name)
-            && self.symbol_table.lookup_variable(var_name).is_none()
-            && self.module.struct_info(id).methods.contains_key(&name)
-        {
-            self.check_struct_visibility(id, pos)?;
-            let type_name = self.module.struct_info(id).name.clone();
-            let mangled = crate::symbol::module::mangle_method(&type_name, &name);
-            let (params, return_type) = self.module.lookup_function(&mangled).map_or_else(
-                || (Vec::new(), LangType::VOID),
-                |f| {
-                    (
-                        f.params.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
-                        f.return_type,
-                    )
-                },
-            );
-            let fnptr_id = self.module.intern_fnptr(params, return_type);
-            let ty = LangType::fnptr_type(fnptr_id);
-            return Ok(Expression::new(ExprKind::FunctionRef(mangled), ty, pos));
-        }
-
-        let field_type = match base.expr_type.base {
-            TypeBase::Struct(id) => self
-                .module
-                .field(id, &name)
-                .map_or_else(|| LangType::VOID, |(_, f)| f.ty),
-            _ => LangType::VOID,
-        };
-
-        Ok(Expression::new(
-            ExprKind::FieldAccess {
-                base: Box::new(base),
-                field: name,
-            },
-            field_type,
-            pos,
-        ))
-    }
-
-    /// Build a method-call expression for `obj.method(args)` or
-    /// `Type.method(args)`. Resolves the mangled name (`Type$method`), picks
-    /// instance-vs-static, and autorefs value receivers.
-    fn build_method_call(
-        &mut self,
-        base: Expression,
-        method_name: &str,
-        args: Vec<Expression>,
-        pos: Position,
-    ) -> Result<Expression, ParserError> {
-        // Static call: `TypeName.method(args)` — `base` is `Variable(TypeName)`
-        // for a known struct *and* there is no local variable shadowing it.
-        if let ExprKind::Variable(var_name) = &base.kind
-            && let Some(id) = self.module.struct_id(var_name)
-            && self.symbol_table.lookup_variable(var_name).is_none()
-        {
-            self.check_struct_visibility(id, pos)?;
-            let type_name = self.module.struct_info(id).name.clone();
-            // Strict: the static-call form must resolve to a static method (one
-            // declared without `this`). An instance method declared `fn m(this,
-            // ...)` must be called as `obj.m(...)`, not `Type.m(&obj, ...)` —
-            // the two syntactic forms map cleanly to the two kinds.
-            if let Some(sig) = self.module.struct_info(id).methods.get(method_name)
-                && !sig.is_static
-            {
-                return Err(ParserError::MethodCallForm(
-                    format!(
-                        "'{type_name}.{method_name}' is an instance method; \
-                         call it as `<receiver>.{method_name}(...)`"
-                    ),
-                    pos,
-                ));
-            }
-            let mangled = crate::symbol::module::mangle_method(&type_name, method_name);
-            let return_type = self.module.lookup_function(&mangled).map_or_else(
-                || LangType::VOID,
-                |f| f.return_type,
-            );
-            return Ok(Expression::new(
-                ExprKind::FunctionCall {
-                    name: mangled,
-                    args,
-                },
-                return_type,
-                pos,
-            ));
-        }
-
-        // Instance call: `base` must be a type-struct value or pointer-to-struct.
-        let bt = base.expr_type;
-        let id = match bt.base {
-            TypeBase::Struct(id) => id,
-            _ => {
-                return Err(ParserError::TypeMismatch(
-                    "type-struct".to_string(),
-                    format!("{bt}"),
-                    pos,
-                ));
-            }
-        };
-        // A private type's methods are at most module-visible, however
-        // `public` the member itself is — so instance calls are gated on the
-        // type's module visibility exactly like naming it.
-        self.check_struct_visibility(id, pos)?;
-        let type_name = self.module.struct_info(id).name.clone();
-        // Strict: the instance-call form must resolve to an instance method.
-        // A static method (no `this`) must be invoked as `Type.method(...)`,
-        // not `obj.method(...)`.
-        if let Some(sig) = self.module.struct_info(id).methods.get(method_name)
-            && sig.is_static
-        {
-            return Err(ParserError::MethodCallForm(
-                format!(
-                    "'{type_name}.{method_name}' is a static method; \
-                     call it as `{type_name}.{method_name}(...)` without a receiver"
-                ),
-                pos,
-            ));
-        }
-        let mangled = crate::symbol::module::mangle_method(&type_name, method_name);
-        let return_type = self.module.lookup_function(&mangled).map_or_else(
-            || LangType::VOID,
-            |f| f.return_type,
-        );
-
-        // Receiver: autoref a value, pass a pointer as-is; deeper pointers fail.
-        let receiver = match bt.pointer_depth {
-            0 => {
-                let ref_ty = LangType {
-                    base: bt.base,
-                    size_bits: bt.size_bits,
-                    pointer_depth: 1,
-                    is_const: bt.is_const,
-                    array_size: None,
-                };
-                let base_pos = base.pos;
-                Expression::new(ExprKind::Reference(Box::new(base)), ref_ty, base_pos)
-            }
-            1 => base,
-            _ => {
-                return Err(ParserError::TypeMismatch(
-                    "type-struct or pointer-to-type-struct".to_string(),
-                    format!("{bt}"),
-                    pos,
-                ));
-            }
-        };
-
-        let mut all_args = Vec::with_capacity(args.len() + 1);
-        all_args.push(receiver);
-        all_args.extend(args);
-
-        Ok(Expression::new(
-            ExprKind::FunctionCall {
-                name: mangled,
-                args: all_args,
-            },
-            return_type,
-            pos,
-        ))
-    }
-
     /// Parse a struct literal body after the type name: `{ field = expr, ... }`.
     /// The opening brace has not yet been consumed.
     #[parse_rule]
@@ -1657,127 +1061,3 @@ impl Parser {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-
-    /// A parser over an empty token stream with a three-file module
-    /// registry: file 0 is the anonymous root module `""` (imports `mid`),
-    /// file 1 is `mid` (imports `hidden`), file 2 is `hidden` (imports
-    /// nothing).
-    fn parser_with_modules() -> Parser {
-        let modules = vec![
-            (0, String::new()),
-            (1, "mid".to_string()),
-            (2, "hidden".to_string()),
-        ];
-        let imports = HashMap::from([
-            (String::new(), vec!["mid".to_string()]),
-            ("mid".to_string(), vec!["hidden".to_string()]),
-            ("hidden".to_string(), Vec::new()),
-        ]);
-        let eof = Token::new(TokenKind::Eof, Position::new(0, 0), String::new());
-        Parser::new(vec![eof]).with_module_info(modules, imports)
-    }
-
-    /// A use-site position inside the file with `file_id`.
-    fn site(file_id: u32) -> Position {
-        Position::with_file(3, 7, file_id)
-    }
-
-    #[test]
-    fn same_module_references_are_always_visible() {
-        let p = parser_with_modules();
-        for file in 0..3 {
-            assert!(p
-                .check_import_visibility("function", "f", file, site(file))
-                .is_ok());
-        }
-    }
-
-    #[test]
-    fn directly_imported_modules_are_visible() {
-        let p = parser_with_modules();
-        // The root imports `mid`; `mid` imports `hidden`.
-        assert!(p
-            .check_import_visibility("function", "f", 1, site(0))
-            .is_ok());
-        assert!(p
-            .check_import_visibility("function", "f", 2, site(1))
-            .is_ok());
-    }
-
-    #[test]
-    fn transitive_imports_are_not_visible() {
-        let p = parser_with_modules();
-        let err = p
-            .check_import_visibility("function", "gcd_u64", 2, site(0))
-            .unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "function 'gcd_u64' is defined in module 'hidden', \
-             which the root module does not import at 3:7"
-        );
-        assert_eq!(err.position(), Some(site(0)));
-    }
-
-    #[test]
-    fn nothing_imports_the_root_module() {
-        let p = parser_with_modules();
-        let err = p
-            .check_import_visibility("global variable", "counter", 0, site(1))
-            .unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "global variable 'counter' is defined in the root module, \
-             which module 'mid' does not import at 3:7"
-        );
-    }
-
-    #[test]
-    fn importing_does_not_grant_visibility_in_reverse() {
-        let p = parser_with_modules();
-        // `mid` imports `hidden` — `hidden` must not see `mid`.
-        assert!(p
-            .check_import_visibility("function", "f", 1, site(2))
-            .is_err());
-    }
-
-    #[test]
-    fn without_module_info_every_file_is_the_root_module() {
-        let eof = Token::new(TokenKind::Eof, Position::new(0, 0), String::new());
-        let p = Parser::new(vec![eof]);
-        assert!(p
-            .check_import_visibility("function", "f", 4, site(9))
-            .is_ok());
-    }
-
-    #[test]
-    fn private_type_is_module_visible_only() {
-        use crate::symbol::module::Visibility;
-        let mut p = parser_with_modules();
-        let id = p.module.intern_struct("Secret", 1, Visibility::Private);
-        // Inside its own module the type is freely usable.
-        assert!(p.check_struct_visibility(id, site(1)).is_ok());
-        // From an importing module, privacy blocks it.
-        let err = p.check_struct_visibility(id, site(0)).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "type-struct 'Secret' is private to module 'mid' and cannot be used from \
-             the root module — declare it `public type` to export it at 3:7"
-        );
-        assert_eq!(err.position(), Some(site(0)));
-    }
-
-    #[test]
-    fn public_type_is_visible_to_importers_only() {
-        use crate::symbol::module::Visibility;
-        let mut p = parser_with_modules();
-        let id = p.module.intern_struct("Pair", 1, Visibility::Public);
-        // The root imports `mid`, so the exported type is visible there.
-        assert!(p.check_struct_visibility(id, site(0)).is_ok());
-        // `public` does not bypass the import rule: `hidden` does not import `mid`.
-        assert!(p.check_struct_visibility(id, site(2)).is_err());
-    }
-}

@@ -1,4 +1,10 @@
-//! Sum-type storage layout.
+//! Sum-type storage layout, plus the construction and pattern-match codegen
+//! that reads/writes it (`SumConstruct`, both `is` forms, and — via
+//! `copy_sum_payload_field` — `switch`'s binder copies in `statements.rs`).
+//! `StructLiteral` stays in `structs.rs`/inline in `expressions.rs` instead
+//! of moving here alongside it: a struct literal builds its aggregate
+//! directly with `insertvalue` and never touches this module's
+//! payload-offset machinery, so there's nothing to share.
 //!
 //! A sum value is `{ i32 tag, [k x iN] }`: the payload array's element width N
 //! is the largest payload alignment, and **every** variant's payload starts at
@@ -13,11 +19,12 @@
 //! alignment is ≥ every payload field's.
 
 use inkwell::types::BasicTypeEnum;
+use inkwell::values::{BasicValueEnum, IntValue, PointerValue};
 
 use crate::codegen::generator::CodeGenerator;
 use crate::codegen::CodegenError;
 use crate::lexer::{LangType, Position, TypeBase};
-use crate::parser::Program;
+use crate::parser::{Expression, Program};
 use crate::symbol::module::SumInfo;
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -171,6 +178,186 @@ impl<'ctx> CodeGenerator<'ctx> {
             ]
         };
         self.sum_types[&info.id].set_body(&body, false);
+        Ok(())
+    }
+
+    // ─── Construction / pattern-match ─────────────────────────────────────
+
+    /// Shared spine of both `is` forms: evaluate the sum scrutinee once into
+    /// an entry-block slot, load the tag, compare against the variant's
+    /// constant. Returns the `i1` and the slot (the binding form GEPs
+    /// payloads out of it).
+    pub(crate) fn emit_sum_probe(
+        &mut self,
+        scrutinee: &Expression,
+        sum_id: u32,
+        variant: u32,
+        pos: Position,
+    ) -> Result<(IntValue<'ctx>, PointerValue<'ctx>), CodegenError> {
+        let function = self
+            .current_function
+            .ok_or(CodegenError::UnexpectedStatement(pos))?;
+        let storage = *self
+            .sum_types
+            .get(&sum_id)
+            .ok_or_else(|| CodegenError::TypeError(format!("unregistered sum id {sum_id}"), pos))?;
+        let value = self.generate_expression(scrutinee)?;
+        let slot = self.build_entry_alloca(function, storage.into(), "is.scrut", pos)?;
+        self.builder.build_store(slot, value)?;
+        let tag_ptr = self.builder.build_struct_gep(storage, slot, 0, "is.tag")?;
+        let tag = self
+            .builder
+            .build_load(self.context.i32_type(), tag_ptr, "tag")?
+            .into_int_value();
+        let matched = self.builder.build_int_compare(
+            inkwell::IntPredicate::EQ,
+            tag,
+            self.context.i32_type().const_int(u64::from(variant), false),
+            "is",
+        )?;
+        Ok((matched, slot))
+    }
+
+    /// `SumName.Variant(args…)`: write the tag, then each payload field at
+    /// the variant's bare payload struct offset (see the module doc for why
+    /// `insertvalue` on the storage type can't be used here).
+    pub(crate) fn emit_sum_construct(
+        &mut self,
+        sum_id: u32,
+        variant: u32,
+        args: &[Expression],
+        pos: Position,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let storage = *self
+            .sum_types
+            .get(&sum_id)
+            .ok_or_else(|| CodegenError::TypeError(format!("unregistered sum id {sum_id}"), pos))?;
+        let tmp = self.builder.build_alloca(storage, "sum.tmp")?;
+        let tag_ptr = self.builder.build_struct_gep(storage, tmp, 0, "sum.tag")?;
+        self.builder.build_store(
+            tag_ptr,
+            self.context.i32_type().const_int(u64::from(variant), false),
+        )?;
+        if !args.is_empty() {
+            let payload_ptr = self.builder.build_struct_gep(storage, tmp, 1, "sum.payload")?;
+            let payload_ty = self
+                .sum_payload_type(sum_id, variant as usize)
+                .map_err(|e| e.with_pos(pos))?
+                .expect("variant with args has a payload type");
+            let field_tys = self.sum_variant_fields[&sum_id][variant as usize].clone();
+            for (i, (arg, fty)) in args.iter().zip(field_tys).enumerate() {
+                let fptr = self.builder.build_struct_gep(
+                    payload_ty,
+                    payload_ptr,
+                    u32::try_from(i).expect("payload field index fits u32"),
+                    "sum.field",
+                )?;
+                if fty.is_array() {
+                    // Array payloads arrive decayed to a pointer — copy the
+                    // elements into the payload slot.
+                    let src = self.generate_coerced_value(arg, None)?.into_pointer_value();
+                    self.copy_sum_payload_field(fptr, src, fty, arg.pos)?;
+                } else {
+                    let val = self.generate_coerced_value(arg, Some(&fty))?;
+                    self.builder.build_store(fptr, val)?;
+                }
+            }
+        }
+        Ok(self.builder.build_load(storage, tmp, "sum.val")?)
+    }
+
+    /// `scrutinee is Variant(a, _, b)`: probe, then — only when at least one
+    /// binder is named — copy the matched fields into fresh locals on the
+    /// success edge.
+    pub(crate) fn emit_is_binding(
+        &mut self,
+        scrutinee: &Expression,
+        sum_id: u32,
+        variant: u32,
+        binders: &[Option<(String, LangType)>],
+        pos: Position,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let function = self
+            .current_function
+            .ok_or(CodegenError::UnexpectedStatement(pos))?;
+        let (matched, slot) = self.emit_sum_probe(scrutinee, sum_id, variant, pos)?;
+
+        // Binder allocas exist unconditionally (entry block); the copies run
+        // only on the matched edge, so a later `&&`-conjunct — which
+        // short-circuiting guarantees only evaluates after a match — reads
+        // initialized locals, and the success block does too.
+        if binders.iter().any(Option::is_some) {
+            let bind_bb = self.context.append_basic_block(function, "is.bind");
+            let cont_bb = self.context.append_basic_block(function, "is.cont");
+            let storage = self.sum_types[&sum_id];
+            let payload_ty = self
+                .sum_payload_type(sum_id, variant as usize)
+                .map_err(|e| e.with_pos(pos))?
+                .expect("binding pattern on a payload-less variant");
+
+            let mut copies = Vec::new();
+            for (i, binder) in binders.iter().enumerate() {
+                let Some((name, field_ty)) = binder else { continue };
+                let llvm_ty = if field_ty.is_array() {
+                    self.lang_type_to_llvm_array(field_ty)
+                        .map_err(|e| e.with_pos(pos))?
+                        .into()
+                } else {
+                    self.lang_type_to_llvm(field_ty).map_err(|e| e.with_pos(pos))?
+                };
+                let alloca = self.build_entry_alloca(function, llvm_ty, name, pos)?;
+                self.add_variable(name.clone(), alloca, llvm_ty, *field_ty, None);
+                copies.push((i, alloca, *field_ty));
+            }
+
+            self.builder.build_conditional_branch(matched, bind_bb, cont_bb)?;
+            self.builder.position_at_end(bind_bb);
+            let payload_ptr = self.builder.build_struct_gep(storage, slot, 1, "is.payload")?;
+            for (i, alloca, field_ty) in copies {
+                let field_ptr = self.builder.build_struct_gep(
+                    payload_ty,
+                    payload_ptr,
+                    u32::try_from(i).expect("payload field index fits u32"),
+                    "is.field",
+                )?;
+                self.copy_sum_payload_field(alloca, field_ptr, field_ty, pos)?;
+            }
+            self.builder.build_unconditional_branch(cont_bb)?;
+            self.builder.position_at_end(cont_bb);
+        }
+        Ok(matched.into())
+    }
+
+    /// Copy one payload field from `src` to `dst`: a `build_memcpy` for
+    /// arrays (which never fit in a register), a load+store for everything
+    /// else. Shared by sum construction, `is` binding, and `switch`'s
+    /// binder-copy loop in `statements.rs` — all three GEP a field out of (or
+    /// into) a sum's payload the same way.
+    pub(crate) fn copy_sum_payload_field(
+        &mut self,
+        dst: PointerValue<'ctx>,
+        src: PointerValue<'ctx>,
+        field_ty: LangType,
+        pos: Position,
+    ) -> Result<(), CodegenError> {
+        if field_ty.is_array() {
+            let arr_ty = self
+                .lang_type_to_llvm_array(&field_ty)
+                .map_err(|e| e.with_pos(pos))?;
+            let bytes = self.sizeof_lang_type(&field_ty, pos)?;
+            let align = self.target_machine.get_target_data().get_abi_alignment(&arr_ty);
+            self.builder.build_memcpy(
+                dst,
+                align,
+                src,
+                align,
+                self.context.i64_type().const_int(bytes, false),
+            )?;
+        } else {
+            let llvm_ty = self.lang_type_to_llvm(&field_ty).map_err(|e| e.with_pos(pos))?;
+            let v = self.builder.build_load(llvm_ty, src, "field")?;
+            self.builder.build_store(dst, v)?;
+        }
         Ok(())
     }
 }

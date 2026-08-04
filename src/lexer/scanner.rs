@@ -98,6 +98,14 @@ impl Scanner {
         }
     }
 
+    fn assign_or(&mut self, plain: TokenKind, compound: TokenKind) -> TokenKind {
+        if self.match_char('=') {
+            compound
+        } else {
+            plain
+        }
+    }
+
     fn skip_whitespace(&mut self) -> Result<(), LexerError> {
         while let Some(ch) = self.peek() {
             match ch {
@@ -189,92 +197,44 @@ impl Scanner {
             }
             '<' => {
                 if self.match_char('<') {
-                    if self.match_char('=') {
-                        TokenKind::LeftShiftAssign
-                    } else {
-                        TokenKind::LeftShift
-                    }
-                } else if self.match_char('=') {
-                    TokenKind::LessEqual
+                    self.assign_or(TokenKind::LeftShift, TokenKind::LeftShiftAssign)
                 } else {
-                    TokenKind::Less
+                    self.assign_or(TokenKind::Less, TokenKind::LessEqual)
                 }
             }
             '>' => {
                 if self.match_char('>') {
-                    if self.match_char('=') {
-                        TokenKind::RightShiftAssign
-                    } else {
-                        TokenKind::RightShift
-                    }
-                } else if self.match_char('=') {
-                    TokenKind::GreaterEqual
+                    self.assign_or(TokenKind::RightShift, TokenKind::RightShiftAssign)
                 } else {
-                    TokenKind::Greater
+                    self.assign_or(TokenKind::Greater, TokenKind::GreaterEqual)
                 }
             }
             '-' => {
                 if self.match_char('>') {
                     TokenKind::Arrow
-                } else if self.match_char('=') {
-                    TokenKind::MinusAssign
                 } else {
-                    TokenKind::Minus
+                    self.assign_or(TokenKind::Minus, TokenKind::MinusAssign)
                 }
             }
-            '+' => {
-                if self.match_char('=') {
-                    TokenKind::PlusAssign
-                } else {
-                    TokenKind::Plus
-                }
-            }
-            '*' => {
-                if self.match_char('=') {
-                    TokenKind::MultAssign
-                } else {
-                    TokenKind::Asterisk
-                }
-            }
-            '/' => {
-                if self.match_char('=') {
-                    TokenKind::DivAssign
-                } else {
-                    TokenKind::Slash
-                }
-            }
-            '%' => {
-                if self.match_char('=') {
-                    TokenKind::ModAssign
-                } else {
-                    TokenKind::Percent
-                }
-            }
+            '+' => self.assign_or(TokenKind::Plus, TokenKind::PlusAssign),
+            '*' => self.assign_or(TokenKind::Asterisk, TokenKind::MultAssign),
+            '/' => self.assign_or(TokenKind::Slash, TokenKind::DivAssign),
+            '%' => self.assign_or(TokenKind::Percent, TokenKind::ModAssign),
             '&' => {
                 if self.match_char('&') {
                     TokenKind::LogicalAnd
-                } else if self.match_char('=') {
-                    TokenKind::AndAssign
                 } else {
-                    TokenKind::Ampersand
+                    self.assign_or(TokenKind::Ampersand, TokenKind::AndAssign)
                 }
             }
             '|' => {
                 if self.match_char('|') {
                     TokenKind::LogicalOr
-                } else if self.match_char('=') {
-                    TokenKind::OrAssign
                 } else {
-                    TokenKind::Pipe
+                    self.assign_or(TokenKind::Pipe, TokenKind::OrAssign)
                 }
             }
-            '^' => {
-                if self.match_char('=') {
-                    TokenKind::XorAssign
-                } else {
-                    TokenKind::Caret
-                }
-            }
+            '^' => self.assign_or(TokenKind::Caret, TokenKind::XorAssign),
 
             '"' => return self.scan_string_literal(start_pos),
             '0'..='9' => return self.scan_number(ch, start_idx, start_pos),

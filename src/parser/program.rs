@@ -44,6 +44,7 @@ impl Parser {
     /// parsed in pass 1 and only see earlier definitions.
     #[parse_rule]
     fn do_parse_program(&mut self) -> Result<crate::parser::Program, ParserError> {
+        use crate::parser::declarations::TopLevelItem;
         use crate::parser::Program;
 
         let mut functions = Vec::new();
@@ -64,116 +65,10 @@ impl Parser {
             let kind = self.parse_kind_modifier()?;
             let is_extern = matches!(&kind, Some((Keyword::Extern, _)));
 
-            // `extern` may be `public` (nameable from importers) but never
-            // `export`: there is no local symbol here to give external linkage.
-            if is_extern && export {
-                return Err(ParserError::UnexpectedToken(
-                    "extern functions cannot be exported — they are defined elsewhere, so there is no local symbol to give external linkage".to_string(),
-                    vis_pos,
-                ));
-            }
-
-            // `public` = module visibility (functions, globals, type-structs).
-            // `export` = external linkage, which only a symbol with a linked
-            // object-file symbol can carry — never a type or alias.
-            let defines_a_fn = matches!(&kind, Some((Keyword::Asm, _) | (Keyword::Naked, _)))
-                || (self.check_keyword(&Keyword::Fn) && !self.starts_fnptr_var_decl());
-            let defines_a_type = self.check_keyword(&Keyword::Type)
-                || self.check_keyword(&Keyword::Enum)
-                || self.check_keyword(&Keyword::Sum);
-            let defines_a_global = matches!(
-                self.peek().kind,
-                TokenKind::LangType(_) | TokenKind::Identifier(_)
-            ) || self.starts_fnptr_var_decl()
-                || self.starts_grouped_var_decl()
-                // `const <named-type>` global (`const Point* g`): a bare `const`
-                // keyword survives the scanner only for non-scalar bases, and at
-                // top level (after any `public`/`export`) it begins a global.
-                || self.check_keyword(&Keyword::Const);
-
-            if vis == Visibility::Public && !defines_a_fn && !defines_a_type && !defines_a_global {
-                return Err(ParserError::UnexpectedToken(
-                    "public can only be used with functions, global variables, or type definitions"
-                        .to_string(),
-                    vis_pos,
-                ));
-            }
-            if export && !defines_a_fn && !defines_a_global {
-                return Err(ParserError::UnexpectedToken(
-                    "export can only be used with functions or global variables — a type, enum, sum or alias has no linked symbol"
-                        .to_string(),
-                    vis_pos,
-                ));
-            }
-
-            if let Some((Keyword::Asm, asm_pos)) = &kind {
-                let func = self.parse_asm_function(*asm_pos, vis, export)?;
-                functions.push(func);
-            } else if let Some((Keyword::Naked, naked_pos)) = &kind {
-                let func = self.parse_naked_function(*naked_pos, vis, export)?;
-                functions.push(func);
-            }
-            // `fn ident(...)` is a definition; `fn(...)` is a function-pointer
-            // -typed global.
-            else if self.check_keyword(&Keyword::Fn) && !self.starts_fnptr_var_decl() {
-                let func = self.parse_function(is_extern, vis, export)?;
-                functions.push(func);
-            } else if self.check_keyword(&Keyword::Alias) {
-                if is_extern {
-                    return Err(ParserError::UnexpectedToken(
-                        "extern can only be used with functions".to_string(),
-                        self.peek().pos,
-                    ));
-                }
-                self.parse_type_alias()?;
-            } else if self.check_keyword(&Keyword::Type) {
-                if is_extern {
-                    return Err(ParserError::UnexpectedToken(
-                        "extern can only be used with functions".to_string(),
-                        self.peek().pos,
-                    ));
-                }
-                let methods = self.parse_struct_def()?;
-                functions.extend(methods);
-            } else if self.check_keyword(&Keyword::Enum) {
-                if is_extern {
-                    return Err(ParserError::UnexpectedToken(
-                        "extern can only be used with functions".to_string(),
-                        self.peek().pos,
-                    ));
-                }
-                self.parse_enum_def()?;
-            } else if self.check_keyword(&Keyword::Sum) {
-                if is_extern {
-                    return Err(ParserError::UnexpectedToken(
-                        "extern can only be used with functions".to_string(),
-                        self.peek().pos,
-                    ));
-                }
-                self.parse_sum_def()?;
-            } else if matches!(
-                self.peek().kind,
-                TokenKind::LangType(_) | TokenKind::Identifier(_)
-            ) || self.starts_fnptr_var_decl()
-                || self.starts_grouped_var_decl()
-                || self.check_keyword(&Keyword::Const)
-            {
-                // A leading built-in type, named type (alias / type-struct),
-                // function-pointer type, parenthesised group, or `const`
-                // (over a named base) begins a global variable declaration.
-                if is_extern {
-                    return Err(ParserError::UnexpectedToken(
-                        "extern can only be used with functions".to_string(),
-                        self.peek().pos,
-                    ));
-                }
-                let global = self.parse_global_var(vis, export)?;
-                global_vars.push(global);
-            } else {
-                return Err(ParserError::UnexpectedToken(
-                    format!("{}", self.peek().kind),
-                    self.peek().pos,
-                ));
+            match self.parse_top_level_item(vis, export, is_extern, kind, vis_pos)? {
+                TopLevelItem::Fns(fns) => functions.extend(fns),
+                TopLevelItem::Global(global) => global_vars.push(global),
+                TopLevelItem::None => {}
             }
 
             skip_nl!();
@@ -452,7 +347,7 @@ impl Parser {
     /// and report the errors the prescan stayed silent about (duplicates,
     /// unresolvable targets, cycles).
     #[parse_rule]
-    fn parse_type_alias(&mut self) -> Result<(), ParserError> {
+    pub(crate) fn parse_type_alias(&mut self) -> Result<(), ParserError> {
         let site = self.current;
         let pos = pos!();
         kw!(Alias);

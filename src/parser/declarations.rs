@@ -1,10 +1,136 @@
-use crate::lexer::{Keyword, LangType, TokenKind, TypeBase};
+use crate::lexer::{Keyword, LangType, Position, TokenKind, TypeBase};
 use crate::parser::expressions::Parser;
-use crate::parser::{ExprKind, Expression, ParserError};
+use crate::parser::{ExprKind, Expression, Function, GlobalVar, ParserError};
 use crate::symbol::module::Visibility;
 use aspect_macros::parse_rule;
 
+/// Outcome of parsing one top-level declaration: the free functions/methods it
+/// defined (a struct def can yield several methods at once), the single global
+/// variable it defined, or neither (alias/enum/sum definitions add only to the
+/// symbol table).
+pub(crate) enum TopLevelItem {
+    Fns(Vec<Function>),
+    Global(GlobalVar),
+    None,
+}
+
+/// `extern` pairs only with function-shaped declarations; every other
+/// top-level kind rejects it at the same "extern can only be used with
+/// functions" diagnostic.
+fn reject_extern(is_extern: bool, pos: Position) -> Result<(), ParserError> {
+    if is_extern {
+        return Err(ParserError::UnexpectedToken(
+            "extern can only be used with functions".to_string(),
+            pos,
+        ));
+    }
+    Ok(())
+}
+
 impl Parser {
+    /// Classify, validate, and dispatch one top-level declaration — the body
+    /// of `do_parse_program`'s loop. `kind`/`vis_pos` come from the modifier
+    /// scan the caller already ran.
+    pub(crate) fn parse_top_level_item(
+        &mut self,
+        vis: Visibility,
+        export: bool,
+        is_extern: bool,
+        kind: Option<(Keyword, Position)>,
+        vis_pos: Position,
+    ) -> Result<TopLevelItem, ParserError> {
+        // `extern` may be `public` (nameable from importers) but never
+        // `export`: there is no local symbol here to give external linkage.
+        if is_extern && export {
+            return Err(ParserError::UnexpectedToken(
+                "extern functions cannot be exported — they are defined elsewhere, so there is no local symbol to give external linkage".to_string(),
+                vis_pos,
+            ));
+        }
+
+        // `public` = module visibility (functions, globals, type-structs).
+        // `export` = external linkage, which only a symbol with a linked
+        // object-file symbol can carry — never a type or alias.
+        let defines_a_fn = matches!(&kind, Some((Keyword::Asm, _) | (Keyword::Naked, _)))
+            || (self.check_keyword(&Keyword::Fn) && !self.starts_fnptr_var_decl());
+        let defines_a_type = self.check_keyword(&Keyword::Type)
+            || self.check_keyword(&Keyword::Enum)
+            || self.check_keyword(&Keyword::Sum);
+        let defines_a_global = matches!(
+            self.peek().kind,
+            TokenKind::LangType(_) | TokenKind::Identifier(_)
+        ) || self.starts_fnptr_var_decl()
+            || self.starts_grouped_var_decl()
+            // `const <named-type>` global (`const Point* g`): a bare `const`
+            // keyword survives the scanner only for non-scalar bases, and at
+            // top level (after any `public`/`export`) it begins a global.
+            || self.check_keyword(&Keyword::Const);
+
+        if vis == Visibility::Public && !defines_a_fn && !defines_a_type && !defines_a_global {
+            return Err(ParserError::UnexpectedToken(
+                "public can only be used with functions, global variables, or type definitions"
+                    .to_string(),
+                vis_pos,
+            ));
+        }
+        if export && !defines_a_fn && !defines_a_global {
+            return Err(ParserError::UnexpectedToken(
+                "export can only be used with functions or global variables — a type, enum, sum or alias has no linked symbol"
+                    .to_string(),
+                vis_pos,
+            ));
+        }
+
+        if let Some((Keyword::Asm, asm_pos)) = &kind {
+            let func = self.parse_asm_function(*asm_pos, vis, export)?;
+            Ok(TopLevelItem::Fns(vec![func]))
+        } else if let Some((Keyword::Naked, naked_pos)) = &kind {
+            let func = self.parse_naked_function(*naked_pos, vis, export)?;
+            Ok(TopLevelItem::Fns(vec![func]))
+        }
+        // `fn ident(...)` is a definition; `fn(...)` is a function-pointer
+        // -typed global.
+        else if self.check_keyword(&Keyword::Fn) && !self.starts_fnptr_var_decl() {
+            let func = self.parse_function(is_extern, vis, export)?;
+            Ok(TopLevelItem::Fns(vec![func]))
+        } else if self.check_keyword(&Keyword::Alias) {
+            reject_extern(is_extern, self.peek().pos)?;
+            self.parse_type_alias()?;
+            Ok(TopLevelItem::None)
+        } else if self.check_keyword(&Keyword::Type) {
+            reject_extern(is_extern, self.peek().pos)?;
+            let methods = self.parse_struct_def()?;
+            Ok(TopLevelItem::Fns(methods))
+        } else if self.check_keyword(&Keyword::Enum) {
+            reject_extern(is_extern, self.peek().pos)?;
+            self.parse_enum_def()?;
+            Ok(TopLevelItem::None)
+        } else if self.check_keyword(&Keyword::Sum) {
+            reject_extern(is_extern, self.peek().pos)?;
+            self.parse_sum_def()?;
+            Ok(TopLevelItem::None)
+        } else if matches!(
+            self.peek().kind,
+            TokenKind::LangType(_) | TokenKind::Identifier(_)
+        ) || self.starts_fnptr_var_decl()
+            || self.starts_grouped_var_decl()
+            || self.check_keyword(&Keyword::Const)
+        {
+            // A leading built-in type, named type (alias / type-struct),
+            // function-pointer type, parenthesised group, or `const`
+            // (over a named base) begins a global variable declaration.
+            reject_extern(is_extern, self.peek().pos)?;
+            let global = self.parse_global_var(vis, export)?;
+            Ok(TopLevelItem::Global(global))
+        } else {
+            Err(ParserError::UnexpectedToken(
+                format!("{}", self.peek().kind),
+                self.peek().pos,
+            ))
+        }
+    }
+
+
     /// Register a function in the module symbol table, mapping a duplicate or
     /// signature clash to a positioned error. `has_body` is `!is_extern` (only
     /// `extern` declarations lack a body); shared by the fn/asm/naked/method
@@ -289,79 +415,9 @@ impl Parser {
     /// the cycle. Runs once after every layout is final, pushing one error per
     /// distinct cycle-closing type.
     pub(crate) fn check_byvalue_containment_cycles(&mut self) {
-        use crate::symbol::module::ModuleSymbols;
-        use std::collections::HashMap;
+        use crate::parser::cycles::{find_byvalue_cycles, Node};
 
-        #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-        enum Node {
-            Struct(u32),
-            Sum(u32),
-        }
-
-        fn edges(module: &ModuleSymbols, node: Node) -> Vec<Node> {
-            let field_types: Vec<LangType> = match node {
-                Node::Struct(id) => module
-                    .struct_info(id)
-                    .fields
-                    .iter()
-                    .map(|f| f.ty)
-                    .collect(),
-                Node::Sum(id) => module
-                    .sum_info(id)
-                    .variants
-                    .iter()
-                    .flat_map(|v| v.fields.iter().map(|(_, ty)| *ty))
-                    .collect(),
-            };
-            field_types
-                .into_iter()
-                .filter(|ty| ty.pointer_depth == 0)
-                .filter_map(|ty| match ty.base {
-                    TypeBase::Struct(id) => Some(Node::Struct(id)),
-                    TypeBase::Sum(id) => Some(Node::Sum(id)),
-                    _ => None,
-                })
-                .collect()
-        }
-
-        // Colors: absent = unvisited, false = on the current DFS path (gray),
-        // true = fully explored (black). A gray re-entry closes a cycle.
-        fn visit(
-            module: &ModuleSymbols,
-            colors: &mut HashMap<Node, bool>,
-            cyclic: &mut Vec<Node>,
-            node: Node,
-        ) {
-            match colors.get(&node) {
-                Some(false) => {
-                    if !cyclic.contains(&node) {
-                        cyclic.push(node);
-                    }
-                    return;
-                }
-                Some(true) => return,
-                None => {}
-            }
-            colors.insert(node, false);
-            for next in edges(module, node) {
-                visit(module, colors, cyclic, next);
-            }
-            colors.insert(node, true);
-        }
-
-        let mut colors = HashMap::new();
-        let mut cyclic = Vec::new();
-        let roots: Vec<Node> = self
-            .module
-            .structs()
-            .map(|s| Node::Struct(s.id))
-            .chain(self.module.sums().map(|s| Node::Sum(s.id)))
-            .collect();
-        for root in roots {
-            visit(&self.module, &mut colors, &mut cyclic, root);
-        }
-
-        for node in cyclic {
+        for node in find_byvalue_cycles(&self.module) {
             let (name, pos) = match node {
                 Node::Struct(id) => (
                     self.module.struct_info(id).name.clone(),
@@ -374,7 +430,7 @@ impl Parser {
             };
             self.errors.push(ParserError::RecursiveByValue(
                 name,
-                pos.unwrap_or_else(|| crate::lexer::Position::new(0, 0)),
+                pos.unwrap_or_else(|| Position::new(0, 0)),
             ));
         }
     }

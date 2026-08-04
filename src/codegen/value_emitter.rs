@@ -8,8 +8,8 @@
 use inkwell::{
     builder::Builder,
     context::Context,
-    types::BasicTypeEnum,
-    values::{BasicValueEnum, FloatValue, IntValue},
+    types::{BasicTypeEnum, FloatType, IntType, PointerType},
+    values::{BasicValueEnum, FloatValue, IntValue, PointerValue},
 };
 
 use crate::{
@@ -271,93 +271,47 @@ impl<'ctx> ValueEmitter<'ctx> for RuntimeEmitter<'_, 'ctx> {
         let target_is_int = matches!(target_llvm, BasicTypeEnum::IntType(_));
 
         if target_is_pointer {
-            return if src_lang.pointer_depth == 0 {
-                Ok(self
-                    .builder
-                    .build_int_to_ptr(
-                        value.into_int_value(),
-                        target_llvm.into_pointer_type(),
-                        "inttoptr",
-                    )?
-                    .into())
-            } else {
-                Ok(self
-                    .builder
-                    .build_pointer_cast(
-                        value.into_pointer_value(),
-                        target_llvm.into_pointer_type(),
-                        "ptrcast",
-                    )?
-                    .into())
-            };
+            return runtime_cast_to_pointer(
+                self.builder,
+                value,
+                target_llvm.into_pointer_type(),
+                src_lang,
+            );
         }
 
         if target_is_float && value.is_int_value() {
-            let int_val = value.into_int_value();
-            let is_signed = matches!(src_lang.base, TypeBase::SInt);
-            return Ok(if is_signed {
-                self.builder
-                    .build_signed_int_to_float(int_val, target_llvm.into_float_type(), "sitofp")?
-                    .into()
-            } else {
-                self.builder
-                    .build_unsigned_int_to_float(int_val, target_llvm.into_float_type(), "uitofp")?
-                    .into()
-            });
+            return runtime_cast_int_to_float(
+                self.builder,
+                value.into_int_value(),
+                target_llvm.into_float_type(),
+                src_lang,
+            );
         }
 
         if target_is_int && value.is_float_value() {
-            let float_val = value.into_float_value();
-            let target_int_type = target_llvm.into_int_type();
-            let target_signed = matches!(dst_lang.base, TypeBase::SInt);
-            return Ok(if target_signed {
-                self.builder
-                    .build_float_to_signed_int(float_val, target_int_type, "fptosi")?
-                    .into()
-            } else {
-                self.builder
-                    .build_float_to_unsigned_int(float_val, target_int_type, "fptoui")?
-                    .into()
-            });
+            return runtime_cast_float_to_int(
+                self.builder,
+                value.into_float_value(),
+                target_llvm.into_int_type(),
+                dst_lang,
+            );
         }
 
         if target_is_int && value.is_pointer_value() {
-            return Ok(self
-                .builder
-                .build_ptr_to_int(
-                    value.into_pointer_value(),
-                    target_llvm.into_int_type(),
-                    "ptrtoint",
-                )?
-                .into());
+            return runtime_cast_ptr_to_int(
+                self.builder,
+                value.into_pointer_value(),
+                target_llvm.into_int_type(),
+            );
         }
 
         if target_is_int && value.is_int_value() {
-            let int_val = value.into_int_value();
-            let target_int_type = target_llvm.into_int_type();
-            let source_bits = int_val.get_type().get_bit_width();
-            let target_bits = target_int_type.get_bit_width();
-            let is_signed = matches!(src_lang.base, TypeBase::SInt);
-
-            return match target_bits.cmp(&source_bits) {
-                std::cmp::Ordering::Greater => {
-                    let use_zext = source_bits == 1 || !is_signed;
-                    Ok(if use_zext {
-                        self.builder
-                            .build_int_z_extend(int_val, target_int_type, "zext")?
-                            .into()
-                    } else {
-                        self.builder
-                            .build_int_s_extend(int_val, target_int_type, "sext")?
-                            .into()
-                    })
-                }
-                std::cmp::Ordering::Less => Ok(self
-                    .builder
-                    .build_int_truncate(int_val, target_int_type, "trunc")?
-                    .into()),
-                std::cmp::Ordering::Equal => Ok(value),
-            };
+            return runtime_cast_int_resize(
+                self.builder,
+                value.into_int_value(),
+                target_llvm.into_int_type(),
+                src_lang,
+            );
         }
 
         Ok(value)
@@ -379,6 +333,99 @@ impl<'ctx> ValueEmitter<'ctx> for RuntimeEmitter<'_, 'ctx> {
         b: FloatValue<'ctx>,
     ) -> Result<(FloatValue<'ctx>, FloatValue<'ctx>), CodegenError> {
         Ok(widen_floats_to_match(self.context, self.builder, a, b)?)
+    }
+}
+
+fn runtime_cast_to_pointer<'ctx>(
+    builder: &Builder<'ctx>,
+    value: BasicValueEnum<'ctx>,
+    target_ptr: PointerType<'ctx>,
+    src_lang: &LangType,
+) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+    if src_lang.pointer_depth == 0 {
+        Ok(builder
+            .build_int_to_ptr(value.into_int_value(), target_ptr, "inttoptr")?
+            .into())
+    } else {
+        Ok(builder
+            .build_pointer_cast(value.into_pointer_value(), target_ptr, "ptrcast")?
+            .into())
+    }
+}
+
+fn runtime_cast_int_to_float<'ctx>(
+    builder: &Builder<'ctx>,
+    int_val: IntValue<'ctx>,
+    target_float: FloatType<'ctx>,
+    src_lang: &LangType,
+) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+    let is_signed = matches!(src_lang.base, TypeBase::SInt);
+    Ok(if is_signed {
+        builder
+            .build_signed_int_to_float(int_val, target_float, "sitofp")?
+            .into()
+    } else {
+        builder
+            .build_unsigned_int_to_float(int_val, target_float, "uitofp")?
+            .into()
+    })
+}
+
+fn runtime_cast_float_to_int<'ctx>(
+    builder: &Builder<'ctx>,
+    float_val: FloatValue<'ctx>,
+    target_int_type: IntType<'ctx>,
+    dst_lang: &LangType,
+) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+    let target_signed = matches!(dst_lang.base, TypeBase::SInt);
+    Ok(if target_signed {
+        builder
+            .build_float_to_signed_int(float_val, target_int_type, "fptosi")?
+            .into()
+    } else {
+        builder
+            .build_float_to_unsigned_int(float_val, target_int_type, "fptoui")?
+            .into()
+    })
+}
+
+fn runtime_cast_ptr_to_int<'ctx>(
+    builder: &Builder<'ctx>,
+    ptr_val: PointerValue<'ctx>,
+    target_int_type: IntType<'ctx>,
+) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+    Ok(builder
+        .build_ptr_to_int(ptr_val, target_int_type, "ptrtoint")?
+        .into())
+}
+
+fn runtime_cast_int_resize<'ctx>(
+    builder: &Builder<'ctx>,
+    int_val: IntValue<'ctx>,
+    target_int_type: IntType<'ctx>,
+    src_lang: &LangType,
+) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+    let source_bits = int_val.get_type().get_bit_width();
+    let target_bits = target_int_type.get_bit_width();
+    let is_signed = matches!(src_lang.base, TypeBase::SInt);
+
+    match target_bits.cmp(&source_bits) {
+        std::cmp::Ordering::Greater => {
+            let use_zext = source_bits == 1 || !is_signed;
+            Ok(if use_zext {
+                builder
+                    .build_int_z_extend(int_val, target_int_type, "zext")?
+                    .into()
+            } else {
+                builder
+                    .build_int_s_extend(int_val, target_int_type, "sext")?
+                    .into()
+            })
+        }
+        std::cmp::Ordering::Less => Ok(builder
+            .build_int_truncate(int_val, target_int_type, "trunc")?
+            .into()),
+        std::cmp::Ordering::Equal => Ok(int_val.into()),
     }
 }
 
@@ -537,109 +584,51 @@ impl<'ctx> ValueEmitter<'ctx> for ConstantEmitter<'ctx> {
         let target_is_float = matches!(target_llvm, BasicTypeEnum::FloatType(_));
         let target_is_pointer = matches!(target_llvm, BasicTypeEnum::PointerType(_));
 
-        // int → int resize (LLVM 19: extract + reconstruct)
         if target_is_int && value.is_int_value() {
-            let int_val = value.into_int_value();
-            let target_int_type = target_llvm.into_int_type();
-            let src_bits = int_val.get_type().get_bit_width();
-            let dst_bits = target_int_type.get_bit_width();
-            let sign_extend = matches!(src_lang.base, TypeBase::SInt) && src_bits > 1;
-            return Ok(match dst_bits.cmp(&src_bits) {
-                std::cmp::Ordering::Greater => {
-                    let raw = if sign_extend {
-                        int_val.get_sign_extended_constant().ok_or_else(|| {
-                            CodegenError::InvalidOperation(
-                                "integer constant not representable as i64 for widening cast"
-                                    .to_string(),
-                                pos,
-                            )
-                        })? as u64
-                    } else {
-                        int_val.get_zero_extended_constant().ok_or_else(|| {
-                            CodegenError::InvalidOperation(
-                                "integer constant not representable as u64 for widening cast"
-                                    .to_string(),
-                                pos,
-                            )
-                        })?
-                    };
-                    target_int_type.const_int(raw, sign_extend)
-                }
-                std::cmp::Ordering::Less => int_val.const_truncate(target_int_type),
-                std::cmp::Ordering::Equal => int_val,
-            }
-            .into());
+            return const_cast_int_resize(
+                value.into_int_value(),
+                target_llvm.into_int_type(),
+                src_lang,
+                pos,
+            );
         }
 
         if target_is_float && value.is_int_value() {
-            let int_val = value.into_int_value();
-            let float_type = target_llvm.into_float_type();
-            let is_signed = matches!(src_lang.base, TypeBase::SInt);
-            let fval = if is_signed {
-                int_val.get_sign_extended_constant().ok_or_else(|| {
-                    CodegenError::InvalidOperation(
-                        "integer constant not representable as i64 for cast".to_string(),
-                        pos,
-                    )
-                })? as f64
-            } else {
-                int_val.get_zero_extended_constant().ok_or_else(|| {
-                    CodegenError::InvalidOperation(
-                        "integer constant not representable as u64 for cast".to_string(),
-                        pos,
-                    )
-                })? as f64
-            };
-            return Ok(float_type.const_float(fval).into());
+            return const_cast_int_to_float(
+                value.into_int_value(),
+                target_llvm.into_float_type(),
+                src_lang,
+                pos,
+            );
         }
 
         if target_is_int && value.is_float_value() {
-            let float_val = value.into_float_value();
-            let int_type = target_llvm.into_int_type();
-            let target_signed = matches!(dst_lang.base, TypeBase::SInt);
-            let (fval, _) = float_val.get_constant().ok_or_else(|| {
-                CodegenError::InvalidOperation(
-                    "float constant not representable for cast".to_string(),
-                    pos,
-                )
-            })?;
-            let bits = if target_signed {
-                fval as i64 as u64
-            } else {
-                fval as u64
-            };
-            return Ok(int_type.const_int(bits, target_signed).into());
+            return const_cast_float_to_int(
+                value.into_float_value(),
+                target_llvm.into_int_type(),
+                dst_lang,
+                pos,
+            );
         }
 
         if target_is_float && value.is_float_value() {
-            let float_val = value.into_float_value();
-            let float_type = target_llvm.into_float_type();
-            let (fval, _) = float_val.get_constant().ok_or_else(|| {
-                CodegenError::InvalidOperation(
-                    "float constant not representable for cast".to_string(),
-                    pos,
-                )
-            })?;
-            return Ok(float_type.const_float(fval).into());
+            return const_cast_float_resize(
+                value.into_float_value(),
+                target_llvm.into_float_type(),
+                pos,
+            );
         }
 
-        // pointer → pointer (opaque ptrs are all the same LLVM type; no-op)
         if target_is_pointer && value.is_pointer_value() {
-            return Ok(value);
+            return const_cast_ptr_to_ptr(value);
         }
 
         if target_is_pointer && value.is_int_value() {
-            return Ok(value
-                .into_int_value()
-                .const_to_pointer(target_llvm.into_pointer_type())
-                .into());
+            return const_cast_int_to_ptr(value.into_int_value(), target_llvm.into_pointer_type());
         }
 
         if target_is_int && value.is_pointer_value() {
-            return Ok(value
-                .into_pointer_value()
-                .const_to_int(target_llvm.into_int_type())
-                .into());
+            return const_cast_ptr_to_int(value.into_pointer_value(), target_llvm.into_int_type());
         }
 
         Err(CodegenError::InvalidOperation(
@@ -680,4 +669,112 @@ impl<'ctx> ValueEmitter<'ctx> for ConstantEmitter<'ctx> {
             Ok((self.context.f64_type().const_float(fval_a), b))
         }
     }
+}
+
+// int → int resize (LLVM 19: extract + reconstruct, no builder available)
+fn const_cast_int_resize<'ctx>(
+    int_val: IntValue<'ctx>,
+    target_int_type: IntType<'ctx>,
+    src_lang: &LangType,
+    pos: Position,
+) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+    let src_bits = int_val.get_type().get_bit_width();
+    let dst_bits = target_int_type.get_bit_width();
+    let sign_extend = matches!(src_lang.base, TypeBase::SInt) && src_bits > 1;
+    Ok(match dst_bits.cmp(&src_bits) {
+        std::cmp::Ordering::Greater => {
+            let raw = if sign_extend {
+                int_val.get_sign_extended_constant().ok_or_else(|| {
+                    CodegenError::InvalidOperation(
+                        "integer constant not representable as i64 for widening cast".to_string(),
+                        pos,
+                    )
+                })? as u64
+            } else {
+                int_val.get_zero_extended_constant().ok_or_else(|| {
+                    CodegenError::InvalidOperation(
+                        "integer constant not representable as u64 for widening cast".to_string(),
+                        pos,
+                    )
+                })?
+            };
+            target_int_type.const_int(raw, sign_extend)
+        }
+        std::cmp::Ordering::Less => int_val.const_truncate(target_int_type),
+        std::cmp::Ordering::Equal => int_val,
+    }
+    .into())
+}
+
+fn const_cast_int_to_float<'ctx>(
+    int_val: IntValue<'ctx>,
+    target_float: FloatType<'ctx>,
+    src_lang: &LangType,
+    pos: Position,
+) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+    let is_signed = matches!(src_lang.base, TypeBase::SInt);
+    let fval = if is_signed {
+        int_val.get_sign_extended_constant().ok_or_else(|| {
+            CodegenError::InvalidOperation(
+                "integer constant not representable as i64 for cast".to_string(),
+                pos,
+            )
+        })? as f64
+    } else {
+        int_val.get_zero_extended_constant().ok_or_else(|| {
+            CodegenError::InvalidOperation(
+                "integer constant not representable as u64 for cast".to_string(),
+                pos,
+            )
+        })? as f64
+    };
+    Ok(target_float.const_float(fval).into())
+}
+
+fn const_cast_float_to_int<'ctx>(
+    float_val: FloatValue<'ctx>,
+    target_int_type: IntType<'ctx>,
+    dst_lang: &LangType,
+    pos: Position,
+) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+    let target_signed = matches!(dst_lang.base, TypeBase::SInt);
+    let (fval, _) = float_val.get_constant().ok_or_else(|| {
+        CodegenError::InvalidOperation("float constant not representable for cast".to_string(), pos)
+    })?;
+    let bits = if target_signed {
+        fval as i64 as u64
+    } else {
+        fval as u64
+    };
+    Ok(target_int_type.const_int(bits, target_signed).into())
+}
+
+fn const_cast_float_resize<'ctx>(
+    float_val: FloatValue<'ctx>,
+    target_float: FloatType<'ctx>,
+    pos: Position,
+) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+    let (fval, _) = float_val.get_constant().ok_or_else(|| {
+        CodegenError::InvalidOperation("float constant not representable for cast".to_string(), pos)
+    })?;
+    Ok(target_float.const_float(fval).into())
+}
+
+// Opaque pointers are all the same LLVM type, so a pointer-to-pointer cast is a no-op.
+fn const_cast_ptr_to_ptr(value: BasicValueEnum<'_>) -> Result<BasicValueEnum<'_>, CodegenError> {
+    Ok(value)
+}
+
+fn const_cast_int_to_ptr<'ctx>(
+    int_val: IntValue<'ctx>,
+    target_ptr: PointerType<'ctx>,
+) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+    Ok(int_val.const_to_pointer(target_ptr).into())
+}
+
+fn const_cast_ptr_to_int<'ctx>(
+    ptr_val: PointerValue<'ctx>,
+    target_int_type: IntType<'ctx>,
+) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+    Ok(ptr_val.const_to_int(target_int_type).into())
 }

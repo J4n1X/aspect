@@ -242,9 +242,12 @@ impl Default for TypeChecker {
     }
 }
 
+mod aggregates;
 mod asm;
+mod calls;
 mod expressions;
 mod statements;
+mod switch;
 
 #[cfg(test)]
 mod tests;

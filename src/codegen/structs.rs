@@ -3,7 +3,7 @@
 //! assignment, and `&expr` all rely on.
 
 use inkwell::types::{BasicType, BasicTypeEnum};
-use inkwell::values::PointerValue;
+use inkwell::values::{BasicValueEnum, PointerValue};
 
 use crate::codegen::generator::CodeGenerator;
 use crate::codegen::{CodegenError, LangTypeExt, TypeLoweringError};
@@ -97,6 +97,43 @@ impl<'ctx> CodeGenerator<'ctx> {
             .iter()
             .position(|(n, _)| n == field)
             .map(|idx| (idx, fields[idx].1))
+    }
+
+    /// Build a struct literal aggregate field-by-field via `insertvalue`.
+    pub(crate) fn emit_struct_literal(
+        &mut self,
+        struct_id: u32,
+        fields: &[(String, Expression)],
+        pos: Position,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let struct_ty = *self.struct_types.get(&struct_id).ok_or_else(|| {
+            CodegenError::TypeError(format!("unregistered type-struct id {struct_id}"), pos)
+        })?;
+
+        // Build the aggregate value field-by-field via insertvalue.
+        // TODO: If we can ensure the initializer is constant, we can build a constant value
+        // and store it directly, which is more efficient than insertvalue.
+        let mut agg = struct_ty.get_undef();
+        for (fname, fexpr) in fields {
+            // TODO: This is insanely inefficient. We should have a function that gives us this ordered in a Vector.
+            let (idx, field_ty) = self.struct_field(struct_id, fname).ok_or_else(|| {
+                CodegenError::TypeError(
+                    format!("unknown field '{fname}' on type-struct id {struct_id}"),
+                    pos,
+                )
+            })?;
+            let fval = self.generate_coerced_value(fexpr, Some(&field_ty))?;
+            agg = self
+                .builder
+                .build_insert_value(
+                    agg,
+                    fval,
+                    u32::try_from(idx).expect("field index out of range"),
+                    "structlit",
+                )?
+                .into_struct_value();
+        }
+        Ok(agg.into())
     }
 
     /// Byte size of a `LangType` against the target data layout — powers

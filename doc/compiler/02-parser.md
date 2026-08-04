@@ -7,8 +7,15 @@ The parser (`src/parser/`) converts a flat `Vec<Token>` into a `Program` AST. It
 | File | Purpose |
 |------|---------|
 | `ast.rs` | AST node types: `ExprKind`, `StatementKind`, `Expression`, `Statement`, `Function`, `GlobalVar`, `Program` |
-| `expressions.rs` | `Parser` struct, expression parsing, program-level parsing (`parse_program`, `parse_function`, `parse_global_var`), type parsing |
-| `statements.rs` | Statement parsing methods |
+| `expressions.rs` | `Parser` struct, Pratt expression engine, literals/primaries, `is` parsing |
+| `statements.rs` | Statement dispatch table and statement rules (minus `switch`) |
+| `switch.rs` | `switch` parsing: statement, arms, patterns, coverage computation |
+| `declarations.rs` | Top-level item dispatch (`parse_top_level_item`), type-structs, enums, sums, methods |
+| `program.rs` | Two-pass driver (`parse_program`), prescans, deferred bodies, aliases |
+| `type_expr.rs` | Type parsing (`parse_type`, modifiers) and declaration-start lookaheads |
+| `dot_access.rs` | `.`-postfix resolution: methods, enum values, sum construction, field access |
+| `visibility.rs` | Import- and `public`-visibility checks for all item kinds |
+| `cycles.rs` | By-value containment cycle detection over structs/sums |
 | `types.rs` | Re-export of `LangType` and `TypeBase` from the lexer |
 | `errors.rs` | `ParserError` enum |
 

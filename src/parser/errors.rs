@@ -180,13 +180,13 @@ impl ParserError {
 
     #[must_use]
     pub(crate) fn private_type(
-        name: impl Into<String>,
+        name: &str,
         defining_module: &str,
         referring_module: &str,
         pos: Position,
     ) -> Self {
         ParserError::PrivateType {
-            name: name.into(),
+            name: name.to_string(),
             defining: Self::describe_module(defining_module),
             referring: Self::describe_module(referring_module),
             pos,
@@ -195,13 +195,13 @@ impl ParserError {
 
     #[must_use]
     pub(crate) fn private_enum(
-        name: impl Into<String>,
+        name: &str,
         defining_module: &str,
         referring_module: &str,
         pos: Position,
     ) -> Self {
         ParserError::PrivateEnum {
-            name: name.into(),
+            name: name.to_string(),
             defining: Self::describe_module(defining_module),
             referring: Self::describe_module(referring_module),
             pos,
@@ -210,13 +210,13 @@ impl ParserError {
 
     #[must_use]
     pub(crate) fn private_sum(
-        name: impl Into<String>,
+        name: &str,
         defining_module: &str,
         referring_module: &str,
         pos: Position,
     ) -> Self {
         ParserError::PrivateSum {
-            name: name.into(),
+            name: name.to_string(),
             defining: Self::describe_module(defining_module),
             referring: Self::describe_module(referring_module),
             pos,

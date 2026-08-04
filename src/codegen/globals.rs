@@ -54,11 +54,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Some(AddressSpace::default()),
                 &global.name,
             );
-            global_var.set_linkage(if global.export {
-                Linkage::External
-            } else {
-                Linkage::Private
-            });
+            global_var.set_linkage(global_linkage(global.export));
             global_var.set_initializer(&folded);
             let align = self
                 .target_machine
@@ -68,13 +64,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             if global.var_type.is_const {
                 global_var.set_constant(true);
             }
-            self.scope.insert_global(
+            self.register_global(
                 global.name.clone(),
-                GlobalVarInfo {
-                    ptr: global_var.as_pointer_value(),
-                    llvm_type: global_type,
-                    lang_type: global.var_type,
-                },
+                global_var.as_pointer_value(),
+                global_type,
+                global.var_type,
             );
             return Ok(());
         }
@@ -86,11 +80,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Linkage follows `export` (foreign-visible), not `public` (Aspect
         // module visibility): a `public` global stays internally linked so
         // `globaldce` can strip it when unused.
-        if global.export {
-            global_var.set_linkage(Linkage::External);
-        } else {
-            global_var.set_linkage(Linkage::Private);
-        }
+        global_var.set_linkage(global_linkage(global.export));
 
         if let Some(init_expr) = &global.initializer {
             // A global initializer legitimately reads another global's start
@@ -117,15 +107,30 @@ impl<'ctx> CodeGenerator<'ctx> {
             global_var.set_constant(true);
         }
 
-        self.scope.insert_global(
+        self.register_global(
             global.name.clone(),
-            GlobalVarInfo {
-                ptr: global_var.as_pointer_value(),
-                llvm_type: global_type,
-                lang_type: global.var_type,
-            },
+            global_var.as_pointer_value(),
+            global_type,
+            global.var_type,
         );
         Ok(())
+    }
+
+    fn register_global(
+        &mut self,
+        name: String,
+        ptr: PointerValue<'ctx>,
+        llvm_type: BasicTypeEnum<'ctx>,
+        lang_type: LangType,
+    ) {
+        self.scope.insert_global(
+            name,
+            GlobalVarInfo {
+                ptr,
+                llvm_type,
+                lang_type,
+            },
+        );
     }
 
     /// The single authority for the string-literal naming scheme shared with
@@ -146,13 +151,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         global_string.set_constant(true);
 
         let ptr_ty = self.context.ptr_type(AddressSpace::default());
-        self.scope.insert_global(
+        self.register_global(
             string_name,
-            GlobalVarInfo {
-                ptr: global_string.as_pointer_value(),
-                llvm_type: ptr_ty.into(),
-                lang_type: LangType::U8_PTR,
-            },
+            global_string.as_pointer_value(),
+            ptr_ty.into(),
+            LangType::U8_PTR,
         );
     }
 
@@ -226,6 +229,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 pos,
             )),
         }
+    }
+}
+
+fn global_linkage(export: bool) -> Linkage {
+    if export {
+        Linkage::External
+    } else {
+        Linkage::Private
     }
 }
 

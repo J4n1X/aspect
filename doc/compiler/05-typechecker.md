@@ -15,8 +15,14 @@ final type directly instead of re-deriving it. See
 | File | Purpose |
 |------|---------|
 | `checker.rs` | `TypeChecker` struct — single-pass checking |
+| `checker/expressions.rs` | `synth_expression`/`check_expression` spine |
+| `checker/aggregates.rs` | Struct-literal and sum-construction synthesis |
+| `checker/calls.rs` | Direct and indirect call checking |
+| `checker/statements.rs` | Per-statement checking, conditions, termination analysis |
+| `checker/switch.rs` | `switch` checking: scrutinee classes, patterns, exhaustiveness |
+| `checker/asm.rs` | `asm fn` / `naked fn` register checks |
 | `types.rs` | Pure helper functions for type coercibility and literal compatibility |
-| `errors.rs` | `TypeCheckError` enum (34 variants) |
+| `errors.rs` | `TypeCheckError` enum |
 
 ## TypeChecker Struct
 

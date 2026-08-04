@@ -202,6 +202,21 @@ impl Preprocessor {
             .expect("a file context is always active while tokens are processed")
     }
 
+    /// The define/conditional-evaluation scope for `ctx`'s file: its own
+    /// module (`""` for the anonymous root) plus its direct imports so far.
+    /// A free function, not a `&self` method, so its borrows stay scoped to
+    /// the two fields it reads — a method here would borrow all of `self`
+    /// and conflict with callers that also need `&mut self.tokens` or
+    /// `&mut self.conditionals` alongside the result.
+    fn scope_for<'a>(
+        defines: &'a DefineTable,
+        file_modules: &'a [Option<String>],
+        ctx: &'a FileContext,
+    ) -> ScopedDefines<'a> {
+        let module = file_modules[ctx.file_id as usize].as_deref().unwrap_or("");
+        ScopedDefines::new(defines, module, &ctx.imports, file_modules)
+    }
+
     /// # Errors
     /// Any [`PreprocessError`] from lexing, directive handling, or IO.
     pub fn preprocess(&mut self, entry: &Path) -> Result<PreprocessedSource, PreprocessError> {
@@ -347,33 +362,7 @@ impl Preprocessor {
                     i += 1;
                 }
                 _ => {
-                    if self.conditionals.active() {
-                        match token.kind {
-                            TokenKind::OpenBrace => brace_depth += 1,
-                            TokenKind::CloseBrace => brace_depth = brace_depth.saturating_sub(1),
-                            _ => {}
-                        }
-                        {
-                            let ctx = self.file_stack.last().expect(
-                                "a file context is always active while tokens are processed",
-                            );
-                            let module = self.file_modules[ctx.file_id as usize]
-                                .as_deref()
-                                .unwrap_or("");
-                            let scoped = ScopedDefines::new(
-                                &self.defines,
-                                module,
-                                &ctx.imports,
-                                &self.file_modules,
-                            );
-                            scoped.expand_into(&mut self.tokens, token);
-                        }
-                        // Only *emitted* tokens block a later `$module`:
-                        // content inside a skipped conditional branch does not.
-                        if let Some(ctx) = self.file_stack.last_mut() {
-                            ctx.saw_content = true;
-                        }
-                    }
+                    self.emit_ordinary_token(token, &mut brace_depth);
                     at_line_start = false;
                     i += 1;
                 }
@@ -383,6 +372,30 @@ impl Preprocessor {
             return Err(PreprocessError::UnterminatedConditional { directive, pos });
         }
         Ok(())
+    }
+
+    /// A no-op while a conditional branch is skipped — the caller still
+    /// advances `i` either way.
+    fn emit_ordinary_token(&mut self, token: &Token, brace_depth: &mut usize) {
+        if !self.conditionals.active() {
+            return;
+        }
+        match token.kind {
+            TokenKind::OpenBrace => *brace_depth += 1,
+            TokenKind::CloseBrace => *brace_depth = brace_depth.saturating_sub(1),
+            _ => {}
+        }
+        let ctx = self
+            .file_stack
+            .last()
+            .expect("a file context is always active while tokens are processed");
+        let scoped = Self::scope_for(&self.defines, &self.file_modules, ctx);
+        scoped.expand_into(&mut self.tokens, token);
+        // Only *emitted* tokens block a later `$module`: content inside a
+        // skipped conditional branch does not.
+        if let Some(ctx) = self.file_stack.last_mut() {
+            ctx.saw_content = true;
+        }
     }
 
     /// `line[0]` is the `$`, the newline already stripped.
@@ -421,11 +434,7 @@ impl Preprocessor {
                 .file_stack
                 .last()
                 .expect("a file context is always active while tokens are processed");
-            let module = self.file_modules[ctx.file_id as usize]
-                .as_deref()
-                .unwrap_or("");
-            let scoped =
-                ScopedDefines::new(&self.defines, module, &ctx.imports, &self.file_modules);
+            let scoped = Self::scope_for(&self.defines, &self.file_modules, ctx);
             return self.conditionals.handle(&name, rest, pos, &scoped);
         }
         if !self.conditionals.active() {

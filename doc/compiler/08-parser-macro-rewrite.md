@@ -11,8 +11,13 @@ living reference for anyone writing or modifying parse rules.
 
 ```
 src/parser/
-  expressions.rs   — Parser struct, Pratt expression engine, top-level rules, parse_type
-  statements.rs    — Statement dispatch table, all statement rules
+  expressions.rs   — Parser struct, Pratt expression engine
+  type_expr.rs     — parse_type + declaration-start lookaheads
+  dot_access.rs    — `.`-postfix resolution (methods, enum/sum access)
+  visibility.rs    — import/public visibility checks
+  statements.rs    — Statement dispatch table, statement rules
+  switch.rs        — switch statement/arm/pattern rules
+  cycles.rs        — by-value containment cycle detection
   ast.rs           — AST node types
   errors.rs        — ParserError enum + position() helper
   types.rs         — re-export of the lexer's LangType / TypeBase (no logic)

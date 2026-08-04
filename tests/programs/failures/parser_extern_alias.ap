@@ -1,0 +1,10 @@
+# expected: "extern can only be used with functions"
+# `extern` marks a declaration as defined elsewhere by a linked object file;
+# only function-shaped declarations (fn / asm fn / naked fn) have that shape —
+# an alias is a pure compile-time name binding, resolved entirely in the
+# parser with no linked symbol to speak of.
+extern alias Foo i32
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    return 0
+}

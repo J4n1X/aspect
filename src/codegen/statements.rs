@@ -1,3 +1,4 @@
+use inkwell::basic_block::BasicBlock;
 use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicValueEnum, FunctionValue, IntValue, PointerValue};
 use inkwell::IntPredicate;
@@ -48,29 +49,19 @@ impl<'ctx> CodeGenerator<'ctx> {
             } => self.generate_for_loop(init.clone(), condition.as_ref(), increment.clone(), body),
             StatementKind::Block(statements) => self.generate_block(statements),
             StatementKind::Break => {
-                let (break_bb, _) = self.loop_stack.last().ok_or_else(|| {
+                let (break_bb, _) = *self.loop_stack.last().ok_or_else(|| {
                     CodegenError::InvalidOperation("'break' outside of loop".to_string(), stmt.pos)
                 })?;
-                self.builder.build_unconditional_branch(*break_bb)?;
-                let dead_bb = self
-                    .context
-                    .append_basic_block(self.current_function.unwrap(), "break.dead");
-                self.builder.position_at_end(dead_bb);
-                Ok(())
+                self.branch_to_dead_end(break_bb, "break.dead")
             }
             StatementKind::Continue => {
-                let (_, continue_bb) = self.loop_stack.last().ok_or_else(|| {
+                let (_, continue_bb) = *self.loop_stack.last().ok_or_else(|| {
                     CodegenError::InvalidOperation(
                         "'continue' outside of loop".to_string(),
                         stmt.pos,
                     )
                 })?;
-                self.builder.build_unconditional_branch(*continue_bb)?;
-                let dead_bb = self
-                    .context
-                    .append_basic_block(self.current_function.unwrap(), "continue.dead");
-                self.builder.position_at_end(dead_bb);
-                Ok(())
+                self.branch_to_dead_end(continue_bb, "continue.dead")
             }
         }
     }
@@ -117,6 +108,23 @@ impl<'ctx> CodeGenerator<'ctx> {
         let alloca = self.builder.build_alloca(llvm_type, name)?;
         self.builder.position_at_end(current_block);
         Ok(alloca)
+    }
+
+    /// Branch to `target`, then park the builder in a fresh dead block —
+    /// LLVM requires a valid insert point after a terminator even for
+    /// statements that can never execute (`break`/`continue`/a value-block
+    /// `return`, all of which end the current block early).
+    pub(crate) fn branch_to_dead_end(
+        &mut self,
+        target: BasicBlock<'ctx>,
+        dead_label: &str,
+    ) -> Result<(), CodegenError> {
+        self.builder.build_unconditional_branch(target)?;
+        let dead_bb = self
+            .context
+            .append_basic_block(self.current_function.unwrap(), dead_label);
+        self.builder.position_at_end(dead_bb);
+        Ok(())
     }
 
     pub(crate) fn generate_var_decl(
@@ -264,14 +272,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             })?;
             let value = self.generate_coerced_value(expr, Some(&result_type))?;
             self.builder.build_store(slot, value)?;
-            self.builder.build_unconditional_branch(exit_bb)?;
-            // Park subsequent (unreachable) statements in a dead block, the
-            // same trick `break`/`continue` use.
-            let dead_bb = self
-                .context
-                .append_basic_block(self.current_function.unwrap(), "vblock.dead");
-            self.builder.position_at_end(dead_bb);
-            return Ok(());
+            return self.branch_to_dead_end(exit_bb, "vblock.dead");
         }
 
         // Struct-by-value return: store through the hidden sret out-pointer and
@@ -297,215 +298,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         } else {
             self.builder.build_return(None)?;
         }
-        Ok(())
-    }
-
-    /// Lower a `switch`: evaluate the scrutinee exactly once, LLVM `switch`
-    /// over the discriminant (a sum's `i32` tag, or the int/bool/enum value),
-    /// per-arm blocks with payload bindings copied out of the scrutinee slot.
-    /// The else edge is the `default` block when present; otherwise a
-    /// `llvm.trap` block — the checker guarantees `default` exists unless the
-    /// arms are coverage-complete, so the trap is only reachable through a
-    /// forged tag (`u0*` bridge, stale pointer) or an out-of-range `as`-cast
-    /// enum, and one cold trap beats undefined behavior. `llvm.trap` (`ud2`),
-    /// never libc `abort()`: freestanding targets link no libc.
-    pub(crate) fn generate_switch(
-        &mut self,
-        scrutinee: &Expression,
-        arms: &[crate::parser::SwitchArm],
-        default: Option<&[Statement]>,
-        pos: crate::lexer::Position,
-    ) -> Result<(), CodegenError> {
-        use crate::parser::{LiteralValue, SwitchPattern};
-
-        let function = self
-            .current_function
-            .ok_or(CodegenError::UnexpectedStatement(pos))?;
-        let s_ty = scrutinee.expr_type;
-
-        // Discriminant, plus (for sums) the slot arm bindings read from.
-        let mut sum_slot = None;
-        let disc = if s_ty.pointer_depth == 0
-            && !s_ty.is_array()
-            && let crate::lexer::TypeBase::Sum(sum_id) = s_ty.base
-        {
-            let storage = *self.sum_types.get(&sum_id).ok_or_else(|| {
-                CodegenError::TypeError(format!("unregistered sum id {sum_id}"), pos)
-            })?;
-            let value = self.generate_expression(scrutinee)?;
-            let slot = self.build_entry_alloca(function, storage.into(), "switch.scrut", pos)?;
-            self.builder.build_store(slot, value)?;
-            let tag_ptr = self
-                .builder
-                .build_struct_gep(storage, slot, 0, "switch.tag")?;
-            sum_slot = Some((slot, sum_id));
-            self.builder
-                .build_load(self.context.i32_type(), tag_ptr, "tag")?
-                .into_int_value()
-        } else {
-            let v = self.generate_expression(scrutinee)?.into_int_value();
-            // Bool variables load as `i8` (comparisons already yield `i1`) —
-            // normalize so the switch constants share one width.
-            if s_ty.base == crate::lexer::TypeBase::Bool && v.get_type().get_bit_width() > 1 {
-                self.builder.build_int_compare(
-                    inkwell::IntPredicate::NE,
-                    v,
-                    v.get_type().const_zero(),
-                    "switch.bool",
-                )?
-            } else {
-                v
-            }
-        };
-
-        let else_bb = self.context.append_basic_block(
-            function,
-            if default.is_some() {
-                "switch.default"
-            } else {
-                "switch.trap"
-            },
-        );
-        let merge_bb = self.context.append_basic_block(function, "switch.end");
-
-        let disc_ty = disc.get_type();
-        let mut cases = Vec::new();
-        let mut arm_blocks = Vec::with_capacity(arms.len());
-        for arm in arms {
-            let bb = self.context.append_basic_block(function, "switch.case");
-            for pattern in &arm.patterns {
-                let const_val = match pattern {
-                    SwitchPattern::SumVariant { variant, .. } => {
-                        disc_ty.const_int(u64::from(*variant), false)
-                    }
-                    SwitchPattern::Const(e) => match &e.kind {
-                        ExprKind::Literal(LiteralValue::Integer(v)) => {
-                            // `as u64` keeps the two's-complement bits; LLVM
-                            // truncates to the discriminant width, so negative
-                            // labels land correctly at any width.
-                            disc_ty.const_int(*v as u64, false)
-                        }
-                        ExprKind::Literal(LiteralValue::Bool(b)) => {
-                            disc_ty.const_int(u64::from(*b), false)
-                        }
-                        ExprKind::EnumValue { value, .. } => {
-                            disc_ty.const_int(*value as u64, false)
-                        }
-                        _ => {
-                            return Err(CodegenError::InvalidOperation(
-                                "non-constant case pattern survived checking".to_string(),
-                                e.pos,
-                            ))
-                        }
-                    },
-                };
-                cases.push((const_val, bb));
-            }
-            arm_blocks.push(bb);
-        }
-        self.builder.build_switch(disc, else_bb, &cases)?;
-
-        for (arm, bb) in arms.iter().zip(arm_blocks) {
-            self.builder.position_at_end(bb);
-            self.enter_scope();
-            // Bindings are copies: GEP the payload through the variant's bare
-            // payload struct at storage field 1 (the uniform offset) and copy
-            // each bound field into its own local.
-            if let Some(SwitchPattern::SumVariant { variant, binders }) = arm.patterns.first()
-                && binders.iter().any(Option::is_some)
-            {
-                let (slot, sum_id) =
-                    sum_slot.expect("binding pattern without a sum scrutinee");
-                let storage = self.sum_types[&sum_id];
-                let payload_ptr = self
-                    .builder
-                    .build_struct_gep(storage, slot, 1, "switch.payload")?;
-                let payload_ty = self
-                    .sum_payload_type(sum_id, *variant as usize)
-                    .map_err(|e| e.with_pos(arm.pos))?
-                    .expect("binding pattern on a payload-less variant");
-                for (i, binder) in binders.iter().enumerate() {
-                    let Some((name, field_ty)) = binder else { continue };
-                    let field_ptr = self.builder.build_struct_gep(
-                        payload_ty,
-                        payload_ptr,
-                        u32::try_from(i).expect("payload field index fits u32"),
-                        name,
-                    )?;
-                    if field_ty.is_array() {
-                        let arr_ty = self
-                            .lang_type_to_llvm_array(field_ty)
-                            .map_err(|e| e.with_pos(arm.pos))?;
-                        let alloca =
-                            self.build_entry_alloca(function, arr_ty.into(), name, arm.pos)?;
-                        let bytes = self.sizeof_lang_type(field_ty, arm.pos)?;
-                        let align = self
-                            .target_machine
-                            .get_target_data()
-                            .get_abi_alignment(&arr_ty);
-                        self.builder.build_memcpy(
-                            alloca,
-                            align,
-                            field_ptr,
-                            align,
-                            self.context.i64_type().const_int(bytes, false),
-                        )?;
-                        self.add_variable(name.clone(), alloca, arr_ty.into(), *field_ty, None);
-                    } else {
-                        let llvm_ty = self
-                            .lang_type_to_llvm(field_ty)
-                            .map_err(|e| e.with_pos(arm.pos))?;
-                        let alloca =
-                            self.build_entry_alloca(function, llvm_ty, name, arm.pos)?;
-                        let v = self.builder.build_load(llvm_ty, field_ptr, name)?;
-                        self.builder.build_store(alloca, v)?;
-                        self.add_variable(name.clone(), alloca, llvm_ty, *field_ty, None);
-                    }
-                }
-            }
-            for stmt in &arm.body {
-                self.generate_statement(stmt)?;
-            }
-            self.exit_scope();
-            if self
-                .builder
-                .get_insert_block()
-                .and_then(|b| b.get_terminator())
-                .is_none()
-            {
-                self.builder.build_unconditional_branch(merge_bb)?;
-            }
-        }
-
-        self.builder.position_at_end(else_bb);
-        if let Some(default_body) = default {
-            self.enter_scope();
-            for stmt in default_body {
-                self.generate_statement(stmt)?;
-            }
-            self.exit_scope();
-            if self
-                .builder
-                .get_insert_block()
-                .and_then(|b| b.get_terminator())
-                .is_none()
-            {
-                self.builder.build_unconditional_branch(merge_bb)?;
-            }
-        } else {
-            let trap = inkwell::intrinsics::Intrinsic::find("llvm.trap")
-                .and_then(|i| i.get_declaration(&self.module, &[]))
-                .ok_or_else(|| {
-                    CodegenError::InvalidOperation(
-                        "llvm.trap intrinsic unavailable".to_string(),
-                        pos,
-                    )
-                })?;
-            self.builder.build_call(trap, &[], "")?;
-            self.builder.build_unreachable()?;
-        }
-
-        self.builder.position_at_end(merge_bb);
         Ok(())
     }
 

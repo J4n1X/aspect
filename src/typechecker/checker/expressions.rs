@@ -8,14 +8,6 @@ use crate::typechecker::types::{
 };
 
 impl TypeChecker {
-    /// Synthesise every argument for error recovery, discarding the results —
-    /// used after an arity/lookup failure so each argument's own errors surface.
-    fn synth_all(&mut self, args: &mut [Expression]) {
-        for arg in args.iter_mut() {
-            self.synth_expression(arg);
-        }
-    }
-
     /// Synthesise the type of `expr` with no contextual expectation (callee
     /// resolution, indices, conditions, cast/dereference operands).
     pub(crate) fn synth_expression(&mut self, expr: &mut Expression) -> LangType {
@@ -219,58 +211,7 @@ impl TypeChecker {
             }
 
             ExprKind::StructLiteral { struct_id, fields } => {
-                let struct_id = *struct_id;
-                // Snapshot declared fields to avoid holding a `self.symbols`
-                // borrow across the per-field `check_expression` calls.
-                let declared: Vec<(String, LangType, Visibility)> = self
-                    .symbols
-                    .struct_info(struct_id)
-                    .fields
-                    .iter()
-                    .map(|f| (f.name.clone(), f.ty, f.vis))
-                    .collect();
-                let type_name = self.symbols.struct_info(struct_id).name.clone();
-                let inside_methods = self.is_inside_struct_methods(struct_id);
-
-                let mut named: Vec<String> = Vec::with_capacity(fields.len());
-                for (fname, fexpr) in fields.iter_mut() {
-                    named.push(fname.clone());
-                    if let Some((_, fty, vis)) =
-                        declared.iter().find(|(n, _, _)| n == fname)
-                    {
-                        let fty = *fty;
-                        if *vis == Visibility::Private && !inside_methods {
-                            self.errors.push(TypeCheckError::InaccessibleField {
-                                field: fname.clone(),
-                                type_name: type_name.clone(),
-                                position: pos,
-                            });
-                        }
-                        self.check_expression(fexpr, &fty);
-                    } else {
-                        self.errors.push(TypeCheckError::UnknownField {
-                            field: fname.clone(),
-                            type_name: type_name.clone(),
-                            position: pos,
-                        });
-                        self.synth_expression(fexpr);
-                    }
-                }
-
-                let missing: Vec<&str> = declared
-                    .iter()
-                    .map(|(n, _, _)| n.as_str())
-                    .filter(|n| !named.iter().any(|m| m == n))
-                    .collect();
-                if !missing.is_empty() {
-                    self.errors.push(TypeCheckError::MissingStructFields {
-                        type_name,
-                        missing: missing.join(", "),
-                        position: pos,
-                    });
-                }
-
-                let struct_ty = LangType::struct_type(struct_id);
+                let struct_ty = self.synth_struct_literal(*struct_id, fields, pos);
                 expr.expr_type = struct_ty;
                 struct_ty
             }
@@ -300,21 +241,7 @@ impl TypeChecker {
                 variant,
                 args,
             } => {
-                let sum_id = *sum_id;
-                // Snapshot the payload field types — same borrow dance as
-                // struct literals (no `self.symbols` borrow across the
-                // per-argument `check_expression` calls). Arity was enforced
-                // by the parser, so a plain `zip` pairs them exactly.
-                let field_tys: Vec<LangType> = self.symbols.sum_info(sum_id).variants
-                    [*variant as usize]
-                    .fields
-                    .iter()
-                    .map(|(_, ty)| *ty)
-                    .collect();
-                for (arg, fty) in args.iter_mut().zip(field_tys) {
-                    self.check_expression(arg, &fty);
-                }
-                let sum_ty = LangType::sum_type(sum_id);
+                let sum_ty = self.synth_sum_construct(*sum_id, *variant, args);
                 expr.expr_type = sum_ty;
                 sum_ty
             }
@@ -323,40 +250,8 @@ impl TypeChecker {
             // name would have stayed `Variable` with a `void` stamp.
             ExprKind::FunctionRef(_) => default_type,
 
-            // Synth the callee, validate it's a `FnPtr`, then `check` each arg
-            // against the declared parameter type (mirrors `check_call`).
             ExprKind::IndirectCall { callee, args } => {
-                let callee_type = self.synth_expression(callee);
-                let sig_params: Option<Vec<LangType>> = match callee_type.base {
-                    TypeBase::FnPtr(id) if callee_type.pointer_depth == 0 => {
-                        Some(self.symbols.fnptr_sig(id).params.clone())
-                    }
-                    _ => {
-                        self.errors.push(TypeCheckError::TypeMismatch {
-                            expected: LangType::VOID,
-                            found: callee_type,
-                            position: pos,
-                        });
-                        None
-                    }
-                };
-                if let Some(params) = sig_params {
-                    if params.len() != args.len() {
-                        self.errors.push(TypeCheckError::ArgumentCountMismatch {
-                            name: "<indirect call>".to_string(),
-                            expected: params.len(),
-                            found: args.len(),
-                            position: pos,
-                        });
-                        self.synth_all(args);
-                    } else {
-                        for (pty, arg) in params.iter().zip(args.iter_mut()) {
-                            self.check_expression(arg, pty);
-                        }
-                    }
-                } else {
-                    self.synth_all(args);
-                }
+                self.synth_indirect_call(callee, args, pos);
                 default_type
             }
 
@@ -430,7 +325,7 @@ impl TypeChecker {
 
     /// `true` when the function being checked is a method of the given
     /// type-struct (its mangled name begins with `"<TypeName>$"`).
-    fn is_inside_struct_methods(&self, struct_id: u32) -> bool {
+    pub(crate) fn is_inside_struct_methods(&self, struct_id: u32) -> bool {
         let Some(current) = self.current_function.as_deref() else {
             return false;
         };
@@ -453,60 +348,6 @@ impl TypeChecker {
             format!("{}{}", self.symbols.sum_info(id).name, stars)
         } else {
             format!("{ty}")
-        }
-    }
-
-    /// A private method is callable only from within its own type's methods.
-    /// `name` is the mangled target (`Type$method`); a name with no `$` is an
-    /// ordinary free function, always accessible.
-    fn check_method_access(&mut self, name: &str, pos: crate::lexer::Position) {
-        let Some((type_name, method_name)) = name.split_once('$') else {
-            return;
-        };
-        let Some(id) = self.symbols.struct_id(type_name) else {
-            return;
-        };
-        let vis = match self.symbols.struct_info(id).methods.get(method_name) {
-            Some(sig) => sig.vis,
-            None => return,
-        };
-        if vis == Visibility::Private && !self.is_inside_struct_methods(id) {
-            self.errors.push(TypeCheckError::InaccessibleMethod {
-                method: method_name.to_string(),
-                type_name: type_name.to_string(),
-                position: pos,
-            });
-        }
-    }
-
-    /// Validates callee, arity, and argument types. Each argument is *checked*
-    /// against its parameter type, pushing that type into literal arguments.
-    fn check_call(
-        &mut self,
-        name: &str,
-        args: &mut [Expression],
-        pos: crate::lexer::Position,
-    ) {
-        self.check_method_access(name, pos);
-        if let Some(sig) = self.symbols.lookup_function(name).cloned() {
-            if sig.params.len() != args.len() {
-                self.errors.push(TypeCheckError::ArgumentCountMismatch {
-                    name: name.to_string(),
-                    expected: sig.params.len(),
-                    found: args.len(),
-                    position: pos,
-                });
-                // Still synthesise the arguments so their own errors surface.
-                self.synth_all(args);
-            } else {
-                for ((param_ty, _), arg_expr) in sig.params.iter().zip(args.iter_mut()) {
-                    self.check_expression(arg_expr, param_ty);
-                }
-            }
-        } else {
-            self.errors
-                .push(TypeCheckError::UndefinedFunction(name.to_string(), pos));
-            self.synth_all(args);
         }
     }
 
@@ -553,18 +394,7 @@ impl TypeChecker {
                 if target.is_plain_numeric()
                     && !matches!(op, BinaryOp::LogicalAnd | BinaryOp::LogicalOr) =>
             {
-                self.check_expression(left, target);
-                self.check_expression(right, target);
-                let left_type = left.expr_type;
-                let right_type = right.expr_type;
-                if !Self::binary_op_types_valid(&left_type, &right_type, op) {
-                    self.errors.push(TypeCheckError::InvalidBinaryOperation {
-                        operator: format!("{op:?}"),
-                        left: left_type,
-                        right: right_type,
-                        position: pos,
-                    });
-                }
+                self.check_binary_numeric(left, op, right, target, pos);
                 expr.expr_type = *target;
             }
 
@@ -582,24 +412,7 @@ impl TypeChecker {
                 expr.expr_type = *target;
             }
 
-            // A Reference may produce a const-pointer to a non-const value
-            // (`const T* p = &t`), so the inner need not carry the pointee's
-            // const-ness.
-            ExprKind::Reference(inner) => {
-                // Against an opaque `u0*` target the pointee is `u0`, which no
-                // value has — synthesise instead (any `&lvalue` coerces to u0*).
-                let opaque_target =
-                    target.base == TypeBase::Void && target.pointer_depth == 1;
-                if target.pointer_depth > 0 && !opaque_target {
-                    let mut inner_target = *target;
-                    inner_target.pointer_depth -= 1;
-                    inner_target.is_const = false;
-                    self.check_expression(inner, &inner_target);
-                } else {
-                    self.synth_expression(inner);
-                }
-                self.assert_coercible(expr.expr_type, target, pos);
-            }
+            ExprKind::Reference(inner) => self.check_reference(inner, target, expr.expr_type, pos),
 
             // Dereference: synthesise (the operand is a pointer/array, not the
             // target type), then assert the produced type is coercible.
@@ -689,6 +502,55 @@ impl TypeChecker {
         {
             operand.expr_type = sibling;
         }
+    }
+
+    /// Checks both operands against `target`, then validates the resulting
+    /// pair against `op`. Only called for a plain-numeric `target`, so this
+    /// stamps a scalar type into both operands — never called for `&&`/`||`.
+    fn check_binary_numeric(
+        &mut self,
+        left: &mut Expression,
+        op: &BinaryOp,
+        right: &mut Expression,
+        target: &LangType,
+        pos: crate::lexer::Position,
+    ) {
+        self.check_expression(left, target);
+        self.check_expression(right, target);
+        let left_type = left.expr_type;
+        let right_type = right.expr_type;
+        if !Self::binary_op_types_valid(&left_type, &right_type, op) {
+            self.errors.push(TypeCheckError::InvalidBinaryOperation {
+                operator: format!("{op:?}"),
+                left: left_type,
+                right: right_type,
+                position: pos,
+            });
+        }
+    }
+
+    /// A Reference may produce a const-pointer to a non-const value
+    /// (`const T* p = &t`), so the inner need not carry the pointee's
+    /// const-ness.
+    fn check_reference(
+        &mut self,
+        inner: &mut Expression,
+        target: &LangType,
+        expr_type: LangType,
+        pos: crate::lexer::Position,
+    ) {
+        // Against an opaque `u0*` target the pointee is `u0`, which no
+        // value has — synthesise instead (any `&lvalue` coerces to u0*).
+        let opaque_target = target.base == TypeBase::Void && target.pointer_depth == 1;
+        if target.pointer_depth > 0 && !opaque_target {
+            let mut inner_target = *target;
+            inner_target.pointer_depth -= 1;
+            inner_target.is_const = false;
+            self.check_expression(inner, &inner_target);
+        } else {
+            self.synth_expression(inner);
+        }
+        self.assert_coercible(expr_type, target, pos);
     }
 
     /// Two pointers compare regardless of pointee type (comparing addresses is
