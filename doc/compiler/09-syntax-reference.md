@@ -663,13 +663,14 @@ sum Shape {
   model as `public type`/`public enum`, with no per-variant visibility (exhaustive
   matching needs all variants or none).
 
-**Layout.** Storage is `{ i32 tag, [k x iN] }`: a 4-byte discriminant (variant
-declaration index), then payload space sized and aligned to the largest variant's
+**Layout.** Storage is `{ tag, [k x iN] }`: a discriminant (the variant's
+declaration index, in the smallest integer fitting the variant count — `i8`
+up to 256 variants), then payload space sized and aligned to the largest variant's
 payload struct `{ field…, field }`. Every variant's payload starts at the **same
 uniform offset** (the payload alignment) — never packed into the tag's padding —
 because LLVM's first-class aggregate copies preserve fields, not padding bytes,
 and every payload byte must live inside a real field to survive whole-value
-copies. A payload-less sum is tag-only (4 bytes). `sizeof` reports the final
+copies. A payload-less sum is tag-only (one byte). `sizeof` reports the final
 padded size; the layout is internal and not a C-interop contract.
 
 ### Statements

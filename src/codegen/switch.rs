@@ -115,7 +115,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .build_struct_gep(storage, slot, 0, "switch.tag")?;
             sum_slot = Some((slot, sum_id));
             self.builder
-                .build_load(self.context.i32_type(), tag_ptr, "tag")?
+                .build_load(self.sum_tag_type(sum_id, pos)?, tag_ptr, "tag")?
                 .into_int_value()
         } else {
             let v = self.generate_expression(scrutinee)?.into_int_value();

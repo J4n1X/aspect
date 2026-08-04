@@ -240,7 +240,7 @@ enums entirely, which is the feature's whole point. Forged values are
 handled below, so exhaustiveness never lies.
 
 **Lowering** (nothing codegen doesn't already do): evaluate the
-scrutinee to a temp (alloca for sums); for sums load the `i32` tag;
+scrutinee to a temp (alloca for sums); for sums load the tag (sized to the variant count since 2026-08-04);
 LLVM `switch` over tag/value to per-arm blocks; in a sum arm, GEP the
 payload through the variant's view (opaque pointers — no bitcast
 ceremony) and copy fields into binding allocas. The `switch`'s else
@@ -380,7 +380,8 @@ while node is Cons(head, tail) {
 - **`const`**: a `const Shape` (or reads through `const Shape*`) can be
   switched on or probed with `is` — matching only reads. Bindings are
   copies, so no const-ness escapes into them.
-- **`extern` / ABI**: sum layout (tag `i32` at offset 0, payload after,
+- **`extern` / ABI**: sum layout (tag at offset 0 — since 2026-08-04 sized
+  to the variant count — payload after,
   max-size/max-align) is documented as **unspecified/internal** — sums
   are not a C-interop type. Nothing blocks taking a pointer to one, as
   with structs; it's the programmer's problem. Sum-typed parameters and

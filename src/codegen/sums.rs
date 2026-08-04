@@ -6,7 +6,8 @@
 //! directly with `insertvalue` and never touches this module's
 //! payload-offset machinery, so there's nothing to share.
 //!
-//! A sum value is `{ i32 tag, [k x iN] }`: the payload array's element width N
+//! A sum value is `{ tag, [k x iN] }` — the tag is the smallest int fitting
+//! the variant count (`sum_tag_type`) — where the payload array's element width N
 //! is the largest payload alignment, and **every** variant's payload starts at
 //! the array — a *uniform* offset, never packed into the tag's padding gap.
 //! This is what makes whole-value copies (`load`/`store` of the storage
@@ -42,6 +43,30 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .map(|v| v.fields.iter().map(|(_, ty)| *ty).collect())
                 .collect();
             self.sum_variant_fields.insert(info.id, variants);
+        }
+    }
+
+    /// The tag's integer type: the smallest width that fits the variant
+    /// count. The single authority — layout, construction, probing, switch
+    /// dispatch and constant folding must all agree, or a store writes past
+    /// a narrower field (opaque pointers make that a silent miscompile, not
+    /// a type error).
+    pub(crate) fn sum_tag_type(
+        &self,
+        sum_id: u32,
+        pos: Position,
+    ) -> Result<inkwell::types::IntType<'ctx>, CodegenError> {
+        let count = self.sum_variant_fields[&sum_id].len();
+        match count {
+            0..=0x100 => Ok(self.context.i8_type()),
+            0x101..=0x1_0000 => Ok(self.context.i16_type()),
+            0x1_0001..=0x1_0000_0000 => Ok(self.context.i32_type()),
+            _ => Err(CodegenError::TypeError(
+                format!(
+                    "sum has {count} variants, which exceeds the 2^32 limit. What are you doing?"
+                ),
+                pos,
+            )),
         }
     }
 
@@ -135,13 +160,14 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     fn set_sum_body(&mut self, info: &SumInfo) -> Result<(), CodegenError> {
+
         let target_data = self.target_machine.get_target_data();
-        let tag: BasicTypeEnum<'ctx> = self.context.i32_type().into();
+        let tag: BasicTypeEnum<'ctx> = self.sum_tag_type(info.id, Position::new(0, 0))?.into();
 
         // Size/align of the largest *bare payload* struct — not `{i32, …}`
         // views: the payload starts at the uniform offset for every variant.
         let mut max_payload: u64 = 0;
-        let mut max_align: u32 = 4;
+        let mut max_align: u32 = 1;
         for variant in &info.variants {
             if variant.fields.is_empty() {
                 continue;
@@ -212,15 +238,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.builder.build_store(slot, value)?;
             slot
         };
+        let tag_ty = self.sum_tag_type(sum_id, pos)?;
         let tag_ptr = self.builder.build_struct_gep(storage, slot, 0, "is.tag")?;
         let tag = self
             .builder
-            .build_load(self.context.i32_type(), tag_ptr, "tag")?
+            .build_load(tag_ty, tag_ptr, "tag")?
             .into_int_value();
         let matched = self.builder.build_int_compare(
             inkwell::IntPredicate::EQ,
             tag,
-            self.context.i32_type().const_int(u64::from(variant), false),
+            tag_ty.const_int(u64::from(variant), false),
             "is",
         )?;
         Ok((matched, slot))
@@ -242,10 +269,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or_else(|| CodegenError::TypeError(format!("unregistered sum id {sum_id}"), pos))?;
         let tmp = self.builder.build_alloca(storage, "sum.tmp")?;
         let tag_ptr = self.builder.build_struct_gep(storage, tmp, 0, "sum.tag")?;
-        self.builder.build_store(
-            tag_ptr,
-            self.context.i32_type().const_int(u64::from(variant), false),
-        )?;
+        let tag_ty = self.sum_tag_type(sum_id, pos)?;
+        self.builder
+            .build_store(tag_ptr, tag_ty.const_int(u64::from(variant), false))?;
         if !args.is_empty() {
             let payload_ptr = self.builder.build_struct_gep(storage, tmp, 1, "sum.payload")?;
             let payload_ty = self

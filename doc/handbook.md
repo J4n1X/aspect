@@ -660,9 +660,10 @@ those at runtime). What you *cannot* do: compare sums (`a == b` is a type
 error — sums are matched, not compared) or cast them (`as` never involves
 a sum value, in either direction).
 
-Storage is a 4-byte tag (the variant's declaration index) followed by payload
-space sized for the largest variant, so `sizeof(Shape)` is 24 on x86-64
-(tag + padding + two `f64`). A payload-less sum is 4 bytes. Sums are nominal
+Storage is a tag (the variant's declaration index, sized to the smallest
+integer that fits the variant count — one byte up to 256 variants) followed
+by payload space sized for the largest variant, so `sizeof(Shape)` is 24 on
+x86-64 (tag + padding + two `f64`). A payload-less sum is one byte. Sums are nominal
 like enums: no implicit conversion to anything else, and — unlike enums — no
 `as` casts at all, in either direction.
 

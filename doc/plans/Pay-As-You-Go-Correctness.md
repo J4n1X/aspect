@@ -95,7 +95,7 @@ year and the compiler marches you to every switch that must now handle
 it — unless a `default` silently swallowed it, which is why a `default`
 on an already-complete sum-type switch is flagged.
 
-Lowering is nothing new for codegen: load the discriminant (an i32) →
+Lowering is nothing new for codegen: load the discriminant (a small int) →
 `switch` → per-arm GEP/bitcast the payload and bind. No generated
 per-type comparison function; that is only needed for whole-value `==`
 on aggregates, which pattern matching never uses.

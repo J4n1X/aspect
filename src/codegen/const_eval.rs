@@ -278,13 +278,17 @@ fn const_eval_sum_construct<'ctx>(
         .ok_or_else(|| CodegenError::TypeError(format!("unregistered sum id {sum_id}"), pos))?;
     let target_data = cg.target_machine.get_target_data();
     let total = target_data.get_store_size(&storage);
-    let tag = cg.context.i32_type().const_int(u64::from(*variant), false);
+    let tag_ty = cg.sum_tag_type(*sum_id, pos)?;
+    let tag = tag_ty.const_int(u64::from(*variant), false);
+    let tag_size = u64::from(tag_ty.get_bit_width() / 8);
     let field_tys = cg.sum_variant_fields[sum_id][*variant as usize].clone();
 
     let mut members: Vec<BasicValueEnum> = vec![tag.into()];
     if field_tys.is_empty() {
-        if total > 4 {
-            let pad = u32::try_from(total - 4).expect("padding fits u32");
+        // Fill to the storage size exactly — an under-filled global would let
+        // storage-typed reads run past the allocation.
+        if total > tag_size {
+            let pad = u32::try_from(total - tag_size).expect("padding fits u32");
             members.push(cg.context.i8_type().array_type(pad).const_zero().into());
         }
     } else {
@@ -294,8 +298,8 @@ fn const_eval_sum_construct<'ctx>(
             .expect("variant with args has a payload type");
         let payload_size = target_data.get_store_size(&payload_ty);
         let payload_off = u64::from(target_data.get_abi_alignment(&storage));
-        if payload_off > 4 {
-            let pad = u32::try_from(payload_off - 4).expect("padding fits u32");
+        if payload_off > tag_size {
+            let pad = u32::try_from(payload_off - tag_size).expect("padding fits u32");
             members.push(cg.context.i8_type().array_type(pad).const_zero().into());
         }
         let mut fields = Vec::with_capacity(args.len());

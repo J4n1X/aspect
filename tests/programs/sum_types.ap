@@ -1,4 +1,4 @@
-# expected: 215
+# expected: 206
 # requires_arch: ARCH_X86_64
 #-
   Sum types, Stages A+B: declarations, storage layout + sizeof, construction,
@@ -12,8 +12,8 @@
   is observed by peeking through `u8*` casts at the pinned offsets; when
   destructuring lands, these peeks can migrate to `case`/`is`.
 
-  Sections sum to the expected value: sizes 160 + construction 42 +
-  embedding 13 = 215.
+  Sections sum to the expected value: sizes 151 + construction 42 +
+  embedding 13 = 206.
 -#
 
 sum Shape {
@@ -82,10 +82,10 @@ fn construction() -> i32 {
     u8 *pb = &b as u8*
     u8 *pc = &c as u8*
     u8 *pd = &d as u8*
-    bool ok = *(pb as i32*) == 0 && *((pb + 8) as f64*) == 2.5 \
-        && *(pc as i32*) == 1 && *((pc + 8) as f64*) == 3.0 \
+    bool ok = *pb == 0 && *((pb + 8) as f64*) == 2.5 \
+        && *pc == 1 && *((pc + 8) as f64*) == 3.0 \
         && *((pc + 16) as f64*) == 4.0 \
-        && *(pd as i32*) == 2
+        && *pd == 2
     if ok {
         return 42
     }
@@ -104,9 +104,9 @@ fn embedding() -> i32 {
     u8 *q0 = &pair[0] as u8*
     u8 *q1 = sp as u8*
     bool ok = w.k == 7 \
-        && *(q0 as i32*) == 1 && *((q0 + 8) as f64*) == 5.0 \
+        && *q0 == 1 && *((q0 + 8) as f64*) == 5.0 \
         && *((q0 + 16) as f64*) == 6.0 \
-        && *(q1 as i32*) == 0 && *((q1 + 8) as f64*) == 1.5
+        && *q1 == 0 && *((q1 + 8) as f64*) == 1.5
     if ok {
         return 13
     }
