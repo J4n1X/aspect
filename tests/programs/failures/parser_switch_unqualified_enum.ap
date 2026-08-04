@@ -1,0 +1,11 @@
+# expected: "variant patterns are qualified", "write `Color.Red`"
+
+enum Color { Red, Green }
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Color c = Color.Red
+    switch c {
+        case Red { return 1 }
+        case Color.Green { return 2 }
+    }
+}

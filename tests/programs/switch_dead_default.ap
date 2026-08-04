@@ -9,8 +9,8 @@ enum State { On, Off }
 fn main(u32 argc, u8 **argv) -> i32 {
     State s = State.Off
     switch s {
-        case On { return 1 }
-        case Off { return 2 }
+        case State.On { return 1 }
+        case State.Off { return 2 }
         default { return 3 }
     }
 }

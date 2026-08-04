@@ -9,7 +9,7 @@ sum S {
 fn main(u32 argc, u8 **argv) -> i32 {
     S s = S.A
     switch s {
-        case A { return 1 }
+        case S.A { return 1 }
         case _ { return 0 }
     }
     return 0

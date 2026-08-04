@@ -619,7 +619,7 @@ mod tests {
     /// in-process JIT harness.
     #[test]
     fn complete_sum_switch_has_trap_edge() {
-        let src = "sum S {\n    A(i32 x)\n    B\n}\n\nfn main(u32 argc, u8 **argv) -> i32 {\n    S s = S.A(1)\n    switch s {\n        case A(v) { return v }\n        case B { return 0 }\n    }\n}\n";
+        let src = "sum S {\n    A(i32 x)\n    B\n}\n\nfn main(u32 argc, u8 **argv) -> i32 {\n    S s = S.A(1)\n    switch s {\n        case S.A(v) { return v }\n        case S.B { return 0 }\n    }\n}\n";
         let ctx = Context::create();
         let ir = ir_for(src, &ctx);
         assert!(ir.contains("llvm.trap"), "missing trap edge:\n{ir}");

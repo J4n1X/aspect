@@ -13,16 +13,26 @@ enum Class {
 }
 
 fn classify_scrutinee(s_ty: LangType) -> Class {
-    if s_ty.pointer_depth > 0 || s_ty.is_array() {
-        Class::Bad
-    } else {
-        match s_ty.base {
-            TypeBase::SInt | TypeBase::UInt => Class::Int,
-            TypeBase::Bool => Class::Bool,
-            TypeBase::Enum(id) => Class::Enum(id),
-            TypeBase::Sum(id) => Class::Sum(id),
-            _ => Class::Bad,
-        }
+    if s_ty.is_array() {
+        return Class::Bad;
+    }
+    // A single-level pointer to a sum auto-derefs (like field access);
+    // deeper pointers and pointers to anything else stay invalid.
+    if s_ty.pointer_depth > 0 {
+        return if s_ty.pointer_depth == 1
+            && let TypeBase::Sum(id) = s_ty.base
+        {
+            Class::Sum(id)
+        } else {
+            Class::Bad
+        };
+    }
+    match s_ty.base {
+        TypeBase::SInt | TypeBase::UInt => Class::Int,
+        TypeBase::Bool => Class::Bool,
+        TypeBase::Enum(id) => Class::Enum(id),
+        TypeBase::Sum(id) => Class::Sum(id),
+        _ => Class::Bad,
     }
 }
 

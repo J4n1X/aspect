@@ -201,9 +201,17 @@ impl<'ctx> CodeGenerator<'ctx> {
             .sum_types
             .get(&sum_id)
             .ok_or_else(|| CodegenError::TypeError(format!("unregistered sum id {sum_id}"), pos))?;
-        let value = self.generate_expression(scrutinee)?;
-        let slot = self.build_entry_alloca(function, storage.into(), "is.scrut", pos)?;
-        self.builder.build_store(slot, value)?;
+        // A pointer scrutinee auto-derefs: the pointer already addresses the
+        // sum, so it *is* the slot — no whole-value copy. Null is the user's
+        // problem, like any deref.
+        let slot = if scrutinee.expr_type.pointer_depth == 1 {
+            self.generate_expression(scrutinee)?.into_pointer_value()
+        } else {
+            let value = self.generate_expression(scrutinee)?;
+            let slot = self.build_entry_alloca(function, storage.into(), "is.scrut", pos)?;
+            self.builder.build_store(slot, value)?;
+            slot
+        };
         let tag_ptr = self.builder.build_struct_gep(storage, slot, 0, "is.tag")?;
         let tag = self
             .builder

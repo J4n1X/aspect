@@ -9,7 +9,7 @@ $import palette
 fn main(u32 argc, u8 **argv) -> i32 {
     Signal s = Signal.Go(3)
     switch s {
-        case Go(code) { return sizeof(Signal) as i32 + code }    # 8 + 3
-        case Halt { return 0 }
+        case Signal.Go(code) { return sizeof(Signal) as i32 + code }    # 8 + 3
+        case Signal.Halt { return 0 }
     }
 }

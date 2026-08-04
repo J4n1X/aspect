@@ -9,6 +9,6 @@ sum S {
 
 fn main(u32 argc, u8 **argv) -> i32 {
     S s = S.B
-    bool b = s is A(v)
+    bool b = s is S.A(v)
     return 0
 }

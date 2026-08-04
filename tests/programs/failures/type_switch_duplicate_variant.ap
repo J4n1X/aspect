@@ -8,8 +8,8 @@ sum S {
 fn main(u32 argc, u8 **argv) -> i32 {
     S s = S.B
     switch s {
-        case A(v) { return v }
-        case A(w) { return w }
-        case B { return 0 }
+        case S.A(v) { return v }
+        case S.A(w) { return w }
+        case S.B { return 0 }
     }
 }

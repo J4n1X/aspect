@@ -13,11 +13,13 @@ sum Node {
     Neg(Node* e)
 }
 
+# A single-level pointer scrutinee auto-derefs (like field access) — the
+# recursion needs no explicit `*` anywhere.
 fn eval(Node* n) -> i32 {
-    switch *n {
-        case Lit(v) { return v }
-        case Add(l, r) { return eval(l) + eval(r) }
-        case Neg(e) { return 0 - eval(e) }
+    switch n {
+        case Node.Lit(v) { return v }
+        case Node.Add(l, r) { return eval(l) + eval(r) }
+        case Node.Neg(e) { return 0 - eval(e) }
     }
 }
 
@@ -29,8 +31,8 @@ sum Probe {
 # `_` discards a position; a bare variant ignores the payload entirely.
 fn classify(Probe p) -> i32 {
     switch p {
-        case Pair(x, _) { return x }
-        case Unit { return -1 }
+        case Probe.Pair(x, _) { return x }
+        case Probe.Unit { return -1 }
     }
 }
 
@@ -40,7 +42,7 @@ fn classify(Probe p) -> i32 {
 # list, so this is exhaustive with no default.
 fn coarse(Probe p) -> i32 {
     switch p {
-        case Pair(_, _), Unit { return 1 }
+        case Probe.Pair(_, _), Probe.Unit { return 1 }
     }
 }
 
@@ -56,20 +58,28 @@ fn main(u32 argc, u8 **argv) -> i32 {
     i32 probeSum = classify(Probe.Pair(9, 1)) + classify(Probe.Unit)   # 9 + -1 = 8
     Probe keep = Probe.Pair(3, 4)
     switch keep {
-        case Pair(x, _) {
+        case Probe.Pair(x, _) {
             x = 999                             # copy mutates; `keep` does not
         }
-        case Unit { }
+        case Probe.Unit { }
     }
     switch keep {
-        case Probe.Pair(x, y) {                 # qualified pattern, same resolution
+        case Probe.Pair(x, y) {
             probeSum += x + y                   # still 3 + 4
         }
         default { }                             # exercises sum + default (legal: not all listed... all listed + default would warn)
     }
     probeSum += coarse(Probe.Pair(5, 6)) + coarse(Probe.Unit)   # +2
-    # probeSum = 8 + 7 + 2 = 17; gated so the file returns 84 exactly
-    if probeSum != 17 {
+
+    # u0* roundtrips to Sum* (explicitly or via the depth-1 bridge) and the
+    # pointer matches directly.
+    u0 *erased = &keep as u0*
+    Probe *back = erased
+    if back is Probe.Pair(a2, b2) {
+        probeSum += a2 + b2                     # 3 + 4 -> +7
+    }
+    # probeSum = 8 + 7 + 2 + 7 = 24; gated so the file returns 84 exactly
+    if probeSum != 24 {
         return 0
     }
     return tree

@@ -1,0 +1,14 @@
+# expected: "variant patterns are qualified", "write `S.A`"
+
+sum S {
+    A
+    B
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    S s = S.A
+    switch s {
+        case A { return 1 }
+        case S.B { return 2 }
+    }
+}

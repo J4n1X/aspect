@@ -22,18 +22,18 @@ const Shape g_rect = Shape.Rect(3.0, 4.0)
 
 fn main(u32 argc, u8 **argv) -> i32 {
     i32 total = 0
-    if g_circle is Circle(r) && r == 2.5 {
+    if g_circle is Shape.Circle(r) && r == 2.5 {
         total += 1
     }
     switch g_dot {
-        case Dot { total += 10 }
+        case Shape.Dot { total += 10 }
         default { }
     }
-    if g_rect is Rect(w, h) && w == 3.0 && h == 4.0 {
+    if g_rect is Shape.Rect(w, h) && w == 3.0 && h == 4.0 {
         total += 100
     }
     g_circle = Shape.Dot
-    if g_circle is Dot {
+    if g_circle is Shape.Dot {
         total += 1000
     }
     return total

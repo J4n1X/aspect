@@ -8,7 +8,7 @@ sum S {
 
 fn main(u32 argc, u8 **argv) -> i32 {
     S s = S.B
-    if (s is A(v)) {
+    if (s is S.A(v)) {
         return v
     }
     return 0

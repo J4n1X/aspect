@@ -1,0 +1,14 @@
+# expected: "variant patterns are qualified", "write `S.A`"
+
+sum S {
+    A(i32 x)
+    B
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    S s = S.B
+    if s is A(v) {
+        return v
+    }
+    return 0
+}

@@ -411,21 +411,23 @@ impl Parser {
         Ok(left)
     }
 
-    /// `left is Variant` / `left is Variant(a, _, b)` — the `is` keyword is
-    /// already consumed. Bare variants build the binding-free bool expression;
-    /// a parenthesized pattern builds the condition-restricted binding form,
-    /// registering its binders into the current parse-time scope in textual
-    /// order (which is what lets later `&&`-conjuncts and the success block
-    /// reference them).
+    /// `left is Sum.Variant` / `left is Sum.Variant(a, _, b)` — the `is`
+    /// keyword is already consumed, and qualification is mandatory (patterns
+    /// spell the type like every other variant access). Bare variants build
+    /// the binding-free bool expression; a parenthesized pattern builds the
+    /// condition-restricted binding form, registering its binders into the
+    /// current parse-time scope in textual order (which is what lets later
+    /// `&&`-conjuncts and the success block reference them). A single-level
+    /// pointer scrutinee auto-derefs, like field access.
     fn parse_is_suffix(&mut self, scrutinee: Expression) -> Result<Expression, ParserError> {
         let pos = scrutinee.pos;
         let pat_pos = self.peek().pos;
         let s_ty = scrutinee.expr_type;
 
-        let sum_id = if s_ty.pointer_depth == 0 && !s_ty.is_array() {
+        let sum_id = if s_ty.pointer_depth <= 1 && !s_ty.is_array() {
             match s_ty.base {
                 TypeBase::Sum(id) => id,
-                TypeBase::Enum(_) => {
+                TypeBase::Enum(_) if s_ty.pointer_depth == 0 => {
                     return Err(ParserError::UnexpectedToken(
                         "`is` does not apply to enums — compare with `==` against `Enum.Variant`"
                             .to_string(),
@@ -434,7 +436,7 @@ impl Parser {
                 }
                 _ => {
                     return Err(ParserError::UnexpectedToken(
-                        "`is` probes a sum value — the scrutinee is not a sum (dereference pointers: `*p is …`)"
+                        "`is` probes a sum value — the scrutinee is not a sum (or a single-level pointer to one)"
                             .to_string(),
                         pat_pos,
                     ));
@@ -442,23 +444,35 @@ impl Parser {
             }
         } else {
             return Err(ParserError::UnexpectedToken(
-                "`is` probes a sum value — the scrutinee is not a sum (dereference pointers: `*p is …`)"
+                "`is` probes a sum value — the scrutinee is not a sum (or a single-level pointer to one)"
                     .to_string(),
                 pat_pos,
             ));
         };
 
         let sum_name = self.module.sum_info(sum_id).name.clone();
-        let mut variant_name = self.parse_ident("variant pattern after `is`")?;
-        if variant_name == "_" {
+        let head = self.parse_ident("variant pattern after `is`")?;
+        if head == "_" {
             return Err(ParserError::UnexpectedToken(
                 format!("sum '{sum_name}' has no variant '_' — `is` probes one named variant"),
                 pat_pos,
             ));
         }
-        if variant_name == sum_name && self.match_token(&[TokenKind::Dot]) {
-            variant_name = self.parse_ident("variant name")?;
+        if head != sum_name {
+            if self.module.sum_variant_index(sum_id, &head).is_some() {
+                return Err(ParserError::UnexpectedToken(
+                    format!("variant patterns are qualified — write `{sum_name}.{head}`"),
+                    pat_pos,
+                ));
+            }
+            return Err(ParserError::UnknownSumVariant {
+                sum_name,
+                variant: head,
+                pos: pat_pos,
+            });
         }
+        self.expect(&TokenKind::Dot, ".")?;
+        let variant_name = self.parse_ident("variant name")?;
         let Some(idx) = self.module.sum_variant_index(sum_id, &variant_name) else {
             return Err(ParserError::UnknownSumVariant {
                 sum_name,

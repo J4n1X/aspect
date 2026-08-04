@@ -125,10 +125,11 @@ impl Parser {
     }
 
     /// One pattern, resolved against the scrutinee's parse-time type: sum
-    /// scrutinees take (un)qualified variant patterns with positional binders
-    /// and `_` discards; anything else takes a constant expression the
-    /// checker validates (bare enum variant names resolve here, since the
-    /// scrutinee pins the enum).
+    /// scrutinees (by value, or through one pointer level — matching
+    /// auto-derefs like field access) take qualified `Sum.Variant` patterns
+    /// with positional binders and `_` discards; anything else takes a
+    /// constant expression the checker validates. Qualification is mandatory
+    /// — patterns spell the type like every other variant access.
     fn parse_switch_pattern(
         &mut self,
         scrutinee: &Expression,
@@ -136,7 +137,7 @@ impl Parser {
         use crate::parser::SwitchPattern;
 
         let s_ty = scrutinee.expr_type;
-        if s_ty.pointer_depth == 0
+        if s_ty.pointer_depth <= 1
             && !s_ty.is_array()
             && let TypeBase::Sum(sum_id) = s_ty.base
         {
@@ -144,10 +145,9 @@ impl Parser {
             return self.parse_sum_variant_pattern(sum_id, &sum_name);
         }
 
-        // Bare enum variant names resolve against the scrutinee's enum — the
-        // one context where a variant needs no `Enum.` prefix. The qualified
-        // form falls through to `parse_expression`, which builds the same
-        // `EnumValue`.
+        // A bare enum variant name gets a qualify hint rather than the
+        // undefined-variable error `parse_expression` would produce; the
+        // qualified form falls through and builds the `EnumValue`.
         if s_ty.pointer_depth == 0
             && let TypeBase::Enum(enum_id) = s_ty.base
             && let Some(pattern) = self.parse_enum_variant_pattern(enum_id)?
@@ -158,10 +158,10 @@ impl Parser {
         Ok(SwitchPattern::Const(self.parse_expression()?))
     }
 
-    /// The sum-scrutinee branch of `parse_switch_pattern`: variant name
-    /// (bare or `Sum.Variant`), then an optional positional binder list.
-    /// Always resolves the whole pattern — unlike the enum branch, there's
-    /// no fall-through case.
+    /// The sum-scrutinee branch of `parse_switch_pattern`: a mandatory
+    /// `Sum.Variant` qualified pattern, then an optional positional binder
+    /// list. Always resolves the whole pattern — unlike the enum branch,
+    /// there's no fall-through case.
     fn parse_sum_variant_pattern(
         &mut self,
         sum_id: u32,
@@ -170,8 +170,8 @@ impl Parser {
         use crate::parser::SwitchPattern;
 
         let pos = self.peek().pos;
-        let mut variant_name = self.parse_ident("variant pattern")?;
-        if variant_name == "_" {
+        let head = self.parse_ident("variant pattern")?;
+        if head == "_" {
             return Err(ParserError::UnexpectedToken(
                 format!(
                     "sum '{sum_name}' has no variant '_' — use `default` to cover the remaining variants"
@@ -179,10 +179,23 @@ impl Parser {
                 pos,
             ));
         }
-        // Qualified form `Sum.Variant` — accepted, resolves identically.
-        if variant_name == sum_name && self.match_token(&[TokenKind::Dot]) {
-            variant_name = self.parse_ident("variant name")?;
+        if head != sum_name {
+            // A bare variant name gets the fix spelled out; anything else is
+            // an unknown variant of this sum.
+            if self.module.sum_variant_index(sum_id, &head).is_some() {
+                return Err(ParserError::UnexpectedToken(
+                    format!("variant patterns are qualified — write `{sum_name}.{head}`"),
+                    pos,
+                ));
+            }
+            return Err(ParserError::UnknownSumVariant {
+                sum_name: sum_name.to_string(),
+                variant: head,
+                pos,
+            });
         }
+        self.expect(&TokenKind::Dot, ".")?;
+        let variant_name = self.parse_ident("variant name")?;
         let Some(idx) = self.module.sum_variant_index(sum_id, &variant_name) else {
             return Err(ParserError::UnknownSumVariant {
                 sum_name: sum_name.to_string(),
@@ -234,18 +247,17 @@ impl Parser {
         })
     }
 
-    /// The enum-scrutinee branch of `parse_switch_pattern`: a bare
-    /// identifier that names one of `enum_id`'s variants. `None` means the
-    /// next token isn't such a reference (another enum's variant, a
-    /// shadowed name, or not an identifier at all) — the caller falls
-    /// through to `parse_expression`, which builds the same qualified
-    /// `EnumValue`.
+    /// The enum-scrutinee branch of `parse_switch_pattern`: patterns are
+    /// qualified (`Color.Red`), so a bare identifier naming one of
+    /// `enum_id`'s variants errors with the fix spelled out, and a bare
+    /// unknown identifier errors as an unknown variant. `None` means the
+    /// next token is no bare-identifier hazard (an enum name, a shadowed
+    /// local, or not an identifier) — the caller falls through to
+    /// `parse_expression`, which builds the qualified `EnumValue`.
     fn parse_enum_variant_pattern(
         &mut self,
         enum_id: u32,
     ) -> Result<Option<crate::parser::SwitchPattern>, ParserError> {
-        use crate::parser::SwitchPattern;
-
         let pos = self.peek().pos;
         let TokenKind::Identifier(name) = &self.peek().kind else {
             return Ok(None);
@@ -256,22 +268,18 @@ impl Parser {
         {
             return Ok(None);
         }
-        let Some(vidx) = self.module.enum_variant_index(enum_id, &name) else {
-            return Err(ParserError::UnknownVariant {
-                enum_name: self.module.enum_info(enum_id).name.clone(),
-                variant: name,
+        let enum_name = self.module.enum_info(enum_id).name.clone();
+        if self.module.enum_variant_index(enum_id, &name).is_some() {
+            return Err(ParserError::UnexpectedToken(
+                format!("variant patterns are qualified — write `{enum_name}.{name}`"),
                 pos,
-            });
-        };
-        self.advance();
-        Ok(Some(SwitchPattern::Const(Expression::new(
-            ExprKind::EnumValue {
-                enum_id,
-                value: vidx as i64,
-            },
-            LangType::enum_type(enum_id),
+            ));
+        }
+        Err(ParserError::UnknownVariant {
+            enum_name,
+            variant: name,
             pos,
-        ))))
+        })
     }
 
     /// Dedup-aware coverage: do the arms alone cover the scrutinee?
@@ -283,7 +291,12 @@ impl Parser {
         use crate::parser::{LiteralValue, SwitchPattern};
 
         let s_ty = scrutinee.expr_type;
-        if s_ty.pointer_depth > 0 || s_ty.is_array() {
+        // Single-level pointers to sums auto-deref; everything else
+        // pointer-shaped can't be covered.
+        if s_ty.is_array()
+            || s_ty.pointer_depth > 1
+            || (s_ty.pointer_depth == 1 && !matches!(s_ty.base, TypeBase::Sum(_)))
+        {
             return false;
         }
         let patterns = arms.iter().flat_map(|a| a.patterns.iter());

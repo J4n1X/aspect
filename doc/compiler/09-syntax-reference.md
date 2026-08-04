@@ -81,8 +81,8 @@ stmt ;
 stmt\n
 ```
 
-Inside a `for` loop header `(init ; cond ; incr)` only `;` is accepted;
-newlines inside the parentheses would close the `for` clause early.
+Inside a `for` loop header (`init ; cond ; incr`) only `;` is accepted;
+a newline inside the header would close the statement early.
 
 #### Line continuation
 
@@ -701,11 +701,12 @@ switch-stmt ::= 'switch' expr newline* '{'
                 '}'
 switch-arm     ::= 'case' pattern (',' pattern)* newline* block-body
 switch-default ::= 'default' newline* block-body     # must be the last arm
-pattern ::= expr                                     # int/bool literal or enum variant
-          | ident                                    # sum variant (bare: payload ignored)
-          | ident '(' (ident | '_') (',' (ident | '_'))* ')'   # positional binders
-# The scrutinee is evaluated once. Sum/enum variant patterns resolve
-# unqualified against the scrutinee's type (qualified also accepted). A
+pattern ::= expr                                   # int/bool literal or qualified enum variant
+          | ident '.' ident                        # Sum.Variant (no parens: payload ignored)
+          | ident '.' ident '(' (ident | '_') (',' (ident | '_'))* ')'  # positional binders
+# The scrutinee is evaluated once; a single-level pointer to a sum
+# auto-derefs (null is the user's problem). Variant patterns are QUALIFIED
+# (`Shape.Circle`, `Color.Red`) — a bare variant name errors with the fix. A
 # pattern that binds must be the arm's only pattern; binders are copies
 # scoped to the arm. Exhaustiveness: integers require `default`; bool is
 # covered by both literals; enums/sums by listing every variant (a `default`
@@ -716,16 +717,18 @@ pattern ::= expr                                     # int/bool literal or enum 
 # every-path-returns analysis.
 
 is-expr ::= expr 'is' variant-pattern      # comparison tier, left-associative
-# Two syntactic forms. Bare `Variant` (also `Sum.Variant`): an ordinary bool
-# expression, usable anywhere. Parenthesized `Variant(a, _, b)` — even
+# Two syntactic forms, both QUALIFIED (`Sum.Variant`; bare names error with
+# the fix). Payload-less `Sum.Variant`: an ordinary bool expression, usable
+# anywhere. Parenthesized `Sum.Variant(a, _, b)` — even
 # all-discard — is the BINDING form: not an expression, legal only as a leaf
 # of the root `&&` spine of an if/elif/while condition. Bindings are copies,
 # registered left-to-right (a later conjunct and the success block see them;
 # an earlier conjunct does not), sharing one scope (a repeated name is a
 # redeclaration error), dead when the block ends. Short-circuit `&&`
 # guarantees a binding is initialized whenever it is readable; `||`, `!`,
-# parens and `for` headers reject the binding form. Sums only — enums get
-# "use `==`". No exhaustiveness claim (that is `switch`'s job).
+# parens and `for` headers reject the binding form. Sums only (by value or
+# through one auto-dereffed pointer level) — enums get "use `==`". No
+# exhaustiveness claim (that is `switch`'s job).
 
 for-stmt ::= 'for' for-init ';' for-cond ';' for-incr newline* block-body
 # The header stays on one line (a newline inside it closes the statement);

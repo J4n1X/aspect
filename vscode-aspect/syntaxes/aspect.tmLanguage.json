@@ -13,6 +13,8 @@
     { "include": "#string" },
     { "include": "#number" },
     { "include": "#type-declaration" },
+    { "include": "#sum-declaration" },
+    { "include": "#enum-declaration" },
     { "include": "#alias-declaration" },
     { "include": "#fn-declaration" },
     { "include": "#keyword-control" },
@@ -160,6 +162,20 @@
         "2": { "name": "entity.name.type.struct.ap" }
       }
     },
+    "sum-declaration": {
+      "match": "\\b(sum)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.declaration.type.ap" },
+        "2": { "name": "entity.name.type.sum.ap" }
+      }
+    },
+    "enum-declaration": {
+      "match": "\\b(enum)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.declaration.type.ap" },
+        "2": { "name": "entity.name.type.enum.ap" }
+      }
+    },
     "alias-declaration": {
       "match": "\\b(alias)\\s+([A-Za-z_][A-Za-z0-9_]*)",
       "captures": {
@@ -176,11 +192,11 @@
     },
     "keyword-control": {
       "name": "keyword.control.ap",
-      "match": "\\b(if|else|elif|while|for|switch|break|continue|return)\\b"
+      "match": "\\b(if|else|elif|while|for|switch|case|default|break|continue|return)\\b"
     },
     "keyword-declaration": {
       "name": "keyword.other.ap",
-      "match": "\\b(fn|extern|type|struct|alias)\\b"
+      "match": "\\b(fn|extern|asm|naked|type|enum|struct|sum|alias)\\b"
     },
     "sizeof": {
       "name": "keyword.operator.sizeof.ap",
@@ -212,11 +228,11 @@
     },
     "storage-modifier": {
       "name": "storage.modifier.ap",
-      "match": "\\b(const|public)\\b"
+      "match": "\\b(const|public|export)\\b"
     },
     "keyword-cast": {
       "name": "keyword.operator.cast.ap",
-      "match": "\\bas\\b"
+      "match": "\\b(as|is)\\b"
     },
     "caps-constant": {
       "name": "constant.other.caps.ap",

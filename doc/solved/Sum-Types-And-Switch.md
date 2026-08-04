@@ -539,7 +539,8 @@ All five open questions resolved in favor of the proposal's choices:
    labels and fall-through, both absent here; mandatory `{` terminates
    the pattern list unambiguously. Supersedes the parent doc's
    `case 3:` sketch.
-2. **Unqualified variant patterns — kept**, qualified form also
+2. **Unqualified variant patterns — kept** (reversed post-landing, see
+   Post-landing amendments below), qualified form also
    accepted. The scrutinee pins the namespace; per-arm `Shape.` is
    exactly the re-demanded repetition the identity doc rejects.
    In-language precedent: struct-literal field names are already bare
@@ -577,3 +578,22 @@ sound at the comparison tier (`!s is Rect` and `a is B is C` both fail
 cleanly on scrutinee typing rather than surprising), that unparenthesized
 conditions make "entire condition" a real grammatical position, and
 that the keyword `is` has zero identifier-position uses in the repo.
+
+## Post-landing amendments (2026-08-04, after real use)
+
+Three maintainer decisions from the first day of actually writing sums:
+
+1. **Qualification is mandatory** — `case Shape.Circle(r)`, `s is
+   Shape.Circle`, `case Color.Red`. This reverses review resolution 2
+   (unqualified patterns): inferring the type from the scrutinee read as
+   non-transparent in practice — a pattern now spells its type the way
+   every other variant access does. Bare variant names error with the
+   exact fix ("variant patterns are qualified — write `Shape.Circle`").
+2. **Single-level pointer scrutinees auto-deref** for both `switch` and
+   `is`, lifting the v1 pointer exclusion — `switch p` and `p is
+   Shape.Circle(r)` on a `Shape*` match the pointee (and skip the
+   whole-value copy; the pointer is the slot). Null derefs are the
+   user's problem, deliberately unchecked. Deeper pointers still error.
+3. **`u0*` ↔ `Sum*` casts confirmed as designed** — the explicit `as`
+   and the depth-1 implicit bridge both work (sum *values* still admit
+   no casts); now pinned by corpus tests.

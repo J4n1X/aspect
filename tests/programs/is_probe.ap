@@ -1,7 +1,7 @@
 # expected: 1814
 #-
   The `is` single-variant probe, both forms: binding-free (`s is Circle`, an
-  ordinary bool expression) and binding (`s is Circle(r)`), legal as leaves
+  ordinary bool expression) and binding (`s is Shape.Circle(r)`), legal as leaves
   of the condition's root `&&` spine with bindings flowing to later
   conjuncts and the success block. Covers the third review pass's required
   cases: a guard failing after a successful match, a non-first binding
@@ -27,46 +27,46 @@ fn main(u32 argc, u8 **argv) -> i32 {
     Shape s = Shape.Circle(2.5)
 
     # binding-free form: ordinary bool expression
-    bool round = s is Circle
-    if round && !(s is Dot) {
+    bool round = s is Shape.Circle
+    if round && !(s is Shape.Dot) {
         total += 1
     }
 
     # binding form + chained guard reading the binding
-    if s is Circle(r) && r > 2.0 {
+    if s is Shape.Circle(r) && r > 2.0 {
         total += 10
     }
     # guard fails after successful match: block skipped
-    if s is Circle(r) && r > 99.0 {
+    if s is Shape.Circle(r) && r > 99.0 {
         total += 100000
     }
     # elif with binding
-    if s is Dot {
+    if s is Shape.Dot {
         total += 100000
-    } elif s is Rect(w, _) {
+    } elif s is Shape.Rect(w, _) {
         total += 100000
-    } elif s is Circle(q) {
+    } elif s is Shape.Circle(q) {
         total += (q * 40.0) as i32     # 100
     }
 
     # non-first conjunct + two-binding chain, second scrutinee derefs first's binding
     List n2 = List.Nil
     List n1 = List.Cons(7, &n2)
-    if total > 0 && n1 is Cons(h, t) && *t is Nil {
+    if total > 0 && n1 is List.Cons(h, t) && t is List.Nil {
         total += h * 100               # 700
     }
 
     # while chain: guard conjunct terminates while matches continue
     List c = List.Cons(1, &n1)         # walk: 1, 7 then Nil
     List *walk = &c
-    while *walk is Cons(head, tail) && head < 5 {
+    while walk is List.Cons(head, tail) && head < 5 {
         total += head * 1000           # only head=1 passes the guard -> 1000
         walk = tail
     }
 
     # shadowing: binder dies with the block
     i32 r = 3
-    if s is Circle(r) { }
+    if s is Shape.Circle(r) { }
     total += r                          # outer r intact -> +3
 
     return total    # 1 + 10 + 100 + 700 + 1000 + 3 = 1814

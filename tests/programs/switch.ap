@@ -3,8 +3,8 @@
   `switch` on the constant-pattern scrutinee classes: integers (multi-pattern
   arms, negative labels, mandatory `default`), bool (both literals =
   exhaustive, no `default` needed), and enums (fully listed = exhaustive;
-  unqualified variant patterns resolve against the scrutinee, qualified ones
-  are also accepted). Also: a value block wrapping a coverage-complete
+  variant patterns are qualified — `Color.Red` — spelling the type like every
+  other variant access). Also: a value block wrapping a coverage-complete
   switch, and `break` inside an arm binding to the enclosing loop (a switch
   is not a break target — there is no fall-through to break out of).
   Sum destructuring lives in sum_match.ap.
@@ -32,12 +32,11 @@ fn main(u32 argc, u8 **argv) -> i32 {
     }
     # total = 25
 
-    # Enum: fully listed, no default. Patterns resolve unqualified against
-    # the scrutinee's enum; the qualified spelling works too.
+    # Enum: fully listed, no default; qualified patterns.
     Color c = Color.Green
     switch c {
-        case Red { total += 100 }
-        case Green { total += 200 }
+        case Color.Red { total += 100 }
+        case Color.Green { total += 200 }
         case Color.Blue { total += 300 }
     }
     # total = 225

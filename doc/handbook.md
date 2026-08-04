@@ -847,12 +847,14 @@ cover its scrutinee; `default` covers the rest":
 
 Sum patterns bind payload fields positionally, as **copies** — ordinary
 mutable locals scoped to the arm; writing one never writes the sum.
-Patterns resolve unqualified against the scrutinee (`case Circle(r)`,
-not `case Shape.Circle(r)` — though the qualified form works too), and
-a pattern that binds must be the arm's only pattern. `case` labels
-accept integer literals (including `$define`-expanded ones), `true`/
-`false`, and enum variants; matching through a `Shape*` is
-`switch *p`.
+Variant patterns are **qualified** (`case Shape.Circle(r)`, `case
+Color.Red`) — a pattern spells its type the way every other variant
+access does — and a pattern that binds must be the arm's only pattern.
+`case` labels accept integer literals (including `$define`-expanded
+ones), `true`/`false`, and enum variants. A **single-level pointer
+scrutinee auto-derefs** like field access: `switch p` on a `Shape*`
+matches the pointee directly (a null pointer is your problem, as with
+any deref).
 
 Two things worth internalizing: `break`/`continue` inside an arm bind to
 the enclosing **loop**, not the switch (there is no fall-through to
@@ -867,21 +869,22 @@ the tool for "if it's a Circle, give me the radius" without a full
 switch:
 
 ```aspect
-bool round = s is Circle              # bare variant: an ordinary bool, usable anywhere
+bool round = s is Shape.Circle        # no parens: an ordinary bool, usable anywhere
 
-if s is Circle(r) && r > 2.0 {        # binding form: only in if/elif/while conditions
+if s is Shape.Circle(r) && r > 2.0 {  # binding form: only in if/elif/while conditions
     use(r)                            # r is a copy, dead after this block
 }
 
-while node is Cons(head, tail) {      # the list-walk idiom: re-binds each iteration
-    total += head
-    node = *tail
+while node is List.Cons(head, tail) { # the list-walk idiom: re-binds each iteration
+    total += head                     # (node: List* — pointer scrutinees auto-deref)
+    node = tail
 }
 ```
 
-The two forms are told apart **syntactically**: a bare `Variant` is an
-expression; anything parenthesized — even all-discard `Circle(_)` — is
-the binding form, which is *not* an expression. A binding `is` may only
+The two forms are told apart **syntactically**: a payload-less pattern
+(`s is Shape.Circle`) is an expression; anything parenthesized — even
+all-discard `Shape.Circle(_)` — is the binding form, which is *not* an
+expression. A binding `is` may only
 be a top-level `&&`-conjunct of an `if`/`elif`/`while` condition:
 bindings flow to later conjuncts and the block (short-circuiting
 guarantees they're initialized when read), all chain bindings share one

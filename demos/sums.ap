@@ -1,0 +1,142 @@
+#-
+  Binary-search tree demo built on sum types.
+  Leaf is a terminal; Node is an internal value with optional children.
+-#
+$import std/mem
+$import std/io
+
+sum TreeNode {
+    Leaf(i32 val)
+    Node(i32 val, TreeNode *left, TreeNode *right)
+}
+
+type Tree {
+    TreeNode *root
+
+    public fn new() -> Tree {
+        return Tree { root = null }
+    }
+
+    # static helper — no receiver
+    fn free_node(TreeNode *node) {
+        if node == null {
+            return
+        }
+        switch *node {
+            case TreeNode.Leaf(_) {
+                free_ptr(node)
+            }
+            case TreeNode.Node(_, left, right) {
+                Tree.free_node(left)
+                Tree.free_node(right)
+                free_ptr(node)          # was missing
+            }
+        }
+    }
+
+    public fn free(this) {
+        Tree.free_node(this.root)
+        this.root = null
+    }
+
+    # Walk until we hit a leaf (must be promoted) or a Node with a null child
+    # (new leaf can be attached). Returns null only when the tree is empty.
+    fn find_insert_loc(this, i32 val) -> TreeNode* {
+        if this.root == null {
+            return null
+        }
+
+        TreeNode *cur = this.root
+        while true {
+            switch *cur {
+                case TreeNode.Leaf(_) {
+                    return cur
+                }
+                case TreeNode.Node(node_val, left, right) {
+                    if val < node_val {
+                        if left == null {
+                            return cur
+                        }
+                        cur = left
+                    } else {
+                        if right == null {
+                            return cur
+                        }
+                        cur = right
+                    }
+                }
+            }
+        }
+    }
+
+    public fn insert(this, i32 val) {
+        TreeNode *loc = this.find_insert_loc(val)
+
+        # empty tree → first leaf becomes the root
+        if loc == null {
+            TreeNode *n = alloc_bytes(sizeof(TreeNode))
+            *n = TreeNode.Leaf(val)
+            this.root = n
+            return
+        }
+
+        switch *loc {
+            # promote a leaf into a parent Node; old value stays a Leaf
+            case TreeNode.Leaf(leaf_val) {
+                TreeNode *old = alloc_bytes(sizeof(TreeNode))
+                *old = TreeNode.Leaf(leaf_val)
+
+                if val < leaf_val {
+                    *loc = TreeNode.Node(val, null, old)
+                } else {
+                    *loc = TreeNode.Node(val, old, null)
+                }
+            }
+
+            # attach a fresh leaf under the null child
+            case TreeNode.Node(node_val, left, right) {
+                TreeNode *n = alloc_bytes(sizeof(TreeNode))
+                *n = TreeNode.Leaf(val)
+
+                if val < node_val {
+                    *loc = TreeNode.Node(node_val, n, right)
+                } else {
+                    *loc = TreeNode.Node(node_val, left, n)
+                }
+            }
+        }
+    }
+
+    fn sum_node(TreeNode *node) -> i32 {
+        if node == null {
+            return 0
+        }
+        switch *node {
+            case TreeNode.Leaf(val) {
+                return val
+            }
+            case TreeNode.Node(val, left, right) {
+                return val + Tree.sum_node(left) + Tree.sum_node(right)
+            }
+        }
+    }
+
+    public fn sum_tree(this) -> i32 {
+        return Tree.sum_node(this.root)
+    }
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    Tree tree = Tree.new()
+    
+    for i32 i = -4096; i <= 4096; i += 1 {
+        tree.insert(i)
+    }
+
+    i32 total = tree.sum_tree()
+    tree.free()
+
+    print("Total sum of tree nodes: ")
+    println_i32(total)          # 70
+    return 0
+}

@@ -1,5 +1,5 @@
 # expected: "not an expression", "`||` cannot guarantee the binding matched"
-# `s is A(v) && x || y` parses with `||` at the root — the `is` sits beside
+# `s is S.A(v) && x || y` parses with `||` at the root — the `is` sits beside
 # an `&&` but is not a top-level conjunct, so the binding is illegal.
 
 sum S {
@@ -10,7 +10,7 @@ sum S {
 fn main(u32 argc, u8 **argv) -> i32 {
     S s = S.B
     bool y = true
-    if s is A(v) && v > 0 || y {
+    if s is S.A(v) && v > 0 || y {
         return 1
     }
     return 0
