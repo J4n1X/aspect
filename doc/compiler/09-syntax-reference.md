@@ -712,8 +712,9 @@ pattern ::= expr                                   # int/bool literal or qualifi
 # scoped to the arm. Exhaustiveness: integers require `default`; bool is
 # covered by both literals; enums/sums by listing every variant (a `default`
 # on a fully-listed switch draws a dead-arm warning). The else edge of a
-# fully-listed enum/sum switch is a `llvm.trap` block (forged values halt,
-# never UB). `break`/`continue` in arms bind to the enclosing loop. A
+# fully-listed enum/sum switch is a `llvm.trap` block at -O0 (forged values
+# halt debuggably); optimized builds emit `unreachable` — a forged tag is
+# undefined behavior there, and LLVM keeps the full range assumption. `break`/`continue` in arms bind to the enclosing loop. A
 # coverage-complete switch whose bodies all return satisfies the
 # every-path-returns analysis.
 

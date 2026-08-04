@@ -135,6 +135,7 @@ fn run_at_opt(
     let mut codegen =
         CodeGenerator::new(&context, module_name_for(source_path), &TargetSpec::host())
             .map_err(|e| format!("Code generator setup failed: {e}"))?;
+    codegen.set_opt_level(opt_level);
     codegen
         .generate(&program)
         .map_err(|e| format!("Code generation failed at -O{opt_level}: {e}"))?;

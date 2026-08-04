@@ -341,6 +341,7 @@ fn build_codegen<'ctx>(
     let mut codegen =
         CodeGenerator::new_with_reloc(context, module_name, &preproc.target_spec(), opts.reloc)
             .with_context(|| format!("failed to set up code generation for '{}'", path.display()))?;
+    codegen.set_opt_level(opts.opt_level);
     codegen
         .generate(program)
         .with_context(|| format!("failed to generate code for '{}'", path.display()))?;

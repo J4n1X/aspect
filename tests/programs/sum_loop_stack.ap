@@ -1,0 +1,28 @@
+# expected: 500
+#-
+  Regression guard: temporaries (sret/byval slots, sum construction temps,
+  binder copies) are entry-block allocas, never mid-block — a mid-block
+  alloca is dynamic stack adjustment, and inside a loop it grows the stack
+  per iteration until the function returns. 500k sum-returning calls in one
+  frame would overflow the default stack if any temp regressed to
+  mid-block. The IR-level twin (asserting zero non-entry allocas) lives in
+  the codegen unit tests.
+-#
+
+sum S {
+    A(f64 a, f64 b)
+    B
+}
+fn mk(f64 x) -> S {
+    return S.A(x, x)
+}
+fn main(u32 argc, u8 **argv) -> i32 {
+    f64 acc = 0.0
+    for i32 i = 0; i < 500000; i += 1 {
+        S s = mk(1.0)
+        if s is S.A(a, _) {
+            acc = acc + a
+        }
+    }
+    return (acc / 1000.0) as i32
+}

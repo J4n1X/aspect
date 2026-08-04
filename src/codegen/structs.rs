@@ -258,7 +258,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let struct_ty = self
                         .lang_type_to_llvm(&bt)
                         .map_err(|e| e.with_pos(base.pos))?;
-                    let tmp = self.builder.build_alloca(struct_ty, "struct.tmp")?;
+                    let function = self
+                        .current_function
+                        .ok_or(CodegenError::UnexpectedStatement(base.pos))?;
+                    let tmp = self.build_entry_alloca(function, struct_ty, "struct.tmp", base.pos)?;
                     self.builder.build_store(tmp, val)?;
                     tmp
                 };

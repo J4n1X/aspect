@@ -843,8 +843,9 @@ cover its scrutinee; `default` covers the rest":
   the payback: add a variant next year and every switch that must now
   handle it becomes a compile error naming what's missing. A `default`
   waives that checking (legal, but on a fully-listed switch it's flagged
-  as a dead arm). A value forged past an enum's range with `as` hits a
-  trap at runtime rather than undefined behavior.
+  as a dead arm). A value forged past an enum's range with `as` traps at
+  runtime in `-O0` builds; under optimization the forgery is undefined
+  behavior (the checked build is where you debug).
 
 Sum patterns bind payload fields positionally, as **copies** — ordinary
 mutable locals scoped to the arm; writing one never writes the sum.

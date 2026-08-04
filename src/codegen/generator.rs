@@ -39,6 +39,14 @@ pub struct CodeGenerator<'ctx> {
     /// Named LLVM struct type per type-struct id (built in the registration pass).
     pub(crate) struct_types: HashMap<u32, inkwell::types::StructType<'ctx>>,
 
+    /// Optimization level the emitted module is destined for (set before
+    /// `generate` by the CLI and test harness; defaults to 0). Codegen makes
+    /// one decision on it: the else edge of a coverage-complete switch is a
+    /// debuggable `llvm.trap` at -O0 and a bare `unreachable` when
+    /// optimizing (forged tags are UB there; LLVM drops the jump-table
+    /// bounds check).
+    pub(crate) opt_level: u8,
+
     /// Named LLVM storage type per sum id: `{ i32 tag, [k x iN] }` sized and
     /// aligned to the largest variant payload, payload at a uniform offset.
     /// Built opaque before struct bodies (so struct fields may hold sums by
@@ -192,6 +200,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             current_sret: None,
             struct_types: HashMap::new(),
             struct_fields: HashMap::new(),
+            opt_level: 0,
             sum_types: HashMap::new(),
             sum_variant_fields: HashMap::new(),
             fnptr_sigs: Vec::new(),
@@ -209,6 +218,12 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// # Errors
     /// Returns `CodegenError` if any of the nested functions fail
+    /// Declare the optimization level the module is destined for — call
+    /// before [`Self::generate`].
+    pub fn set_opt_level(&mut self, level: u8) {
+        self.opt_level = level;
+    }
+
     /// # Panics
     /// Panics if target machine creation fails, which should not happen with valid targets
     pub fn generate(&mut self, program: &Program) -> AnyhowResult<()> {

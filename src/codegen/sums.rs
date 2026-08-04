@@ -267,7 +267,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             .sum_types
             .get(&sum_id)
             .ok_or_else(|| CodegenError::TypeError(format!("unregistered sum id {sum_id}"), pos))?;
-        let tmp = self.builder.build_alloca(storage, "sum.tmp")?;
+        let function = self
+            .current_function
+            .ok_or(CodegenError::UnexpectedStatement(pos))?;
+        let tmp = self.build_entry_alloca(function, storage.into(), "sum.tmp", pos)?;
         let tag_ptr = self.builder.build_struct_gep(storage, tmp, 0, "sum.tag")?;
         let tag_ty = self.sum_tag_type(sum_id, pos)?;
         self.builder

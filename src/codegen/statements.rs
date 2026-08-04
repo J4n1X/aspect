@@ -601,6 +601,10 @@ mod tests {
     use inkwell::context::Context;
 
     fn ir_for(source: &str, context: &Context) -> String {
+        ir_for_opt(source, context, 0)
+    }
+
+    fn ir_for_opt(source: &str, context: &Context, opt_level: u8) -> String {
         let tokens = crate::lexer::tokenize(source.to_string()).expect("lex");
         let mut parser = Parser::new(tokens);
         let mut program = parser.parse_program().expect("parse");
@@ -608,6 +612,7 @@ mod tests {
         tc.check_program(&mut program).expect("typecheck");
         let mut codegen = CodeGenerator::new(context, "switch_test", &TargetSpec::host())
             .expect("codegen setup");
+        codegen.set_opt_level(opt_level);
         codegen.generate(&program).expect("generate");
         codegen.print_ir_to_string()
     }
@@ -624,6 +629,39 @@ mod tests {
         let ir = ir_for(src, &ctx);
         assert!(ir.contains("llvm.trap"), "missing trap edge:\n{ir}");
         assert!(!ir.contains("@abort"), "trap edge must not call libc abort:\n{ir}");
+    }
+
+    /// Optimized builds treat a forged tag as UB: the else edge is a bare
+    /// `unreachable`, keeping LLVM's range assumption (no jump-table bounds
+    /// check).
+    #[test]
+    fn optimized_complete_switch_uses_unreachable() {
+        let src = "sum S {\n    A(i32 x)\n    B\n}\n\nfn main(u32 argc, u8 **argv) -> i32 {\n    S s = S.A(1)\n    switch s {\n        case S.A(v) { return v }\n        case S.B { return 0 }\n    }\n}\n";
+        let ctx = Context::create();
+        let ir = ir_for_opt(src, &ctx, 2);
+        assert!(!ir.contains("llvm.trap"), "trap should be -O0-only:\n{ir}");
+        assert!(ir.contains("unreachable"), "missing unreachable else edge:\n{ir}");
+    }
+
+    /// Every alloca lands in the entry block — a mid-block alloca is dynamic
+    /// stack adjustment, and in a loop it grows the stack per iteration
+    /// (sret/byval/construction temps regressed this way once).
+    #[test]
+    fn all_allocas_in_entry_block() {
+        let src = "sum S {\n    A(f64 a, f64 b)\n    B\n}\nfn mk(f64 x) -> S {\n    return S.A(x, x)\n}\nfn main(u32 argc, u8 **argv) -> i32 {\n    f64 acc = 0.0\n    for i32 i = 0; i < 3; i += 1 {\n        S s = mk(1.0)\n        if s is S.A(a, _) {\n            acc = acc + a\n        }\n    }\n    return acc as i32\n}\n";
+        let ctx = Context::create();
+        let ir = ir_for(src, &ctx);
+        let mut label = "entry";
+        for line in ir.lines() {
+            if let Some(l) = line.strip_suffix(':')
+                && !l.contains(' ')
+            {
+                label = if l == "entry" { "entry" } else { "other" };
+            }
+            if line.contains(" = alloca ") {
+                assert_eq!(label, "entry", "mid-block alloca: {line}\n{ir}");
+            }
+        }
     }
 
     /// With a `default`, the else edge is the default block — no trap.

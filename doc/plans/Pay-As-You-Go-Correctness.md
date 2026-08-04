@@ -80,7 +80,8 @@ fall-through legacy to undo) is the matcher, following Zig's precedent:
   - integer / pointer → `default` **required** (the type can't be
     enumerated, so it's the only route to coverage). Enums are
     *nominally closed* — fully-listed is exhaustive, and a value forged
-    past the variant set by an `as` cast hits a trap edge at the switch
+    past the variant set by an `as` cast traps at the switch in -O0 builds
+    (UB when optimized)
     (revised 2026-08-03; see `../solved/Sum-Types-And-Switch.md`);
   - sum type, every variant listed → `default` is a dead arm, compiler
     says so;

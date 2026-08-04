@@ -16,11 +16,8 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// over the discriminant (a sum's `i32` tag, or the int/bool/enum value),
     /// per-arm blocks with payload bindings copied out of the scrutinee slot.
     /// The else edge is the `default` block when present; otherwise a
-    /// `llvm.trap` block — the checker guarantees `default` exists unless the
-    /// arms are coverage-complete, so the trap is only reachable through a
-    /// forged tag (`u0*` bridge, stale pointer) or an out-of-range `as`-cast
-    /// enum, and one cold trap beats undefined behavior. `llvm.trap` (`ud2`),
-    /// never libc `abort()`: freestanding targets link no libc.
+    /// `llvm.trap` block at -O0 (debuggable halt on forged tags) and a bare
+    /// `unreachable` under optimization — see `emit_switch_else`.
     pub(crate) fn generate_switch(
         &mut self,
         scrutinee: &Expression,
@@ -226,6 +223,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.builder.build_unconditional_branch(merge_bb)?;
             }
         } else {
+            // Coverage-complete switch: the else edge is unreachable through
+            // any legal program — only a forged tag (`u0*` bridge, stale
+            // pointer, out-of-range `as`-cast enum) lands here. At -O0 that
+            // gets a debuggable `llvm.trap` (never libc `abort`: freestanding
+            // targets link no libc). Under optimization the forgery is
+            // undefined behavior and the edge is a bare `unreachable`, so
+            // LLVM keeps the full range assumption (jump tables need no
+            // bounds check and the arm never burdens branch layout).
+            if self.opt_level > 0 {
+                self.builder.build_unreachable()?;
+                self.builder.position_at_end(merge_bb);
+                return Ok(());
+            }
             let trap = inkwell::intrinsics::Intrinsic::find("llvm.trap")
                 .and_then(|i| i.get_declaration(&self.module, &[]))
                 .ok_or_else(|| {

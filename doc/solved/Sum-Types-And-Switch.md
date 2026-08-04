@@ -595,6 +595,17 @@ Three maintainer decisions from the first day of actually writing sums:
    Shape.Circle(r)` on a `Shape*` match the pointee (and skip the
    whole-value copy; the pointer is the slot). Null derefs are the
    user's problem, deliberately unchecked. Deeper pointers still error.
-3. **`u0*` ↔ `Sum*` casts confirmed as designed** — the explicit `as`
+3. **The trap edge is `-O0`-only** (revises resolution 3's "trap always"):
+   unoptimized builds keep the debuggable `llvm.trap`; optimized builds
+   emit a bare `unreachable` — a forged tag is undefined behavior there,
+   and LLVM keeps the full range assumption (jump tables lose their
+   bounds check, the cold arm stops influencing layout). The checked
+   build is where forgeries get diagnosed.
+4. **Temporaries are entry-block allocas** — `sret`/`byval` slots,
+   construction temps and binder copies were emitted mid-block, which is
+   dynamic stack adjustment and grew the stack per loop iteration; all
+   allocas now land in the entry block (regression-guarded by an IR
+   unit test and a 500k-iteration corpus program).
+5. **`u0*` ↔ `Sum*` casts confirmed as designed** — the explicit `as`
    and the depth-1 implicit bridge both work (sum *values* still admit
    no casts); now pinned by corpus tests.

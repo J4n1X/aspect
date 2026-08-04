@@ -94,7 +94,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                     Some(a) => e.with_pos(a.pos),
                     None => e.without_pos(),
                 })?;
-            let slot = self.builder.build_alloca(struct_ty, "sret.tmp")?;
+            let function = self.current_function.ok_or_else(|| {
+                CodegenError::UnexpectedStatement(
+                    args.first().map_or_else(|| crate::lexer::Position::new(0, 0), |a| a.pos),
+                )
+            })?;
+            let slot = self.build_entry_alloca(
+                function,
+                struct_ty,
+                "sret.tmp",
+                args.first().map_or_else(|| crate::lexer::Position::new(0, 0), |a| a.pos),
+            )?;
             arg_values.push(slot.into());
             Some((slot, struct_ty))
         } else {
@@ -107,7 +117,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // byval: materialise the value into a temp and pass its address.
                 let val = self.generate_coerced_value(arg, Some(t))?;
                 let struct_ty = self.lang_type_to_llvm(t).map_err(|e| e.with_pos(arg.pos))?;
-                let tmp = self.builder.build_alloca(struct_ty, "byval.tmp")?;
+                let function = self
+                    .current_function
+                    .ok_or(CodegenError::UnexpectedStatement(arg.pos))?;
+                let tmp = self.build_entry_alloca(function, struct_ty, "byval.tmp", arg.pos)?;
                 self.builder.build_store(tmp, val)?;
                 arg_values.push(tmp.into());
             } else {
