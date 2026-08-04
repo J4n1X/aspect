@@ -22,7 +22,7 @@ type Tree {
         if node == null {
             return
         }
-        switch *node {
+        switch node {
             case TreeNode.Leaf(_) {
                 free_ptr(node)
             }
@@ -48,7 +48,7 @@ type Tree {
 
         TreeNode *cur = this.root
         while true {
-            switch *cur {
+            switch cur {
                 case TreeNode.Leaf(_) {
                     return cur
                 }
@@ -80,7 +80,7 @@ type Tree {
             return
         }
 
-        switch *loc {
+        switch loc {
             # promote a leaf into a parent Node; old value stays a Leaf
             case TreeNode.Leaf(leaf_val) {
                 TreeNode *old = alloc_bytes(sizeof(TreeNode))
@@ -111,7 +111,7 @@ type Tree {
         if node == null {
             return 0
         }
-        switch *node {
+        switch node {
             case TreeNode.Leaf(val) {
                 return val
             }

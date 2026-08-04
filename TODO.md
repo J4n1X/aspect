@@ -8,8 +8,6 @@
 | SSE4.1 `roundsd` for f64 rounding | `floor_f64`/`ceil_f64`/`round_f64` in `std/math` are i64 round-trips; `roundsd` does each in one instruction. Blocked on feature detection: the target machine is built with CPU `generic`, which is SSE2-only, so `roundsd` is not baseline and cannot just be emitted. Needs a `-C target-cpu`-alike or a runtime `cpuid` check first. `sqrt_f64`/`min_f64`/`max_f64`/`fabs` are already SSE2 and done. | LOW |
 | Noalias handling              | This could also improve optimizations, by reducing the amount of moves and memory.          | LOW      |
 | Decide if aliases are worth keeping | Honestly, I've yet to use an alias, and the language does not really need it, but the feature is cheap. If we decide to keep them, we ought to implement visibility as well. | LOW | 
-| Rules should allow for aux parameters | This would allow us to write something like "rule String must_use(String.to_cstr)" or something like that. | MEDIUM |
-| `meta fn` helper functions | Aspect-authored helpers (`meta fn`) callable from `rule fn`/`transform fn` bodies — gated from ordinary code, retained in judge clones (a third `MetaKind::Helper`). Lets metaprograms share logic written *in-language* instead of growing the Rust `meta_*` builtin surface (e.g. retire `meta_streq`/`meta_str_ends_with` for an Aspect `str_eq`). Needs its own `language-designer` review. Interacts with the meta-globals "rules read-only" stance: a rule fn calling a helper that writes a meta global defeats a local check, so settle enforcement (asserted-not-enforced vs. call-graph) before landing. | MEDIUM |
 
 ## Done
 
