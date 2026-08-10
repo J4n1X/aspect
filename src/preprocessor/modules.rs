@@ -413,7 +413,9 @@ mod tests {
         // File form + directory form, per root.
         assert_eq!(candidates.len(), 4);
         let message = err.to_string();
-        assert!(message.contains("no/such/module.ap"));
+        // Candidates render with the platform separator, so build the fragment.
+        let file_form: PathBuf = ["no", "such", "module.ap"].iter().collect();
+        assert!(message.contains(&file_form.display().to_string()));
         assert!(message.contains("modules_alt"));
     }
 

@@ -275,7 +275,7 @@ This project uses or used AI for the following purposes:
 
 1. Documentation of the codebase, including the maintaining of the documentation directory
 2. The creation of the vscode-aspect syntax highlighting extension and some demos.
-3. Assistance in planning of features (implementations are done by hand)
+3. Assistance in planning of features
 4. Research into required topics for compiler development.
 5. Some inline comments to improve readability 
 6. The DSL Procedural Macro System for the Parser
@@ -284,3 +284,8 @@ This project uses or used AI for the following purposes:
 9. Some of the demos. The reasoning for this is that if the AI understands how to write code in my language, a user should be able to as well.
 
 The reasoning for using it in these cases is rather simple: I am lazy, and I hate documenting stuff. 
+
+UPDATE:
+
+It is about time I came clean. I've long reached a point where this project is completely and utterly unsustainable for me, a single developer, to handle. 
+Thus, I have come to decide, and have already decided for the last couple commits, that I must use AI to make meaningful progress. I will still do my best to implement features on my own, however, I will be leaning on the assistance of AI even heavier now. It just speeds up development drastically. 
