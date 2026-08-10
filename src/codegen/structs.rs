@@ -27,19 +27,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         for info in program.symbols.structs() {
             let llvm_struct = self.context.opaque_struct_type(&info.name);
             self.struct_types.insert(info.id, llvm_struct);
-            let fields = info.fields.iter().map(|f| (f.name.clone(), f.ty)).collect();
-            self.struct_fields.insert(info.id, fields);
         }
 
-        // `FieldInfo` records no declaration site, so a bad field type here
-        // can't name its own line — the one fabricated position left in codegen.
+        // A bad field type is reported at the `type` keyword: `FieldInfo` records
+        // no site of its own, so this is as precise as it gets.
         for info in program.symbols.structs() {
             let field_types: Result<Vec<BasicTypeEnum<'ctx>>, _> = info
+                .as_struct()
                 .fields
                 .iter()
                 .map(|f| {
                     self.lang_type_to_llvm(&f.ty)
-                        .map_err(|e| e.without_pos())
+                        .map_err(|e| e.with_pos(info.pos))
                 })
                 .collect();
             let field_types = field_types?;
@@ -92,11 +91,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Field layout index and type for `field` of struct `id`.
     pub(crate) fn struct_field(&self, id: u32, field: &str) -> Option<(usize, LangType)> {
-        let fields = self.struct_fields.get(&id)?;
-        fields
-            .iter()
-            .position(|(n, _)| n == field)
-            .map(|idx| (idx, fields[idx].1))
+        self.symbols.field(id, field).map(|(idx, f)| (idx, f.ty))
     }
 
     /// Build a struct literal aggregate field-by-field via `insertvalue`.
@@ -115,7 +110,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         // and store it directly, which is more efficient than insertvalue.
         let mut agg = struct_ty.get_undef();
         for (fname, fexpr) in fields {
-            // TODO: This is insanely inefficient. We should have a function that gives us this ordered in a Vector.
             let (idx, field_ty) = self.struct_field(struct_id, fname).ok_or_else(|| {
                 CodegenError::TypeError(
                     format!("unknown field '{fname}' on type-struct id {struct_id}"),

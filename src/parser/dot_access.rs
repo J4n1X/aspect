@@ -71,7 +71,7 @@ impl Parser {
     ) -> Option<Result<Expression, ParserError>> {
         let var_name = self.unshadowed_named_ref(base)?;
         let id = self.module.enum_id(var_name)?;
-        if let Err(e) = self.check_enum_visibility(id, pos) {
+        if let Err(e) = self.check_type_visibility(id, pos) {
             return Some(Err(e));
         }
         match self.module.enum_variant_index(id, name) {
@@ -87,7 +87,7 @@ impl Parser {
                 )))
             }
             None => {
-                let enum_name = self.module.enum_info(id).name.clone();
+                let enum_name = self.module.type_def(id).name.clone();
                 Some(Err(ParserError::UnknownVariant {
                     enum_name,
                     variant: name.to_string(),
@@ -109,10 +109,10 @@ impl Parser {
     ) -> Option<Result<Expression, ParserError>> {
         let var_name = self.unshadowed_named_ref(base)?;
         let id = self.module.sum_id(var_name)?;
-        if let Err(e) = self.check_sum_visibility(id, pos) {
+        if let Err(e) = self.check_type_visibility(id, pos) {
             return Some(Err(e));
         }
-        let sum_name = self.module.sum_info(id).name.clone();
+        let sum_name = self.module.type_def(id).name.clone();
         let Some(idx) = self.module.sum_variant_index(id, name) else {
             return Some(Err(ParserError::UnknownSumVariant {
                 sum_name,
@@ -120,7 +120,7 @@ impl Parser {
                 pos,
             }));
         };
-        let field_count = self.module.sum_info(id).variants[idx].fields.len();
+        let field_count = self.module.type_def(id).as_sum().variants[idx].fields.len();
         let ty = LangType::sum_type(id);
         let variant = u32::try_from(idx).expect("variant index fits u32");
 
@@ -188,13 +188,13 @@ impl Parser {
     ) -> Option<Result<Expression, ParserError>> {
         let var_name = self.unshadowed_named_ref(base)?;
         let id = self.module.struct_id(var_name)?;
-        if !self.module.struct_info(id).methods.contains_key(name) {
+        if !self.module.type_def(id).as_struct().methods.contains_key(name) {
             return None;
         }
-        if let Err(e) = self.check_struct_visibility(id, pos) {
+        if let Err(e) = self.check_type_visibility(id, pos) {
             return Some(Err(e));
         }
-        let type_name = self.module.struct_info(id).name.clone();
+        let type_name = self.module.type_def(id).name.clone();
         let mangled = crate::symbol::module::mangle_method(&type_name, name);
         let (params, return_type) = self.module.lookup_function(&mangled).map_or_else(
             || (Vec::new(), LangType::VOID),
@@ -298,9 +298,9 @@ impl Parser {
         want_static: bool,
         pos: Position,
     ) -> Result<(String, LangType), ParserError> {
-        self.check_struct_visibility(id, pos)?;
-        let type_name = self.module.struct_info(id).name.clone();
-        if let Some(sig) = self.module.struct_info(id).methods.get(method_name)
+        self.check_type_visibility(id, pos)?;
+        let type_name = self.module.type_def(id).name.clone();
+        if let Some(sig) = self.module.type_def(id).as_struct().methods.get(method_name)
             && sig.is_static != want_static
         {
             let msg = if sig.is_static {

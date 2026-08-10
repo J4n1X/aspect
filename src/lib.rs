@@ -11,3 +11,4 @@ pub mod scope;
 pub mod symbol;
 pub mod target;
 pub mod typechecker;
+pub mod variants;

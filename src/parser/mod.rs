@@ -5,6 +5,7 @@ pub mod declarations;
 pub mod dot_access;
 pub mod errors;
 pub mod expressions;
+pub(crate) mod patterns;
 pub mod program;
 pub mod statements;
 pub mod switch;

@@ -1,0 +1,17 @@
+# expected: "Duplicate type 'Empty'"
+#-
+  Two bodies for one type name is a duplicate even when both are empty. This
+  used to compile: duplicate detection asked whether the field list was still
+  empty, which cannot distinguish "not defined yet" from "defined with no
+  fields", so an empty redeclaration slipped through. The registry now records
+  definedness directly.
+-#
+type Empty {
+}
+
+type Empty {
+}
+
+fn main() -> i32 {
+    return 0
+}

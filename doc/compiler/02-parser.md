@@ -9,7 +9,8 @@ The parser (`src/parser/`) converts a flat `Vec<Token>` into a `Program` AST. It
 | `ast.rs` | AST node types: `ExprKind`, `StatementKind`, `Expression`, `Statement`, `Function`, `GlobalVar`, `Program` |
 | `expressions.rs` | `Parser` struct, Pratt expression engine, literals/primaries, `is` parsing |
 | `statements.rs` | Statement dispatch table and statement rules (minus `switch`) |
-| `switch.rs` | `switch` parsing: statement, arms, patterns, coverage computation |
+| `switch.rs` | `switch` parsing: statement, arms, pattern dispatch, coverage |
+| `patterns.rs` | Qualified variant patterns, shared by `case` arms and `is` |
 | `declarations.rs` | Top-level item dispatch (`parse_top_level_item`), type-structs, enums, sums, methods |
 | `program.rs` | Two-pass driver (`parse_program`), prescans, deferred bodies, aliases |
 | `type_expr.rs` | Type parsing (`parse_type`, modifiers) and declaration-start lookaheads |
@@ -47,18 +48,18 @@ pub struct Parser {
     module_imports: HashMap<String, Vec<String>>,
     /// Declaration positions per type-struct/sum id — the registry stores no
     /// positions, so the by-value-containment cycle check reports here.
-    struct_decl_pos: HashMap<u32, Position>,
-    sum_decl_pos: HashMap<u32, Position>,
 }
 ```
 
 Type-shape declarations are handled by `parse_struct_def`, `parse_enum_def` and
-`parse_sum_def` (all in `declarations.rs`), each backed by a prescan
-(`prescan_type_names` / `prescan_enum_names` / `prescan_sum_names`) that
-reserves the name before the main parse so forward references resolve. A sum
-(`sum Shape { Circle(f64 radius) … }`) parses like an enum with
-parameter-style payload fields per variant — one variant per line — and, like
-an enum, produces no AST node, only a `SumInfo` registry entry. After pass 1,
+`parse_sum_def` (all in `declarations.rs`). One prescan — `prescan_type_names` —
+reserves the name of every `type`/`enum`/`sum` before the main parse so forward
+references resolve, mapping the keyword to a `TypeKind` with an empty body; each
+definition parser then claims its name through `claim_type_decl`, which rejects
+both a second body and a name reserved under another kind. A sum
+(`sum Shape { Circle(f64 radius) … }`) parses like an enum with parameter-style
+payload fields per variant — one variant per line — and, like an enum, produces
+no AST node, only a registry entry. After pass 1,
 `check_byvalue_containment_cycles` walks the by-value containment graph over
 all type-structs and sums (arrays included; any pointer depth breaks an edge)
 and reports `RecursiveByValue` for each cycle — forward references mean a
@@ -95,9 +96,19 @@ Parser::new(tokens).parse_program() -> Result<Program, Vec<ParserError>>
 - Global variables (type token followed by identifier)
 
 Each iteration first calls `parse_kind_modifier()`, which consumes the leading
-`extern`/`asm` and reports naming two of them as one error regardless of
+`extern`/`asm`/`naked` and reports naming two of them as one error regardless of
 order. Keeping that scan separate from the dispatch is what stops the
 diagnostic depending on which keyword happened to come first.
+
+`parse_top_level_item` then classifies the form **once** (`classify_decl_form` →
+`DeclForm`) and checks modifier legality against that form's
+`accepts_public`/`accepts_export`/`accepts_extern`, before dispatching on the
+same value. Legality is therefore a property of the form rather than a predicate
+re-derived per rule, and a new declaration form cannot silently skip a rule.
+Classification order is load-bearing: `fn ident(` is a definition while `fn(` is
+a function-pointer-typed global, and the keyword forms must be tried before the
+catch-all global shapes. An unclassifiable token is reported as itself, at its
+own position, rather than being blamed on a preceding `public`/`export`.
 
 ## Expression Parsing (Precedence Climbing)
 
@@ -196,7 +207,8 @@ expression or assignment.
 ### `is` and condition scoping
 
 `is` parses as an infix at the comparison tier (`parse_is_suffix`), resolving
-its variant against the scrutinee's parse-time type. A parenthesized pattern
+its variant against the scrutinee's parse-time type through the same
+`parse_variant_pattern` (`parser/patterns.rs`) a `case` arm uses. A parenthesized pattern
 builds the binding form and registers its binders into the current scope
 immediately — textual order, which is what lets later `&&`-conjuncts and the
 block reference them. To make binders die with the block,
@@ -228,12 +240,13 @@ once and stamp slot ids on `Variable` nodes, collapsing the other two.)
 parse-time `expr_type`): sum scrutinees take variant patterns with positional
 binders (`_` discards; bare variant = ignore payload), everything else takes
 constant expressions, with bare enum variant names resolved against the
-scrutinee's enum. Arm bindings are registered into the parse-time symbol
-table (a fresh scope) *before* the body parses — that is what lets the body
-reference them. The parser also computes `complete` (dedup-aware variant/
-literal coverage) so the checker's registry-less termination analysis can
-read it, and enforces `default`-last plus the binding-pattern-stands-alone
-rule.
+scrutinee's enum. Variant patterns themselves are parsed by
+`parse_variant_pattern` (`parser/patterns.rs`), shared with `is`. Arm bindings
+are registered into the parse-time symbol table (a fresh scope) *before* the
+body parses — that is what lets the body reference them. The parser also
+computes `complete` by asking `ClosedSpace::covered_by` (`src/variants.rs`,
+dedup-aware) so the checker's registry-less termination analysis can read it,
+and enforces `default`-last plus the binding-pattern-stands-alone rule.
 
 ### For Loops
 

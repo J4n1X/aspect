@@ -89,8 +89,8 @@ pub struct Parser {
     pub(crate) source_files: Vec<std::path::PathBuf>,
     /// Module of each file, indexed by `Position::file_id`. Files without an
     /// entry — including everything when no module info was threaded — belong
-    /// to the anonymous root module `""`. Moved into `Program::file_modules` so
-    /// the `meta` query layer can resolve a position to its module.
+    /// to the anonymous root module `""`. Parse-time only — the
+    /// import-visibility gate is the sole consumer.
     pub(crate) file_modules: Vec<String>,
     /// Module → its *direct* imports, driving the import-visibility check.
     pub(crate) module_imports: std::collections::HashMap<String, Vec<String>>,
@@ -98,11 +98,6 @@ pub struct Parser {
     /// variable scope, whose `Symbol` carries no visibility, so the
     /// reference-site gate reads it here.
     pub(crate) global_vis: std::collections::HashMap<String, crate::symbol::module::Visibility>,
-    /// Declaration position per type-struct/sum id, recorded when the body
-    /// parses — the by-value-containment cycle check reports here, since the
-    /// registry itself stores no positions.
-    pub(crate) struct_decl_pos: std::collections::HashMap<u32, Position>,
-    pub(crate) sum_decl_pos: std::collections::HashMap<u32, Position>,
 }
 
 impl Parser {
@@ -122,8 +117,6 @@ impl Parser {
             file_modules: Vec::new(),
             module_imports: std::collections::HashMap::new(),
             global_vis: std::collections::HashMap::new(),
-            struct_decl_pos: std::collections::HashMap::new(),
-            sum_decl_pos: std::collections::HashMap::new(),
         }
     }
 
@@ -424,108 +417,29 @@ impl Parser {
         let pat_pos = self.peek().pos;
         let s_ty = scrutinee.expr_type;
 
-        let sum_id = if s_ty.pointer_depth <= 1 && !s_ty.is_array() {
-            match s_ty.base {
-                TypeBase::Sum(id) => id,
-                TypeBase::Enum(_) if s_ty.pointer_depth == 0 => {
-                    return Err(ParserError::UnexpectedToken(
-                        "`is` does not apply to enums — compare with `==` against `Enum.Variant`"
-                            .to_string(),
-                        pat_pos,
-                    ));
-                }
-                _ => {
-                    return Err(ParserError::UnexpectedToken(
-                        "`is` probes a sum value — the scrutinee is not a sum (or a single-level pointer to one)"
-                            .to_string(),
-                        pat_pos,
-                    ));
-                }
-            }
-        } else {
-            return Err(ParserError::UnexpectedToken(
+        let Some(sum_id) = crate::variants::sum_scrutinee(&s_ty) else {
+            let msg = if matches!(s_ty.base, TypeBase::Enum(_)) && s_ty.pointer_depth == 0 {
+                "`is` does not apply to enums — compare with `==` against `Enum.Variant`"
+            } else {
                 "`is` probes a sum value — the scrutinee is not a sum (or a single-level pointer to one)"
-                    .to_string(),
-                pat_pos,
-            ));
+            };
+            return Err(ParserError::UnexpectedToken(msg.to_string(), pat_pos));
         };
 
-        let sum_name = self.module.sum_info(sum_id).name.clone();
-        let head = self.parse_ident("variant pattern after `is`")?;
-        if head == "_" {
-            return Err(ParserError::UnexpectedToken(
-                format!("sum '{sum_name}' has no variant '_' — `is` probes one named variant"),
-                pat_pos,
-            ));
-        }
-        if head != sum_name {
-            if self.module.sum_variant_index(sum_id, &head).is_some() {
-                return Err(ParserError::UnexpectedToken(
-                    format!("variant patterns are qualified — write `{sum_name}.{head}`"),
-                    pat_pos,
-                ));
-            }
-            return Err(ParserError::UnknownSumVariant {
-                sum_name,
-                variant: head,
-                pos: pat_pos,
-            });
-        }
-        self.expect(&TokenKind::Dot, ".")?;
-        let variant_name = self.parse_ident("variant name")?;
-        let Some(idx) = self.module.sum_variant_index(sum_id, &variant_name) else {
-            return Err(ParserError::UnknownSumVariant {
-                sum_name,
-                variant: variant_name,
-                pos: pat_pos,
-            });
-        };
-        let variant = u32::try_from(idx).expect("variant index fits u32");
-        let field_types: Vec<LangType> = self.module.sum_info(sum_id).variants[idx]
-            .fields
-            .iter()
-            .map(|(_, ty)| *ty)
-            .collect();
-
-        if !self.match_token(&[TokenKind::OpenParen]) {
+        let pattern = self.parse_variant_pattern(sum_id, &crate::parser::patterns::IS_PROBE)?;
+        if pattern.bare {
             return Ok(Expression::new(
                 ExprKind::Is {
                     scrutinee: Box::new(scrutinee),
                     sum_id,
-                    variant,
+                    variant: pattern.variant,
                 },
                 LangType::BOOL,
                 pos,
             ));
         }
 
-        if self.check(&TokenKind::CloseParen) {
-            return Err(ParserError::UnexpectedToken(
-                format!(
-                    "empty pattern parens on '{variant_name}' — a bare `{variant_name}` ignores the payload"
-                ),
-                self.peek().pos,
-            ));
-        }
-        let names = self.parse_comma_separated(&TokenKind::CloseParen, |p| {
-            p.parse_ident("binding name or `_`")
-        })?;
-        if names.len() != field_types.len() {
-            return Err(ParserError::UnexpectedToken(
-                format!(
-                    "pattern '{variant_name}' binds {} of {} payload fields — bind every field positionally (use `_` to discard)",
-                    names.len(),
-                    field_types.len()
-                ),
-                pat_pos,
-            ));
-        }
-        let binders: Vec<Option<(String, LangType)>> = names
-            .into_iter()
-            .zip(field_types)
-            .map(|(n, ty)| if n == "_" { None } else { Some((n, ty)) })
-            .collect();
-        for (name, ty) in binders.iter().flatten() {
+        for (name, ty) in pattern.binders.iter().flatten() {
             self.symbol_table_mut()
                 .add_variable(name.clone(), *ty, pat_pos)
                 .map_err(|e| ParserError::from_symbol(e, pat_pos))?;
@@ -534,8 +448,8 @@ impl Parser {
             ExprKind::IsBinding {
                 scrutinee: Box::new(scrutinee),
                 sum_id,
-                variant,
-                binders,
+                variant: pattern.variant,
+                binders: pattern.binders,
             },
             LangType::BOOL,
             pos,
@@ -860,7 +774,7 @@ impl Parser {
                 if let Some(id) = self.module.struct_id(&name)
                     && self.check(&TokenKind::OpenBrace)
                 {
-                    self.check_struct_visibility(id, pos)?;
+                    self.check_type_visibility(id, pos)?;
                     return self.parse_struct_literal(id, pos);
                 }
                 self.variable_reference(name, pos)

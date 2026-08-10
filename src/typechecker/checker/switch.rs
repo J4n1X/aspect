@@ -2,49 +2,11 @@ use super::TypeChecker;
 use crate::lexer::{LangType, Position, TypeBase};
 use crate::parser::{ExprKind, Expression, LiteralValue, Statement, SwitchArm, SwitchPattern};
 use crate::typechecker::errors::TypeCheckError;
+use crate::variants::{ClosedSpace, VariantSpace};
 use std::collections::HashSet;
 
-enum Class {
-    Int,
-    Bool,
-    Enum(u32),
-    Sum(u32),
-    Bad,
-}
-
-fn classify_scrutinee(s_ty: LangType) -> Class {
-    if s_ty.is_array() {
-        return Class::Bad;
-    }
-    // A single-level pointer to a sum auto-derefs (like field access);
-    // deeper pointers and pointers to anything else stay invalid.
-    if s_ty.pointer_depth > 0 {
-        return if s_ty.pointer_depth == 1
-            && let TypeBase::Sum(id) = s_ty.base
-        {
-            Class::Sum(id)
-        } else {
-            Class::Bad
-        };
-    }
-    match s_ty.base {
-        TypeBase::SInt | TypeBase::UInt => Class::Int,
-        TypeBase::Bool => Class::Bool,
-        TypeBase::Enum(id) => Class::Enum(id),
-        TypeBase::Sum(id) => Class::Sum(id),
-        _ => Class::Bad,
-    }
-}
-
-/// Bundles the two duplicate-detection sets so `check_switch_exhaustiveness`
-/// stays under `clippy::too_many_arguments`.
-struct SeenPatterns<'a> {
-    consts: &'a HashSet<i64>,
-    variants: &'a HashSet<u32>,
-}
-
 impl TypeChecker {
-    /// Type-check a `switch`: scrutinee class, per-pattern validity and
+    /// Type-check a `switch`: scrutinee validity, per-pattern validity and
     /// duplicates, arm bodies (bindings in scope), and the exhaustiveness
     /// stances — one rule, "a switch must cover its scrutinee; `default`
     /// covers the rest".
@@ -59,8 +21,8 @@ impl TypeChecker {
         let s_ty = self.synth_expression(scrutinee);
         let s_pos = scrutinee.pos;
 
-        let class = classify_scrutinee(s_ty);
-        if matches!(class, Class::Bad) {
+        let space = VariantSpace::of(&s_ty, &self.symbols);
+        if space == VariantSpace::Unmatchable {
             let hint = if s_ty.base == TypeBase::SFloat && s_ty.pointer_depth == 0 {
                 " — floats have no exact equality; use if/elif"
             } else {
@@ -73,23 +35,20 @@ impl TypeChecker {
             });
         }
 
-        // Pattern validity + duplicate detection (values are compared after
-        // evaluation, so `0x10` duplicates `16`).
-        let mut seen_consts: HashSet<i64> = HashSet::new();
-        let mut seen_variants: HashSet<u32> = HashSet::new();
+        // One `seen` set for both pattern shapes: a scrutinee admits only one of
+        // them, so a slot index and a case value can never collide. Keyed by
+        // value rather than slot so negative case values stay distinct.
+        let mut seen: HashSet<i64> = HashSet::new();
         for arm in arms.iter_mut() {
             for pattern in &mut arm.patterns {
                 match pattern {
                     SwitchPattern::Const(e) => {
-                        self.check_const_pattern(e, &s_ty, &class, &mut seen_consts);
+                        self.check_const_pattern(e, &s_ty, space, &mut seen);
                     }
                     SwitchPattern::SumVariant { variant, .. } => {
-                        self.check_sum_variant_pattern(
-                            *variant,
-                            arm.pos,
-                            &class,
-                            &mut seen_variants,
-                        );
+                        if !seen.insert(i64::from(*variant)) {
+                            self.report_duplicate_case(space, i64::from(*variant), arm.pos);
+                        }
                     }
                 }
             }
@@ -114,14 +73,11 @@ impl TypeChecker {
         }
 
         self.check_switch_exhaustiveness(
-            &class,
+            space,
             &s_ty,
             complete,
-            default,
-            SeenPatterns {
-                consts: &seen_consts,
-                variants: &seen_variants,
-            },
+            default.is_some(),
+            &seen,
             stmt_pos,
         );
     }
@@ -130,10 +86,11 @@ impl TypeChecker {
         &mut self,
         e: &mut Expression,
         s_ty: &LangType,
-        class: &Class,
-        seen_consts: &mut HashSet<i64>,
+        space: VariantSpace,
+        seen: &mut HashSet<i64>,
     ) {
         self.check_expression(e, s_ty);
+        // Values are compared after evaluation, so `0x10` duplicates `16`.
         let key = match &e.kind {
             ExprKind::Literal(LiteralValue::Integer(v)) => Some(*v),
             ExprKind::Literal(LiteralValue::Bool(b)) => Some(i64::from(*b)),
@@ -144,116 +101,60 @@ impl TypeChecker {
             }
         };
         if let Some(key) = key
-            && !seen_consts.insert(key)
+            && !seen.insert(key)
         {
-            let what = match (class, &e.kind) {
-                (Class::Enum(id), ExprKind::EnumValue { value, .. }) => {
-                    let info = self.symbols.enum_info(*id);
-                    format!(
-                        "variant '{}'",
-                        info.variants.get(*value as usize).map_or("?", String::as_str)
-                    )
-                }
-                (Class::Bool, ExprKind::Literal(LiteralValue::Bool(b))) => format!("`{b}`"),
-                _ => format!("value {key}"),
-            };
-            self.errors.push(TypeCheckError::SwitchDuplicateCase {
-                what,
-                position: e.pos,
-            });
+            self.report_duplicate_case(space, key, e.pos);
         }
     }
 
-    fn check_sum_variant_pattern(
-        &mut self,
-        variant: u32,
-        arm_pos: Position,
-        class: &Class,
-        seen_variants: &mut HashSet<u32>,
-    ) {
-        if !seen_variants.insert(variant) {
-            let what = if let Class::Sum(id) = class {
-                format!(
-                    "variant '{}'",
-                    self.symbols.sum_info(*id).variants[variant as usize].name
-                )
-            } else {
-                format!("variant #{variant}")
-            };
-            self.errors.push(TypeCheckError::SwitchDuplicateCase {
-                what,
-                position: arm_pos,
-            });
-        }
+    /// A closed space names the slot (`variant 'A'`, `` `true` ``); an open one
+    /// can only quote the value.
+    fn report_duplicate_case(&mut self, space: VariantSpace, key: i64, position: Position) {
+        let slot = usize::try_from(key).ok();
+        let what = match (space.closed(), slot) {
+            (Some(s), Some(slot)) if slot < s.count => s.duplicate_label(slot, &self.symbols),
+            _ => format!("value {key}"),
+        };
+        self.errors
+            .push(TypeCheckError::SwitchDuplicateCase { what, position });
     }
 
     fn check_switch_exhaustiveness(
         &mut self,
-        class: &Class,
+        space: VariantSpace,
         s_ty: &LangType,
         complete: bool,
-        default: &Option<Vec<Statement>>,
-        seen: SeenPatterns<'_>,
+        has_default: bool,
+        seen: &HashSet<i64>,
         stmt_pos: Position,
     ) {
-        match class {
-            Class::Int => {
-                if default.is_none() {
+        match space {
+            VariantSpace::Open => {
+                if !has_default {
                     self.errors.push(TypeCheckError::SwitchMissingDefault {
                         ty: self.type_name(s_ty),
                         position: stmt_pos,
                     });
                 }
             }
-            Class::Bool => {
-                if !complete && default.is_none() {
-                    let missing = if seen.consts.contains(&1) {
-                        "`false`"
-                    } else {
-                        "`true`"
-                    };
-                    self.errors.push(TypeCheckError::SwitchNonExhaustive {
-                        missing: missing.to_string(),
-                        position: stmt_pos,
-                    });
-                }
+            VariantSpace::Closed(space) => {
+                let slots: HashSet<usize> =
+                    seen.iter().filter_map(|k| usize::try_from(*k).ok()).collect();
+                self.check_closed_stances(space, complete, has_default, &slots, stmt_pos);
             }
-            Class::Enum(id) => {
-                let names: Vec<String> = self
-                    .symbols
-                    .enum_info(*id)
-                    .variants
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| !seen.consts.contains(&(*i as i64)))
-                    .map(|(_, n)| format!("'{n}'"))
-                    .collect();
-                self.finish_variant_stances(&names, complete, default.is_some(), stmt_pos);
-            }
-            Class::Sum(id) => {
-                let names: Vec<String> = self
-                    .symbols
-                    .sum_info(*id)
-                    .variants
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| !seen.variants.contains(&(*i as u32)))
-                    .map(|(_, v)| format!("'{}'", v.name))
-                    .collect();
-                self.finish_variant_stances(&names, complete, default.is_some(), stmt_pos);
-            }
-            Class::Bad => {}
+            VariantSpace::Unmatchable => {}
         }
     }
 
-    /// Stances 3–4, shared by enums and sums: fully listed + `default` is a
-    /// dead arm (warning — it would silently swallow future variants); missing
+    /// Stances 3–4, shared by enums, sums and bool: fully listed + `default` is
+    /// a dead arm (warning — it would silently swallow future variants); missing
     /// variants without `default` is an error naming them.
-    fn finish_variant_stances(
+    fn check_closed_stances(
         &mut self,
-        missing: &[String],
+        space: ClosedSpace,
         complete: bool,
         has_default: bool,
+        slots: &HashSet<usize>,
         pos: Position,
     ) {
         if complete && has_default {
@@ -265,7 +166,7 @@ impl TypeChecker {
             });
         } else if !complete && !has_default {
             self.errors.push(TypeCheckError::SwitchNonExhaustive {
-                missing: format!("variants {}", missing.join(", ")),
+                missing: space.missing_label(slots, &self.symbols),
                 position: pos,
             });
         }

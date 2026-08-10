@@ -1,6 +1,6 @@
 use crate::lexer::Position;
 use crate::parser::{Parser, ParserError};
-use crate::symbol::module::Visibility;
+use crate::symbol::module::{TypeKind, Visibility};
 
 impl Parser {
     /// The module the file `file_id` belongs to. Files without an entry —
@@ -39,71 +39,32 @@ impl Parser {
         ))
     }
 
-    /// Consolidates the import check with the cross-module `public`-gate
-    /// shared by struct/sum/enum visibility: import first, then (for a
-    /// cross-module use of a private item) `private_err` builds the
-    /// diagnostic.
-    pub(crate) fn check_item_visibility(
-        &self,
-        kind: &'static str,
-        name: &str,
-        file_id: u32,
-        vis: Visibility,
-        use_pos: Position,
-        private_err: fn(&str, &str, &str, Position) -> ParserError,
-    ) -> Result<(), ParserError> {
-        self.check_import_visibility(kind, name, file_id, use_pos)?;
-        let def_module = self.module_of_file(file_id);
+    /// Two gates for naming any type-struct, enum or sum (or calling a
+    /// type-struct's methods): the general import rule, plus a cross-module use
+    /// additionally requiring `public`. A member's own `public` is capped by the
+    /// type's — a public method of a private type is module-visible only. Values
+    /// of a foreign private type may still *flow* through outside code.
+    ///
+    /// An alias carries no visibility of its own yet, so only the import rule
+    /// gates it; its target is checked where the alias resolves.
+    pub(crate) fn check_type_visibility(&self, id: u32, use_pos: Position) -> Result<(), ParserError> {
+        let def = self.module.type_def(id);
+        self.check_import_visibility(def.noun(), &def.name, def.file_id, use_pos)?;
+        if matches!(def.kind, TypeKind::Alias(_)) {
+            return Ok(());
+        }
+        let def_module = self.module_of_file(def.file_id);
         let use_module = self.module_of_file(use_pos.file_id);
-        if vis == Visibility::Private && def_module != use_module {
-            return Err(private_err(name, def_module, use_module, use_pos));
+        if def.vis == Visibility::Private && def_module != use_module {
+            return Err(ParserError::private_named_type(
+                &def.kind,
+                &def.name,
+                def_module,
+                use_module,
+                use_pos,
+            ));
         }
         Ok(())
-    }
-
-    /// Two gates for naming a type-struct (or calling its methods): the general
-    /// import rule, plus a cross-module use additionally requiring `public
-    /// type`. A member's own `public` is capped by the type's — a public method
-    /// of a private type is module-visible only. Values of a foreign private
-    /// type may still *flow* through outside code.
-    pub(crate) fn check_struct_visibility(&self, id: u32, use_pos: Position) -> Result<(), ParserError> {
-        let info = self.module.struct_info(id);
-        self.check_item_visibility(
-            "type-struct",
-            &info.name,
-            info.file_id,
-            info.vis,
-            use_pos,
-            ParserError::private_type,
-        )
-    }
-
-    /// The sum twin of [`Self::check_struct_visibility`]: the import rule plus
-    /// a cross-module use requiring `public sum`.
-    pub(crate) fn check_sum_visibility(&self, id: u32, use_pos: Position) -> Result<(), ParserError> {
-        let info = self.module.sum_info(id);
-        self.check_item_visibility(
-            "sum",
-            &info.name,
-            info.file_id,
-            info.vis,
-            use_pos,
-            ParserError::private_sum,
-        )
-    }
-
-    /// The enum twin of [`Self::check_struct_visibility`]: the import rule plus
-    /// a cross-module use requiring `public enum`.
-    pub(crate) fn check_enum_visibility(&self, id: u32, use_pos: Position) -> Result<(), ParserError> {
-        let info = self.module.enum_info(id);
-        self.check_item_visibility(
-            "enum",
-            &info.name,
-            info.file_id,
-            info.vis,
-            use_pos,
-            ParserError::private_enum,
-        )
     }
 
     /// The free-function/global analogue of [`Self::check_struct_visibility`]:
@@ -234,13 +195,13 @@ mod tests {
 
     #[test]
     fn private_type_is_module_visible_only() {
-        use crate::symbol::module::Visibility;
+        use crate::symbol::module::{StructBody, TypeKind, Visibility};
         let mut p = parser_with_modules();
-        let id = p.module.intern_struct("Secret", 1, Visibility::Private);
+        let id = p.module.intern_type("Secret", 1, Visibility::Private, Position::new(0, 0), TypeKind::Struct(StructBody::default()));
         // Inside its own module the type is freely usable.
-        assert!(p.check_struct_visibility(id, site(1)).is_ok());
+        assert!(p.check_type_visibility(id, site(1)).is_ok());
         // From an importing module, privacy blocks it.
-        let err = p.check_struct_visibility(id, site(0)).unwrap_err();
+        let err = p.check_type_visibility(id, site(0)).unwrap_err();
         assert_eq!(
             err.to_string(),
             "type-struct 'Secret' is private to module 'mid' and cannot be used from \
@@ -251,12 +212,12 @@ mod tests {
 
     #[test]
     fn public_type_is_visible_to_importers_only() {
-        use crate::symbol::module::Visibility;
+        use crate::symbol::module::{StructBody, TypeKind, Visibility};
         let mut p = parser_with_modules();
-        let id = p.module.intern_struct("Pair", 1, Visibility::Public);
+        let id = p.module.intern_type("Pair", 1, Visibility::Public, Position::new(0, 0), TypeKind::Struct(StructBody::default()));
         // The root imports `mid`, so the exported type is visible there.
-        assert!(p.check_struct_visibility(id, site(0)).is_ok());
+        assert!(p.check_type_visibility(id, site(0)).is_ok());
         // `public` does not bypass the import rule: `hidden` does not import `mid`.
-        assert!(p.check_struct_visibility(id, site(2)).is_err());
+        assert!(p.check_type_visibility(id, site(2)).is_err());
     }
 }

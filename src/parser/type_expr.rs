@@ -1,4 +1,5 @@
 use crate::lexer::{Keyword, LangType, Position, TokenKind, TypeBase};
+use crate::symbol::module::TypeKind;
 use crate::parser::{Parser, ParserError};
 
 impl Parser {
@@ -57,28 +58,25 @@ impl Parser {
     /// visibility, so an alias's underlying struct/enum/sum is checked as if
     /// named directly.
     fn resolve_named_type(&mut self, name: &str, pos: Position) -> Result<LangType, ParserError> {
-        let base = if let Some(info) = self.module.alias_info(name) {
-            self.check_import_visibility("type alias", name, info.file_id, pos)?;
-            if let TypeBase::Struct(id) = info.ty.base {
-                self.check_struct_visibility(id, pos)?;
-            } else if let TypeBase::Enum(id) = info.ty.base {
-                self.check_enum_visibility(id, pos)?;
-            } else if let TypeBase::Sum(id) = info.ty.base {
-                self.check_sum_visibility(id, pos)?;
-            }
-            info.ty
-        } else if let Some(id) = self.module.struct_id(name) {
-            self.check_struct_visibility(id, pos)?;
-            LangType::struct_type(id)
-        } else if let Some(id) = self.module.enum_id(name) {
-            self.check_enum_visibility(id, pos)?;
-            LangType::enum_type(id)
-        } else if let Some(id) = self.module.sum_id(name) {
-            self.check_sum_visibility(id, pos)?;
-            LangType::sum_type(id)
-        } else {
+        let Some(def) = self.module.lookup_type(name) else {
             return Err(ParserError::UndefinedType(name.to_string(), pos));
         };
+        let id = def.id;
+        let is_alias = matches!(def.kind, TypeKind::Alias(_));
+        let base = match &def.kind {
+            TypeKind::Struct(_) => LangType::struct_type(id),
+            TypeKind::Enum(_) => LangType::enum_type(id),
+            TypeKind::Sum(_) => LangType::sum_type(id),
+            TypeKind::Alias(target) => *target,
+        };
+
+        self.check_type_visibility(id, pos)?;
+        if is_alias
+            && let TypeBase::Struct(target) | TypeBase::Enum(target) | TypeBase::Sum(target) =
+                base.base
+        {
+            self.check_type_visibility(target, pos)?;
+        }
         Ok(self.apply_type_modifiers(base))
     }
 
@@ -141,10 +139,7 @@ impl Parser {
         let TokenKind::Identifier(name) = &self.peek().kind else {
             return false;
         };
-        let known = self.module.resolve_alias(name).is_some()
-            || self.module.struct_id(name).is_some()
-            || self.module.enum_id(name).is_some()
-            || self.module.sum_id(name).is_some();
+        let known = self.module.type_id(name).is_some();
         if known {
             // Known type: skip optional `[N]` array modifier, then any pointer
             // modifiers, then require the variable name.

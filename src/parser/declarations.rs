@@ -1,7 +1,7 @@
 use crate::lexer::{Keyword, LangType, Position, TokenKind, TypeBase};
 use crate::parser::expressions::Parser;
 use crate::parser::{ExprKind, Expression, Function, GlobalVar, ParserError};
-use crate::symbol::module::Visibility;
+use crate::symbol::module::{TypeKind, Visibility};
 use aspect_macros::parse_rule;
 
 /// Outcome of parsing one top-level declaration: the free functions/methods it
@@ -14,20 +14,79 @@ pub(crate) enum TopLevelItem {
     None,
 }
 
-/// `extern` pairs only with function-shaped declarations; every other
-/// top-level kind rejects it at the same "extern can only be used with
-/// functions" diagnostic.
-fn reject_extern(is_extern: bool, pos: Position) -> Result<(), ParserError> {
-    if is_extern {
-        return Err(ParserError::UnexpectedToken(
-            "extern can only be used with functions".to_string(),
-            pos,
-        ));
+/// The top-level declaration forms. Classifying once — instead of deriving a
+/// predicate per modifier rule and again per dispatch arm — is what makes
+/// modifier legality a table below, so a new form cannot silently skip a rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeclForm {
+    AsmFn,
+    NakedFn,
+    Fn,
+    Alias,
+    Type,
+    Enum,
+    Sum,
+    Global,
+}
+
+impl DeclForm {
+    /// `public` is module visibility; an alias has no symbol to import.
+    fn accepts_public(self) -> bool {
+        self != Self::Alias
     }
-    Ok(())
+
+    /// `export` needs a linked object-file symbol — only fns and globals have one.
+    fn accepts_export(self) -> bool {
+        matches!(self, Self::AsmFn | Self::NakedFn | Self::Fn | Self::Global)
+    }
+
+    /// Only a plain `fn` can live in another object file; `parse_kind_modifier`
+    /// has already rejected `extern` alongside `asm`/`naked`.
+    fn accepts_extern(self) -> bool {
+        self == Self::Fn
+    }
 }
 
 impl Parser {
+    /// Which form the upcoming tokens begin, or `None` when nothing does. The
+    /// order is load-bearing: `fn ident(` is a definition while `fn(` is a
+    /// function-pointer-typed global, and the keyword forms must be tried before
+    /// the catch-all global shapes. Does not consume tokens.
+    fn classify_decl_form(&self, kind: Option<&(Keyword, Position)>) -> Option<DeclForm> {
+        match kind {
+            Some((Keyword::Asm, _)) => return Some(DeclForm::AsmFn),
+            Some((Keyword::Naked, _)) => return Some(DeclForm::NakedFn),
+            _ => {}
+        }
+        if self.check_keyword(&Keyword::Fn) && !self.starts_fnptr_var_decl() {
+            return Some(DeclForm::Fn);
+        }
+        for (kw, form) in [
+            (Keyword::Alias, DeclForm::Alias),
+            (Keyword::Type, DeclForm::Type),
+            (Keyword::Enum, DeclForm::Enum),
+            (Keyword::Sum, DeclForm::Sum),
+        ] {
+            if self.check_keyword(&kw) {
+                return Some(form);
+            }
+        }
+        // A leading built-in type, named type (alias / type-struct), function-
+        // pointer type, parenthesised group, or `const` over a named base begins
+        // a global. A bare `const` keyword survives the scanner only for
+        // non-scalar bases.
+        if matches!(
+            self.peek().kind,
+            TokenKind::LangType(_) | TokenKind::Identifier(_)
+        ) || self.starts_fnptr_var_decl()
+            || self.starts_grouped_var_decl()
+            || self.check_keyword(&Keyword::Const)
+        {
+            return Some(DeclForm::Global);
+        }
+        None
+    }
+
     /// Classify, validate, and dispatch one top-level declaration — the body
     /// of `do_parse_program`'s loop. `kind`/`vis_pos` come from the modifier
     /// scan the caller already ran.
@@ -48,88 +107,66 @@ impl Parser {
             ));
         }
 
-        // `public` = module visibility (functions, globals, type-structs).
-        // `export` = external linkage, which only a symbol with a linked
-        // object-file symbol can carry — never a type or alias.
-        let defines_a_fn = matches!(&kind, Some((Keyword::Asm, _) | (Keyword::Naked, _)))
-            || (self.check_keyword(&Keyword::Fn) && !self.starts_fnptr_var_decl());
-        let defines_a_type = self.check_keyword(&Keyword::Type)
-            || self.check_keyword(&Keyword::Enum)
-            || self.check_keyword(&Keyword::Sum);
-        let defines_a_global = matches!(
-            self.peek().kind,
-            TokenKind::LangType(_) | TokenKind::Identifier(_)
-        ) || self.starts_fnptr_var_decl()
-            || self.starts_grouped_var_decl()
-            // `const <named-type>` global (`const Point* g`): a bare `const`
-            // keyword survives the scanner only for non-scalar bases, and at
-            // top level (after any `public`/`export`) it begins a global.
-            || self.check_keyword(&Keyword::Const);
+        let form_pos = self.peek().pos;
+        let Some(form) = self.classify_decl_form(kind.as_ref()) else {
+            return Err(ParserError::UnexpectedToken(
+                format!("{}", self.peek().kind),
+                form_pos,
+            ));
+        };
 
-        if vis == Visibility::Public && !defines_a_fn && !defines_a_type && !defines_a_global {
+        if vis == Visibility::Public && !form.accepts_public() {
             return Err(ParserError::UnexpectedToken(
                 "public can only be used with functions, global variables, or type definitions"
                     .to_string(),
                 vis_pos,
             ));
         }
-        if export && !defines_a_fn && !defines_a_global {
+        if export && !form.accepts_export() {
             return Err(ParserError::UnexpectedToken(
                 "export can only be used with functions or global variables — a type, enum, sum or alias has no linked symbol"
                     .to_string(),
                 vis_pos,
             ));
         }
-
-        if let Some((Keyword::Asm, asm_pos)) = &kind {
-            let func = self.parse_asm_function(*asm_pos, vis, export)?;
-            Ok(TopLevelItem::Fns(vec![func]))
-        } else if let Some((Keyword::Naked, naked_pos)) = &kind {
-            let func = self.parse_naked_function(*naked_pos, vis, export)?;
-            Ok(TopLevelItem::Fns(vec![func]))
+        if is_extern && !form.accepts_extern() {
+            return Err(ParserError::UnexpectedToken(
+                "extern can only be used with functions".to_string(),
+                form_pos,
+            ));
         }
-        // `fn ident(...)` is a definition; `fn(...)` is a function-pointer
-        // -typed global.
-        else if self.check_keyword(&Keyword::Fn) && !self.starts_fnptr_var_decl() {
-            let func = self.parse_function(is_extern, vis, export)?;
-            Ok(TopLevelItem::Fns(vec![func]))
-        } else if self.check_keyword(&Keyword::Alias) {
-            reject_extern(is_extern, self.peek().pos)?;
-            self.parse_type_alias()?;
-            Ok(TopLevelItem::None)
-        } else if self.check_keyword(&Keyword::Type) {
-            reject_extern(is_extern, self.peek().pos)?;
-            let methods = self.parse_struct_def()?;
-            Ok(TopLevelItem::Fns(methods))
-        } else if self.check_keyword(&Keyword::Enum) {
-            reject_extern(is_extern, self.peek().pos)?;
-            self.parse_enum_def()?;
-            Ok(TopLevelItem::None)
-        } else if self.check_keyword(&Keyword::Sum) {
-            reject_extern(is_extern, self.peek().pos)?;
-            self.parse_sum_def()?;
-            Ok(TopLevelItem::None)
-        } else if matches!(
-            self.peek().kind,
-            TokenKind::LangType(_) | TokenKind::Identifier(_)
-        ) || self.starts_fnptr_var_decl()
-            || self.starts_grouped_var_decl()
-            || self.check_keyword(&Keyword::Const)
-        {
-            // A leading built-in type, named type (alias / type-struct),
-            // function-pointer type, parenthesised group, or `const`
-            // (over a named base) begins a global variable declaration.
-            reject_extern(is_extern, self.peek().pos)?;
-            let global = self.parse_global_var(vis, export)?;
-            Ok(TopLevelItem::Global(global))
-        } else {
-            Err(ParserError::UnexpectedToken(
-                format!("{}", self.peek().kind),
-                self.peek().pos,
-            ))
+
+        let kind_pos = kind.map(|(_, pos)| pos);
+        match form {
+            DeclForm::AsmFn => {
+                let pos = kind_pos.expect("asm form comes from the kind modifier");
+                Ok(TopLevelItem::Fns(vec![self.parse_asm_function(pos, vis, export)?]))
+            }
+            DeclForm::NakedFn => {
+                let pos = kind_pos.expect("naked form comes from the kind modifier");
+                Ok(TopLevelItem::Fns(vec![
+                    self.parse_naked_function(pos, vis, export)?,
+                ]))
+            }
+            DeclForm::Fn => Ok(TopLevelItem::Fns(vec![
+                self.parse_function(is_extern, vis, export)?,
+            ])),
+            DeclForm::Alias => {
+                self.parse_type_alias()?;
+                Ok(TopLevelItem::None)
+            }
+            DeclForm::Type => Ok(TopLevelItem::Fns(self.parse_struct_def()?)),
+            DeclForm::Enum => {
+                self.parse_enum_def()?;
+                Ok(TopLevelItem::None)
+            }
+            DeclForm::Sum => {
+                self.parse_sum_def()?;
+                Ok(TopLevelItem::None)
+            }
+            DeclForm::Global => Ok(TopLevelItem::Global(self.parse_global_var(vis, export)?)),
         }
     }
-
 
     /// Register a function in the module symbol table, mapping a duplicate or
     /// signature clash to a positioned error. `has_body` is `!is_extern` (only
@@ -157,6 +194,25 @@ impl Parser {
             .map_err(|e| ParserError::from_symbol(e, pos))
     }
 
+    /// A body may only be parsed against a prescan-reserved def of the matching
+    /// kind that nothing has defined yet; either failure is the same
+    /// duplicate-type error, reported at this body.
+    fn claim_type_decl(
+        &mut self,
+        name: &str,
+        pos: Position,
+        want: fn(&TypeKind) -> bool,
+    ) -> Result<u32, ParserError> {
+        let def = self
+            .module
+            .lookup_type(name)
+            .expect("type name reserved during prescan");
+        if def.defined || !want(&def.kind) {
+            return Err(ParserError::DuplicateType(name.to_string(), pos));
+        }
+        Ok(def.id)
+    }
+
     /// `type Name { [public] Type field ... [const?] fn method(...) {...} ... }`.
     ///
     /// Fields must come before methods. Methods are desugared into mangled free
@@ -168,20 +224,7 @@ impl Parser {
         let pos = pos!();
         kw!(Type);
         let name = ident!();
-        let id = self
-            .module
-            .struct_id(&name)
-            .expect("type-struct name reserved during prescan");
-
-        // A non-empty field set means this name was already defined; a name
-        // also interned as an enum or sum is a cross-namespace collision.
-        if !self.module.struct_info(id).fields.is_empty()
-            || self.module.enum_id(&name).is_some()
-            || self.module.sum_id(&name).is_some()
-        {
-            return Err(ParserError::DuplicateType(name, pos));
-        }
-        self.struct_decl_pos.insert(id, pos);
+        let id = self.claim_type_decl(&name, pos, |k| matches!(k, TypeKind::Struct(_)))?;
 
         token!(OpenBrace);
 
@@ -255,22 +298,7 @@ impl Parser {
         let pos = pos!();
         kw!(Enum);
         let name = ident!();
-        let id = self
-            .module
-            .enum_id(&name)
-            .expect("enum name reserved during prescan");
-
-        // A non-empty variant set means this name was already defined; a name
-        // also interned as a type-struct, sum or alias is a cross-namespace
-        // collision. (Rejecting empty enums below keeps that set a faithful
-        // sentinel.)
-        if !self.module.enum_info(id).variants.is_empty()
-            || self.module.struct_id(&name).is_some()
-            || self.module.sum_id(&name).is_some()
-            || self.module.resolve_alias(&name).is_some()
-        {
-            return Err(ParserError::DuplicateType(name, pos));
-        }
+        let id = self.claim_type_decl(&name, pos, |k| matches!(k, TypeKind::Enum(_)))?;
 
         token!(OpenBrace);
 
@@ -314,21 +342,7 @@ impl Parser {
         let pos = pos!();
         kw!(Sum);
         let name = ident!();
-        let id = self
-            .module
-            .sum_id(&name)
-            .expect("sum name reserved during prescan");
-
-        // A non-empty variant set means this name was already defined; a name
-        // also interned as a type-struct, enum or alias is a cross-namespace
-        // collision. (Rejecting empty sums below keeps the sentinel faithful.)
-        if !self.module.sum_info(id).variants.is_empty()
-            || self.module.struct_id(&name).is_some()
-            || self.module.enum_id(&name).is_some()
-            || self.module.resolve_alias(&name).is_some()
-        {
-            return Err(ParserError::DuplicateType(name, pos));
-        }
+        let id = self.claim_type_decl(&name, pos, |k| matches!(k, TypeKind::Sum(_)))?;
 
         token!(OpenBrace);
 
@@ -405,7 +419,6 @@ impl Parser {
         token!(CloseBrace);
 
         self.module.set_sum_variants(id, variants);
-        self.sum_decl_pos.insert(id, pos);
         Ok(())
     }
 
@@ -418,20 +431,11 @@ impl Parser {
         use crate::parser::cycles::{find_byvalue_cycles, Node};
 
         for node in find_byvalue_cycles(&self.module) {
-            let (name, pos) = match node {
-                Node::Struct(id) => (
-                    self.module.struct_info(id).name.clone(),
-                    self.struct_decl_pos.get(&id).copied(),
-                ),
-                Node::Sum(id) => (
-                    self.module.sum_info(id).name.clone(),
-                    self.sum_decl_pos.get(&id).copied(),
-                ),
-            };
-            self.errors.push(ParserError::RecursiveByValue(
-                name,
-                pos.unwrap_or_else(|| Position::new(0, 0)),
-            ));
+            let def = self.module.type_def(match node {
+                Node::Struct(id) | Node::Sum(id) => id,
+            });
+            self.errors
+                .push(ParserError::RecursiveByValue(def.name.clone(), def.pos));
         }
     }
 
@@ -562,7 +566,8 @@ impl Parser {
         if let TypeBase::Struct(id) = base.expr_type.base
             && self
                 .module
-                .struct_info(id)
+                .type_def(id)
+                .as_struct()
                 .methods
                 .contains_key(name)
         {
@@ -573,7 +578,7 @@ impl Parser {
         if let ExprKind::Variable(var_name) = &base.kind
             && let Some(id) = self.module.struct_id(var_name)
             && self.symbol_table.lookup_variable(var_name).is_none()
-            && self.module.struct_info(id).methods.contains_key(name)
+            && self.module.type_def(id).as_struct().methods.contains_key(name)
         {
             return true;
         }
@@ -787,7 +792,7 @@ mod tests {
     fn enum_registers_variants_in_order() {
         let program = parse("enum Color { Red, Green, Blue }\nfn f() -> i32 {\n    return 0\n}");
         let id = program.symbols.enum_id("Color").expect("Color interned");
-        let info = program.symbols.enum_info(id);
+        let info = program.symbols.type_def(id).as_enum();
         assert_eq!(info.variants, ["Red", "Green", "Blue"]);
         assert_eq!(program.symbols.enum_variant_index(id, "Blue"), Some(2));
         assert_eq!(program.symbols.enum_variant_index(id, "Cyan"), None);
@@ -798,7 +803,7 @@ mod tests {
     fn enum_variants_may_be_newline_separated() {
         let program = parse("enum E {\n    A\n    B,\n    C\n}\nfn f() -> i32 {\n    return 0\n}");
         let id = program.symbols.enum_id("E").expect("E interned");
-        assert_eq!(program.symbols.enum_info(id).variants, ["A", "B", "C"]);
+        assert_eq!(program.symbols.type_def(id).as_enum().variants, ["A", "B", "C"]);
     }
 
     /// An enum with no variants is uninhabited and rejected.

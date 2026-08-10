@@ -21,29 +21,44 @@ aspect/
 │   │   └── errors.rs        # Preprocessor error types
 │   ├── parser/              # AST construction
 │   │   ├── ast.rs           # AST node types
-│   │   ├── expressions.rs   # Expression parsing (Pratt-style)
-│   │   ├── statements.rs    # Statement parsing
+│   │   ├── program.rs       # Two-pass driver, prescan, deferred bodies, aliases
+│   │   ├── declarations.rs  # Top-level dispatch; type/enum/sum/method registration
+│   │   ├── expressions.rs   # Expression parsing (Pratt-style); `is`
+│   │   ├── statements.rs    # Statement parsing (minus switch)
+│   │   ├── switch.rs        # switch statement/arm parsing + coverage
+│   │   ├── patterns.rs      # Qualified variant patterns (shared: case arms + `is`)
+│   │   ├── type_expr.rs     # parse_type + declaration-start lookaheads
+│   │   ├── dot_access.rs    # `.`-postfix resolution (methods, enum/sum access)
+│   │   ├── visibility.rs    # import/public visibility checks
+│   │   ├── cycles.rs        # by-value containment cycle detection
+│   │   ├── asm.rs           # asm fn / naked fn parsing
 │   │   ├── types.rs         # Re-export of lexer types
 │   │   └── errors.rs        # Parser error types
 │   ├── symbol/              # Symbol tables
 │   │   ├── table.rs         # Transient parse-time variable scopes
-│   │   └── module.rs        # ModuleSymbols: functions/type-structs/aliases, rides on Program
+│   │   └── module.rs        # ModuleSymbols: functions + one TypeDef table
+│   │                        #   (struct/enum/sum/alias); Rc-shared off Program
 │   ├── typechecker/         # Semantic validation
-│   │   ├── checker.rs       # Constraint-based type checker
-│   │   ├── types.rs         # Constraint definitions
+│   │   ├── checker.rs       # TypeChecker struct + orchestration
+│   │   ├── checker/         # check/synth spine, split by concern
+│   │   ├── types.rs         # LangType coercion and cast rules
 │   │   └── errors.rs        # Type error types
 │   ├── codegen/             # LLVM IR emission
 │   │   ├── generator.rs     # CodeGenerator struct + orchestration (not the bulk of IR gen)
 │   │   ├── expressions.rs   # walk_expression: the unified expression walker
-│   │   ├── statements.rs    # Statement generators
+│   │   ├── const_eval.rs    # Compile-time constant folding
+│   │   ├── statements.rs    # Statement generators (minus switch)
+│   │   ├── switch.rs        # switch lowering (tag dispatch, binder copies, trap edge)
 │   │   ├── value_emitter.rs # ValueEmitter trait + RuntimeEmitter + ConstantEmitter
-│   │   ├── functions.rs     # declare/generate_function, FunctionScope RAII
+│   │   ├── functions.rs     # declare/generate_function, the struct ABI, FunctionScope RAII
 │   │   ├── structs.rs       # Type-struct registration, lowering, lvalue path
-│   │   ├── asm.rs           # `asm fn` lowering
+│   │   ├── sums.rs          # Sum layout + construction / `is` codegen
+│   │   ├── asm.rs           # `asm fn` / `naked fn` lowering
 │   │   ├── globals.rs       # Globals, string literals, list initializers
 │   │   ├── scope.rs         # ScopeStack, LocalVar, GlobalVarInfo, VarRef
 │   │   ├── types.rs         # LangType → LLVM type translation
 │   │   └── errors.rs        # Codegen error types
+│   ├── variants.rs          # VariantSpace: what a switch scrutinee can match
 │   ├── asm.rs               # Target register model shared by checker and codegen
 │   ├── target.rs            # Target-triple detection; backs --target
 │   ├── scope.rs             # Generic ScopeStack<T> shared across phases
@@ -136,10 +151,12 @@ See [02-parser.md](02-parser.md) and [03-ast.md](03-ast.md).
 
 ### Stage 4: Type Checking (`src/typechecker/`)
 
-Constraint-based type checker in three phases:
-1. Register all function signatures and global variable types
-2. Walk each function body collecting `TypeConstraint` entries
-3. Verify all constraints, collecting errors into a `Vec`
+Single-pass **bidirectional** checker — no constraint-collection phase. Every
+expression is visited in one of two modes: `synth_expression` infers a type
+bottom-up where nothing constrains it, `check_expression` checks against a target
+pushed down from the context and **stamps the resolved `expr_type` onto the AST**
+so codegen reads final widths directly. Errors are collected into a `Vec` as they
+are found. See [05-typechecker.md](05-typechecker.md).
 
 Type errors are **fatal** — any error aborts compilation. The checker validates:
 - Type compatibility (with implicit widening rules)
@@ -240,6 +257,6 @@ supplying the target.
 
 3. **Parse-time symbol table**: The parser builds the symbol table during parsing, enabling type-aware expression parsing (e.g., resolving function return types for call expressions).
 
-4. **Constraint-based type checking**: Rather than checking types inline, the type checker collects constraints in phase 2 and verifies them all in phase 3, allowing multiple errors to be reported at once.
+4. **Bidirectional type checking**: the checker pushes an expected type down where the child's type *is* the parent's and synthesises bottom-up elsewhere, stamping the resolved type on each node. Errors accumulate in a `Vec`, so one run reports many.
 
 5. **Entry-block alloca hoisting**: All stack allocations are placed in the function's entry block regardless of where the variable is declared, which is required for LLVM's `mem2reg` pass to promote them to SSA registers.

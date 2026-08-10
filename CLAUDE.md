@@ -37,7 +37,7 @@ Whole-program pipeline, one phase per module in `src/`:
 5. **Typechecker** (`typechecker/`) — single-pass bidirectional checker (`check` against an expected type / `synth`); it stamps `expr_type` and narrows literals, never restructures the AST. Errors are fatal. Implicit coercion (`types_coercible` in `typechecker/types.rs`) is widening-only within a numeric family but **ignores signedness** (`i32 -> u32` at equal width is implicit, no warning); `u0*` is the universal object pointer (C's `void*` rule).
 6. **Codegen** (`codegen/`) — Inkwell → LLVM IR. Private (default) symbols get internal linkage and `optimize` runs `globaldce`, so unused stdlib is stripped; `public` symbols (and `main`/`_start`) survive. JIT execution (`jit_execute_main`) powers both the `interpret` subcommand and the whole integration-test harness — no external `lli`. LLVM types carry no signedness: signed vs unsigned is chosen per instruction (`sdiv`/`udiv`, `sext`/`zext`, `SLT`/`ULT`) from `LangType::base` at each site.
 
-Cross-cutting: `src/target.rs` (`TargetSpec`: triple → ABI + `OS_*`/`ARCH_*` preprocessor defines) and `src/asm.rs` (per-target register model validating `asm fn`/`naked fn`) are pure data usable before any LLVM target machine exists — the checker needs them long before codegen. `src/lib.rs` re-exports every module for the test harness.
+Cross-cutting: `src/target.rs` (`TargetSpec`: triple → ABI + `OS_*`/`ARCH_*` preprocessor defines), `src/asm.rs` (per-target register model validating `asm fn`/`naked fn`) and `src/variants.rs` (`VariantSpace`: what a `switch` scrutinee can be matched against — the one copy of that taxonomy, shared by parser, checker and codegen) are pure data usable before any LLVM target machine exists — the checker needs them long before codegen. `src/lib.rs` re-exports every module for the test harness.
 
 The standard library (`lib/std/**`) is written in Aspect. `demos/` are showcase programs, **not** tests.
 
@@ -79,12 +79,30 @@ This gate applies to language-level changes only (parser/typechecker/codegen-vis
 - Changes land as fast-forward pushes to `master`, not through pull requests.
 - Keep commit history free of automated co-author or tooling trailers.
 
-## Comments
+## Comments (repo rule)
 
-Comments are important, but they should not bloat the codebase.
+Every comment must earn its line. This applies identically to `//` and to `///`
+doc comments — a doc comment restating a name or signature is the single most
+common form of the bloat, and the codebase has repeatedly had to be cleaned of it.
 
-- Comment why, never what. If the comment just restates the line in English, don't write it.
-- No comment on a line unless it answers one of: why this approach over the obvious one, what invariant/precondition the reader can't see locally, what will break if this changes, or what upstream bug/edge case this exists to handle.
-- Default to zero comments in straight-line, self-explanatory code (simple getters, obvious loops, straightforward match arms).
-- Never add a comment restating the function name or type signature in prose.
-- When writing documentation comments in Rust, you should run "cargo doc" afterwards to see if your comment causes a warning, and if it does, you rewrite it. 
+- **Comment why, never what.** If it restates the code in English, delete it.
+- **A comment must answer one of four questions**: why this approach over the
+  obvious one; what invariant or precondition the reader cannot see locally; what
+  breaks if this changes; what upstream bug or edge case it exists to handle.
+  Nothing else justifies one.
+- **Default to zero.** Function bodies start with no comments and stay that way
+  unless a line clears the bar above. Straight-line code, simple accessors,
+  obvious loops and plain match arms stay bare. `# Panics`/`# Errors` sections go
+  only where the contract is genuinely caller-facing — not on every accessor that
+  happens to index a `Vec`.
+- **Say it once.** A rationale covering N call sites belongs in exactly one place
+  — the type, field or function it is about, or the stage doc under
+  `doc/compiler/` — never repeated at each site. Repeated rationale is the worst
+  form of this bloat: it reads as thorough and survives every local cleanup.
+- **One or two lines.** A rationale that needs a paragraph is documentation. Put
+  it in `doc/compiler/*.md` and let the code point there.
+- **Audit before committing, as a step.** Re-read what your diff adds
+  (`git diff | grep -E '^\+\s*(//|///)'`) and delete everything that only
+  restates code. A commit that adds more comment lines than it needed is a defect
+  and gets sent back.
+- Run `cargo doc` after writing doc comments; rewrite anything that warns. 

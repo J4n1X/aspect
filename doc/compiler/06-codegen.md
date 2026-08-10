@@ -10,8 +10,8 @@ The codegen module (`src/codegen/`) emits LLVM IR via Inkwell (pinned to LLVM 19
 | `expressions.rs` | `walk_expression` — the runtime expression walker + `CodeGenerator` expression entry-points. `&&`/`||` lower with **real short-circuit control flow** (`emit_short_circuit`: rhs in its own block, `i1` phi — the rhs must not evaluate when the lhs decides, both for C semantics and because an `is`-chain conjunct reads bindings its predecessor stores only on the true edge). `is` (`emit_sum_probe`): scrutinee once into an entry slot, tag load, `icmp eq`; the binding form adds unconditional entry-block binder allocas whose payload copies run in a conditional `is.bind` block — initialized exactly when readable. `if`/`while` codegen wraps condition + then/body in one scope (tri-scope invariant; this also fixed body-local shadowing silently clobbering outer variables) |
 | `const_eval.rs` | `const_eval` — the compile-time-constant expression evaluator (folds via `ConstantEmitter`) |
 | `statements.rs` | `generate_statement` and the statement generators (minus `switch`) |
-| `switch.rs` | `generate_switch`: scrutinee evaluated once (sums into an entry-block slot, tag loaded from field 0; bool normalized to `i1`), one LLVM `switch` over the discriminant, per-arm blocks copy bound payload fields out of the slot through the variant's payload struct (arrays memcpy'd) into fresh locals; the else edge is the `default` block, or — on a fully-listed enum/sum switch — a `llvm.trap` + `unreachable` block at `-O0` (forged tags halt debuggably; `llvm.trap`, never libc `abort`, keeps freestanding targets libc-free) and a bare `unreachable` when optimizing (forgery is UB; no jump-table bounds check) |
-| `functions.rs` | `declare_function`, `generate_function`, `FunctionScope` RAII |
+| `switch.rs` | `generate_switch`: scrutinee evaluated once (a sum scrutinee is recognised by `variants::sum_scrutinee`, the same test the parser and checker use, and stored into an entry-block slot, tag loaded from field 0; bool normalized to `i1`), one LLVM `switch` over the discriminant, per-arm blocks copy bound payload fields out of the slot through the variant's payload struct (arrays memcpy'd) into fresh locals; the else edge is the `default` block, or — on a fully-listed enum/sum switch — a `llvm.trap` + `unreachable` block at `-O0` (forged tags halt debuggably; `llvm.trap`, never libc `abort`, keeps freestanding targets libc-free) and a bare `unreachable` when optimizing (forgery is UB; no jump-table bounds check) |
+| `functions.rs` | `declare_function`, `generate_function`, `FunctionScope` RAII, and `abi_fn_type` — the one place the struct ABI's LLVM shape is derived, so a declaration and every call site (direct or through a fn-pointer) agree |
 | `asm.rs` | `asm fn` and `naked fn` lowering: `constraint_string`, `generate_asm_function`, `generate_naked_function` |
 | `globals.rs` | `generate_global_variable`, `generate_string_literal`, `generate_constant_array_value`, `generate_list_initializer`. A sum global with an initializer is declared with the folded constant's **anonymous padded type** (payload fields at natural types, explicit `[N x i8]` padding pinning the uniform offsets — no endianness-dependent serialization into the unit array) and forced to the storage alignment; readers load through the named storage type, which opaque pointers make immaterial. Sum-typed fields/elements inside constant struct/array initializers stay rejected (the anonymous type can't embed in a named constant) |
 | `structs.rs` | Type-struct codegen: LLVM type registration, lowering through the struct cache, and the address (lvalue) path behind field access, field assignment, and `&expr` |
@@ -31,20 +31,15 @@ pub struct CodeGenerator<'ctx> {
   pub(crate) target_machine: TargetMachine,
 
     pub(crate) functions: HashMap<String, FunctionValue<'ctx>>,
-    /// Parameter LangTypes per function name — arg coercion at call sites.
-    pub(crate) function_lang_params: HashMap<String, Vec<LangType>>,
-    /// Return LangType per function name — detects struct-by-value (`sret`) returns.
-    pub(crate) function_return_types: HashMap<String, LangType>,
+    /// Read-only handle on the program's registry, shared with the parser and
+    /// checker. Signatures (call-site coercion, `sret` detection), struct field
+    /// layouts and sum variant payloads are all read from here.
+    pub(crate) symbols: Rc<ModuleSymbols>,
     /// While generating a struct-returning function, the hidden `sret`
     /// out-pointer that `return` stores through. `None` for scalar/void returns.
     pub(crate) current_sret: Option<PointerValue<'ctx>>,
     /// Named LLVM struct type per type-struct id (built in the registration pass).
     pub(crate) struct_types: HashMap<u32, StructType<'ctx>>,
-    /// Ordered field layout per type-struct id: `(name, type)` in GEP-index order.
-    pub(crate) struct_fields: HashMap<u32, Vec<(String, LangType)>>,
-    /// Function-pointer signatures, indexed by `TypeBase::FnPtr(u32)`.
-    /// Cloned from `program.symbols.fnptr_sigs` during `generate`.
-    pub(crate) fnptr_sigs: Vec<crate::symbol::module::FnPtrSig>,
     pub(crate) scope: ScopeStack<'ctx>,
 
     pub(crate) current_function: Option<FunctionValue<'ctx>>,
@@ -58,6 +53,28 @@ The target machine is created once in `CodeGenerator::new` and reused for optimi
 `CodeGenerator::new` uses LLVM's default relocation model for the triple; `CodeGenerator::new_with_reloc` takes an explicit `RelocMode` instead — this is how the `compile --relocation-model` CLI flag produces position-independent code. Because the reloc model is baked into the single cached `TargetMachine`, it governs *both* the optimization passes and the emitted object. When `RelocMode::PIC` is selected the module is also stamped with a `PIC Level` (value 2) flag so the emitted IR/object is self-describing, as clang does for `-fPIC` (using `FlagBehavior::Override`, since inkwell 0.9 does not expose clang's `Max` behavior — the recorded value is identical and the merge semantics only differ when linking two flagged IR modules, which never happens here).
 
 Variable storage has been extracted into `ScopeStack` (see `scope.rs`).
+
+### The registry handle
+
+`self.symbols` is an `Rc<ModuleSymbols>` cloned from `Program` at the top of
+`generate`. Codegen never mutates it — every signature, struct field layout and
+sum variant payload it needs is *read* from the one table the parser built, so no
+phase carries a second copy that could drift out of agreement.
+
+The `Rc` is what makes that practical. A walk routinely needs a declared field
+list open while it recurses through `&mut self` (`generate_expression` and
+friends), which a plain `&self.symbols` borrow would forbid. Cloning the handle —
+never the table — hands the walk an independent view:
+
+```rust
+let syms = Rc::clone(&self.symbols);
+let field_tys = &syms.type_def(sum_id).as_sum().variants[variant as usize].fields;
+for (i, (arg, (_, fty))) in args.iter().zip(field_tys).enumerate() {
+    let val = self.generate_coerced_value(arg, Some(fty))?;  // &mut self, still fine
+```
+
+The same pattern appears in the typechecker (`checker/aggregates.rs`), which
+holds a handle on the identical table.
 
 ### Helper Structs
 
@@ -211,12 +228,29 @@ reach, so no code you could step through changes.
 ### Pass 1: Declaration (`declare_function`)
 
 For each function in the program:
-1. Collect parameter `LangType`s into `function_lang_params` for call-site coercion
-2. Convert parameter and return types to LLVM types
-3. Create `fn_type` (non-variadic)
-4. `module.add_function()` — adds to module
-5. Set parameter names
-6. Store `FunctionValue` in `self.functions`
+1. Convert parameter and return types to LLVM types
+2. Create `fn_type` (non-variadic)
+3. `module.add_function()` — adds to module
+4. Set parameter names
+5. Store `FunctionValue` in `self.functions`
+
+Declaration records no signature of its own: call sites read the callee's
+parameter and return `LangType`s from `self.symbols` (see *The registry handle*
+below), so there is exactly one copy of every signature in the compiler.
+
+### The struct ABI, in one place
+
+`abi_fn_type(params, ret_ty, pos)` maps a signature to its LLVM shape: a
+struct-by-value parameter becomes a `byval` pointer and a struct return becomes a
+leading `sret` pointer (the LLVM return turning `void`). `declare_function` and
+both call paths go through it, and `build_call_args` prepares arguments to match.
+
+An **indirect** call additionally needs `attach_abi_attributes`: a direct call
+inherits `sret`/`byval` from the callee's declaration, but through a function
+pointer there is no declaration for LLVM to consult, so the attributes must sit
+on the call site. Omitting either half is a silent miscompile rather than a
+verifier error — the caller passes an aggregate first-class while the callee
+reads a pointer. Regression: `tests/programs/fnptr_struct_abi.ap`.
 
 ### Pass 2: Body Generation (`generate_function`)
 

@@ -281,7 +281,8 @@ fn const_eval_sum_construct<'ctx>(
     let tag_ty = cg.sum_tag_type(*sum_id, pos)?;
     let tag = tag_ty.const_int(u64::from(*variant), false);
     let tag_size = u64::from(tag_ty.get_bit_width() / 8);
-    let field_tys = cg.sum_variant_fields[sum_id][*variant as usize].clone();
+    let syms = std::rc::Rc::clone(&cg.symbols);
+    let field_tys = &syms.type_def(*sum_id).as_sum().variants[*variant as usize].fields;
 
     let mut members: Vec<BasicValueEnum> = vec![tag.into()];
     if field_tys.is_empty() {
@@ -303,8 +304,8 @@ fn const_eval_sum_construct<'ctx>(
             members.push(cg.context.i8_type().array_type(pad).const_zero().into());
         }
         let mut fields = Vec::with_capacity(args.len());
-        for (arg, fty) in args.iter().zip(field_tys) {
-            fields.push(const_coerced_value(arg, cg, Some(&fty))?);
+        for (arg, (_, fty)) in args.iter().zip(field_tys) {
+            fields.push(const_coerced_value(arg, cg, Some(fty))?);
         }
         members.push(cg.context.const_struct(&fields, false).into());
         let tail = total - payload_off - payload_size;
@@ -326,9 +327,11 @@ fn const_eval_struct_literal<'ctx>(
         CodegenError::TypeError(format!("unregistered type-struct id {struct_id}"), pos)
     })?;
 
-    let layout = cg.struct_fields[struct_id].clone();
+    let syms = std::rc::Rc::clone(&cg.symbols);
+    let layout = &syms.type_def(*struct_id).as_struct().fields;
     let mut vals = Vec::with_capacity(layout.len());
-    for (fname, fty) in &layout {
+    for declared in layout {
+        let (fname, fty) = (&declared.name, &declared.ty);
         // A folded sum has an anonymous padded type that can't embed
         // in a named struct constant (member types must match).
         if fty.pointer_depth == 0

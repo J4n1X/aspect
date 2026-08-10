@@ -7,6 +7,7 @@ use crate::parser::{
 use crate::symbol::module::ModuleSymbols;
 use crate::target::TargetSpec;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 /// Single-pass, **bidirectional** type checker: errors are reported immediately,
 /// with no constraint-collection phase. Every expression is visited in one of
@@ -19,9 +20,9 @@ use std::collections::HashMap;
 ///   parent's, and **stamps `expr_type` on the AST in place** so codegen reads
 ///   the final width directly.
 pub struct TypeChecker {
-    /// Taken from `Program` for the duration of `check_program` and restored
-    /// on exit, so any registry refinement is preserved without a divergent copy.
-    symbols: ModuleSymbols,
+    /// `Rc::clone` it rather than borrow it — a check needs the table open
+    /// across `&mut self` recursion.
+    symbols: Rc<ModuleSymbols>,
     scopes: ScopeStack<LangType>,
     globals: HashMap<String, LangType>,
     current_function: Option<String>,
@@ -43,7 +44,7 @@ impl TypeChecker {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            symbols: ModuleSymbols::new(),
+            symbols: Rc::new(ModuleSymbols::new()),
             scopes: ScopeStack::new(),
             globals: HashMap::new(),
             current_function: None,
@@ -102,7 +103,7 @@ impl TypeChecker {
     /// # Errors
     /// Returns `Err(Vec<TypeCheckError>)` listing every type error found.
     pub fn check_program(&mut self, program: &mut Program) -> Result<(), Vec<TypeCheckError>> {
-        self.symbols = std::mem::take(&mut program.symbols);
+        self.symbols = Rc::clone(&program.symbols);
         // Adopt the file registry that rides on `Program` (unless one was
         // already set), so diagnostics resolve `pos.file_id` to a filename.
         if self.source_files.is_empty() {
@@ -128,8 +129,6 @@ impl TypeChecker {
                 FunctionBody::Extern => {}
             }
         }
-
-        program.symbols = std::mem::take(&mut self.symbols);
 
         if self.errors.is_empty() {
             Ok(())

@@ -370,8 +370,8 @@ pub struct Program {
     pub global_vars: Vec<GlobalVar>,
     pub string_literals: Vec<String>,
     /// Cross-phase global symbol table (functions, type-structs, aliases),
-    /// built by the parser and consumed by the type checker and code generator.
-    pub symbols: crate::symbol::module::ModuleSymbols,
+    /// built by the parser and read by the type checker and code generator.
+    pub symbols: std::rc::Rc<crate::symbol::module::ModuleSymbols>,
     /// Source-file registry indexed by `Position::file_id` — entry file at id 0,
     /// each `$import`-pulled file after that. Empty for synthetic programs
     /// (e.g. checker unit tests that don't go through the preprocessor).

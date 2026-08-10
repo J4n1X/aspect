@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use inkwell::AddressSpace;
 use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::module::Linkage;
@@ -74,16 +76,10 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// (`byval`). Returns the prepared args plus the sret slot (if any).
     fn build_call_args(
         &mut self,
-        name: &str,
+        param_types: &[LangType],
+        ret_ty: Option<LangType>,
         args: &[Expression],
     ) -> Result<PreparedCallArgs<'ctx>, CodegenError> {
-        let param_types = self
-            .function_lang_params
-            .get(name)
-            .cloned()
-            .unwrap_or_default();
-        let ret_ty = self.function_return_types.get(name).copied();
-
         let mut arg_values = Vec::with_capacity(args.len() + 1);
 
         // sret: caller allocates the result slot and passes it as arg 0.
@@ -131,6 +127,78 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok((arg_values, sret_slot))
     }
 
+    /// The LLVM signature a callee of this shape presents: a struct-by-value
+    /// parameter becomes a `byval` pointer and a struct return becomes a leading
+    /// `sret` pointer. Both the declaration and every call site — direct or
+    /// through a function pointer — derive their shape here, or one side passes
+    /// an aggregate first-class while the other expects a pointer. Also reports
+    /// whether the return was rewritten, which the caller needs to find its
+    /// `sret` slot.
+    fn abi_fn_type(
+        &self,
+        params: &[LangType],
+        ret_ty: LangType,
+        pos: Position,
+    ) -> Result<(inkwell::types::FunctionType<'ctx>, bool), CodegenError> {
+        let ret_is_struct = is_struct_value(&ret_ty);
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+
+        let mut llvm_params: Vec<BasicMetadataTypeEnum<'ctx>> = Vec::new();
+        if ret_is_struct {
+            llvm_params.push(ptr_ty.into());
+        }
+        for ty in params {
+            if is_struct_value(ty) {
+                llvm_params.push(ptr_ty.into());
+            } else {
+                llvm_params.push(
+                    self.lang_type_to_llvm(ty)
+                        .map_err(|e| e.with_pos(pos))?
+                        .into(),
+                );
+            }
+        }
+
+        let fn_ty = if ret_is_struct || ret_ty.is_void() {
+            self.context.void_type().fn_type(&llvm_params, false)
+        } else {
+            self.lang_type_to_llvm(&ret_ty)
+                .map_err(|e| e.with_pos(pos))?
+                .fn_type(&llvm_params, false)
+        };
+        Ok((fn_ty, ret_is_struct))
+    }
+
+    /// Attach the `sret`/`byval` type attributes for `params`/`ret_ty` to a
+    /// call site. A *direct* call inherits them from the callee's declaration,
+    /// but an indirect one has no declaration for LLVM to consult — without
+    /// these the pointer is passed as a plain pointer and the ABI silently
+    /// disagrees with the callee.
+    fn attach_abi_attributes(
+        &self,
+        call: inkwell::values::CallSiteValue<'ctx>,
+        params: &[LangType],
+        ret_ty: LangType,
+        ret_is_struct: bool,
+    ) {
+        if ret_is_struct {
+            call.add_attribute(
+                AttributeLoc::Param(0),
+                self.struct_abi_attribute("sret", &ret_ty),
+            );
+        }
+        let offset = u32::from(ret_is_struct);
+        for (i, ty) in params.iter().enumerate() {
+            if is_struct_value(ty) {
+                let idx = u32::try_from(i).expect("parameter index fits u32") + offset;
+                call.add_attribute(
+                    AttributeLoc::Param(idx),
+                    self.struct_abi_attribute("byval", ty),
+                );
+            }
+        }
+    }
+
     /// `sret(%Struct)` / `byval(%Struct)` type attribute for a struct value type.
     fn struct_abi_attribute(&self, kind: &str, ty: &LangType) -> Attribute {
         let aggregate_ty = match ty.base {
@@ -149,40 +217,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         &mut self,
         func: &Function,
     ) -> Result<FunctionValue<'ctx>, CodegenError> {
-        let param_lang_types: Vec<LangType> = func.proto.params.iter().map(|(ty, _)| *ty).collect();
-
         let ret_ty = func.proto.return_type;
-        let ret_is_struct = is_struct_value(&ret_ty);
-        let ptr_ty = self.context.ptr_type(AddressSpace::default());
-
-        // Build the LLVM parameter list. A struct-by-value return prepends a
-        // hidden `sret` pointer; struct-by-value params are lowered to `byval`
-        // pointers.
-        let mut llvm_params: Vec<BasicMetadataTypeEnum<'ctx>> = Vec::new();
-        if ret_is_struct {
-            llvm_params.push(ptr_ty.into());
-        }
-        for (ty, _) in &func.proto.params {
-            if is_struct_value(ty) {
-                llvm_params.push(ptr_ty.into());
-            } else {
-                llvm_params.push(
-                    ty.to_llvm(self.context)
-                        .map_err(|e| e.with_pos(func.proto.pos))?
-                        .into(),
-                );
-            }
-        }
-
-        // Return type: `void` for struct (sret) or void returns.
-        let fn_type = if ret_is_struct || ret_ty.is_void() {
-            self.context.void_type().fn_type(&llvm_params, false)
-        } else {
-            ret_ty
-                .to_llvm(self.context)
-                .map_err(|e| e.with_pos(func.proto.pos))?
-                .fn_type(&llvm_params, false)
-        };
+        let param_types: Vec<LangType> = func.proto.params.iter().map(|(ty, _)| *ty).collect();
+        let (fn_type, ret_is_struct) =
+            self.abi_fn_type(&param_types, ret_ty, func.proto.pos)?;
 
         let function = self
             .module
@@ -222,10 +260,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         self.functions.insert(func.proto.name.clone(), function);
-        self.function_lang_params
-            .insert(func.proto.name.clone(), param_lang_types);
-        self.function_return_types
-            .insert(func.proto.name.clone(), ret_ty);
         Ok(function)
     }
 
@@ -342,7 +376,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             .get(name)
             .ok_or_else(|| CodegenError::UndefinedFunction(name.to_string(), pos))?;
 
-        let (arg_values, sret_slot) = self.build_call_args(name, args)?;
+        let syms = Rc::clone(&self.symbols);
+        let sym = syms.lookup_function(name);
+        let param_types: Vec<LangType> = sym
+            .map(|f| f.params.iter().map(|(ty, _)| *ty).collect())
+            .unwrap_or_default();
+        let (arg_values, sret_slot) =
+            self.build_call_args(&param_types, sym.map(|f| f.return_type), args)?;
         let call_result = self.builder.build_call(function, &arg_values, "call")?;
 
         if let Some((slot, struct_ty)) = sret_slot {
@@ -401,43 +441,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ));
             }
         };
-        let sig = self.fnptr_sigs.get(id as usize).cloned().ok_or_else(|| {
+        let syms = Rc::clone(&self.symbols);
+        let sig = syms.all_fnptr_sigs().get(id as usize).ok_or_else(|| {
             CodegenError::TypeError(format!("unregistered fn-ptr signature id {id}"), pos)
         })?;
 
         let callee_val = self.generate_expression(callee)?;
         let callee_ptr = callee_val.into_pointer_value();
 
-        // Reconstruct the LLVM function type from the registered signature.
-        let param_types: Result<Vec<_>, _> = sig
-            .params
-            .iter()
-            .map(|t| self.lang_type_to_llvm(t).map_err(|e| e.with_pos(pos)))
-            .collect();
-        let param_types = param_types?;
-        let param_metas: Vec<BasicMetadataTypeEnum<'ctx>> =
-            param_types.iter().map(|t| (*t).into()).collect();
-        let fn_ty = if sig.return_type.is_void() {
-            self.context.void_type().fn_type(&param_metas, false)
-        } else {
-            self.lang_type_to_llvm(&sig.return_type)
-                .map_err(|e| e.with_pos(pos))?
-                .fn_type(&param_metas, false)
-        };
-
-        // Coerce each argument to the registered parameter type, just like
-        // direct calls. Struct by-value isn't yet plumbed through fn-ptrs.
-        let mut arg_values: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> =
-            Vec::with_capacity(args.len());
-        for (i, arg) in args.iter().enumerate() {
-            let target = sig.params.get(i);
-            let val = self.generate_coerced_value(arg, target)?;
-            arg_values.push(val.into());
-        }
+        let (fn_ty, ret_is_struct) = self.abi_fn_type(&sig.params, sig.return_type, pos)?;
+        let (arg_values, sret_slot) =
+            self.build_call_args(&sig.params, Some(sig.return_type), args)?;
 
         let call =
             self.builder
                 .build_indirect_call(fn_ty, callee_ptr, &arg_values, "indirect_call")?;
+        self.attach_abi_attributes(call, &sig.params, sig.return_type, ret_is_struct);
+
+        if let Some((slot, struct_ty)) = sret_slot {
+            return Ok(Some(self.builder.build_load(struct_ty, slot, "sret.load")?));
+        }
         Ok(call.try_as_basic_value().basic())
     }
 

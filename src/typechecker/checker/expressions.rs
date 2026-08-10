@@ -330,7 +330,7 @@ impl TypeChecker {
             return false;
         };
         let prefix =
-            crate::symbol::module::method_owner_prefix(&self.symbols.struct_info(struct_id).name);
+            crate::symbol::module::method_owner_prefix(&self.symbols.type_def(struct_id).name);
         current.starts_with(&prefix)
     }
 
@@ -339,13 +339,13 @@ impl TypeChecker {
     pub(crate) fn type_name(&self, ty: &LangType) -> String {
         if let TypeBase::Struct(id) = ty.base {
             let stars = "*".repeat(ty.pointer_depth as usize);
-            format!("{}{}", self.symbols.struct_info(id).name, stars)
+            format!("{}{}", self.symbols.type_def(id).name, stars)
         } else if let TypeBase::Enum(id) = ty.base {
             let stars = "*".repeat(ty.pointer_depth as usize);
-            format!("{}{}", self.symbols.enum_info(id).name, stars)
+            format!("{}{}", self.symbols.type_def(id).name, stars)
         } else if let TypeBase::Sum(id) = ty.base {
             let stars = "*".repeat(ty.pointer_depth as usize);
-            format!("{}{}", self.symbols.sum_info(id).name, stars)
+            format!("{}{}", self.symbols.type_def(id).name, stars)
         } else {
             format!("{ty}")
         }

@@ -1,0 +1,12 @@
+# expected: "Unexpected token '42'"
+#-
+  A top-level token that begins no declaration form is reported as itself, at
+  its own position — not blamed on the preceding modifier. The modifier-legality
+  checks only fire once the form is known, so `public` is not accused of being
+  the problem here.
+-#
+public 42
+
+fn main() -> i32 {
+    return 0
+}

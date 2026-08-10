@@ -1,6 +1,6 @@
 # Symbol Table
 
-The symbol table (`src/symbol/table.rs`) manages scoped **variable** lookups during parsing. It has no function registry: functions, type-structs, and aliases live in `ModuleSymbols` (`src/symbol/module.rs`), which rides on the `Program` across phases. `SymbolTable` is transient — it holds only the lexical variable scopes the parser needs while parsing function bodies, and is discarded once parsing completes.
+The symbol table (`src/symbol/table.rs`) manages scoped **variable** lookups during parsing. It has no function registry: functions and named types live in `ModuleSymbols` (`src/symbol/module.rs`), shared by handle off the `Program` across phases. `SymbolTable` is transient — it holds only the lexical variable scopes the parser needs while parsing function bodies, and is discarded once parsing completes.
 
 ## Structure
 
@@ -34,6 +34,7 @@ pub struct FunctionSymbol {
     pub return_type: LangType,
     pub is_extern: bool,
     pub has_body: bool,  // true if a body was provided (vs forward decl)
+    pub vis: Visibility, // whether another module may call it through $import
     pub pos: Position,
 }
 ```
@@ -83,13 +84,60 @@ Handles three cases:
 
 ### `ModuleSymbols::lookup_function(name) -> Option<&FunctionSymbol>`
 
-Simple lookup in the flat `functions` HashMap. `ModuleSymbols` also holds type-structs, enums, and aliases.
+Simple lookup in the flat `functions` HashMap. `ModuleSymbols` also holds every named type (see below) and the interned fn-pointer signatures.
 
-## Enum Registry (on `ModuleSymbols`)
+## Named-Type Registry (on `ModuleSymbols`)
 
-Enums live in `ModuleSymbols` alongside type-structs, shaped in parallel to the struct registry: `enums_by_id: Vec<EnumInfo>` (index == the `TypeBase::Enum(id)` interned id) and `enums_by_name: HashMap<String, u32>`. An `EnumInfo` carries `{ id, name, file_id, vis, variants: Vec<String> }` — the variant's *value is its index* into `variants`. Names are reserved by a prescan (`intern_enum`) before the main parse so enums resolve regardless of declaration order; `parse_enum_def` later fills the variants via `set_enum_variants`. Lookups: `enum_id(name)`, `enum_info(id)`, and `enum_variant_index(id, variant)`.
+Type-structs, enums, sums and aliases share **one** id space and **one** name
+map. A `TypeDef` carries the header every kind needs; only the kind-specific part
+sits in `TypeKind`:
 
-Sums follow the same shape a third time: `sums_by_id: Vec<SumInfo>` (index == the `TypeBase::Sum(id)` interned id) and `sums_by_name`. A `SumInfo` carries `{ id, name, file_id, vis, variants: Vec<SumVariant> }`, where each `SumVariant` is `{ name, fields: Vec<(String, LangType)> }` — the variant's *discriminant is its index* into `variants`, and payload fields keep declaration order (matching will be positional). Interned by `intern_sum` in the prescan, filled by `parse_sum_def` via `set_sum_variants`; lookups mirror the enum ones (`sum_id`, `sum_info`, `sum_variant_index`). Type-structs, enums, sums and aliases share one type namespace — each definition parser cross-checks the other three registries and reports `DuplicateType` on a collision.
+```rust
+pub struct TypeDef {
+    pub id: u32,          // what TypeBase::{Struct,Enum,Sum}(id) carries
+    pub name: String,
+    pub file_id: u32,     // provenance for the import-visibility check
+    pub vis: Visibility,  // fixed at intern time
+    pub pos: Position,    // the declaring keyword
+    pub defined: bool,    // false between name reservation and body parse
+    pub kind: TypeKind,
+}
+
+pub enum TypeKind {
+    Struct(StructBody),  // fields + field_index + methods
+    Enum(EnumBody),      // variants: Vec<String>; index == the value
+    Sum(SumBody),        // variants: Vec<SumVariant>; index == the discriminant
+    Alias(LangType),     // eagerly-resolved target
+}
+```
+
+One table is what makes these single pieces of code rather than one copy per
+kind:
+
+| Concern | Entry point |
+|---|---|
+| "Is this name taken?" (any kind) | `type_id(name)` / `lookup_type(name)` |
+| Name reservation for every kind | one `prescan_type_names` pass, keyword → `TypeKind` |
+| Import + `public` gate | `Parser::check_type_visibility(id, pos)`, noun from `TypeKind::noun()` |
+| Duplicate detection | `Parser::claim_type_decl(name, pos, want_kind)` |
+| Named-type resolution | one `match def.kind` in `resolve_named_type` |
+
+Kind-filtered helpers (`struct_id`/`enum_id`/`sum_id`, `structs()`/`enums()`/
+`sums()`) are thin views over that one table, and `type_def(id).as_struct()` /
+`.as_enum()` / `.as_sum()` reach a body — panicking on a kind mismatch, which the
+`TypeBase` variant or a kind-filtered lookup has already ruled out.
+
+Two properties worth knowing:
+
+- **`defined` is a real field, not an inferred one.** Duplicate detection used to
+  ask whether a body was still empty, which cannot tell "not parsed yet" from
+  "parsed, and empty" — two empty `type Foo {}` declarations compiled silently.
+  It also entangled the language's rejection of empty enums/sums with the
+  sentinel's fidelity; those rules are now free-standing choices.
+- **A cross-kind redeclaration is caught at the body, not the prescan.** The
+  prescan reserves the first spelling it sees; `claim_type_decl` then rejects a
+  body whose def is of another kind, so the diagnostic lands on the second
+  declaration.
 
 ## Scope Example
 
@@ -114,3 +162,17 @@ The parser creates and populates the symbol table during parsing:
 - Expression parsing calls `lookup_variable()` for identifier types and `lookup_function()` for call return types
 
 The typechecker has its own **independent** scope system (a separate `Vec<HashMap<String, LangType>>`), not sharing the parser's `SymbolTable`.
+
+### Ownership across phases
+
+`Program::symbols` is an `Rc<ModuleSymbols>`. The parser builds the table and
+wraps it once when it finishes; the typechecker and code generator each take an
+`Rc::clone` of that handle and only ever read through it. There is therefore
+exactly **one** copy of every signature, field layout and variant payload in the
+compiler — no phase re-derives its own index, so none can drift out of agreement
+with the registry the interned ids point into.
+
+Cloning the *handle* (never the table) is also what resolves the borrow problem
+both later phases hit: they need a declared field or payload list open while
+recursing through `&mut self`. See doc/compiler/06-codegen.md § *The registry
+handle* for the pattern.

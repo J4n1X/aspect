@@ -1,7 +1,7 @@
 use crate::lexer::{Keyword, LangType, Position, TokenKind};
 use crate::parser::expressions::Parser;
 use crate::parser::{ParserError, Statement, StatementKind};
-use crate::symbol::module::Visibility;
+use crate::symbol::module::{EnumBody, StructBody, SumBody, TypeKind, Visibility};
 use aspect_macros::parse_rule;
 
 /// A function body whose parsing is deferred to pass 2 of `do_parse_program`:
@@ -50,12 +50,9 @@ impl Parser {
         let mut functions = Vec::new();
         let mut global_vars = Vec::new();
 
-        // Pre-register type/enum names and aliases so named types resolve
-        // regardless of declaration order. Enums are interned before the alias
-        // prescan so an alias colliding with an enum name is caught there.
+        // Pre-register every named type before aliases, so an alias colliding
+        // with one is caught at the alias site.
         self.prescan_type_names();
-        self.prescan_enum_names();
-        self.prescan_sum_names();
         self.prescan_aliases();
 
         skip_nl!();
@@ -92,7 +89,7 @@ impl Parser {
             functions,
             global_vars,
             string_literals: self.string_literals.iter().cloned().collect(),
-            symbols: std::mem::take(&mut self.module),
+            symbols: std::rc::Rc::new(std::mem::take(&mut self.module)),
             source_files: self.source_files.clone(),
         })
     }
@@ -159,55 +156,39 @@ impl Parser {
         }
     }
 
-    /// Collect the `(name, file_id, visibility)` of every `<kw> <Name>`
-    /// declaration, honoring a directly-preceding `public`. Shared spine of
-    /// [`Self::prescan_type_names`] and [`Self::prescan_enum_names`]; both must
-    /// know visibility at intern time, since import cycles can place a module's
-    /// *uses* of a name before its definition in the inlined token stream. Does
-    /// not consume tokens.
-    fn prescan_named(&self, kw: Keyword) -> Vec<(String, u32, Visibility)> {
-        self.tokens
+    /// Reserve an id for every `type`/`enum`/`sum <Name>` before the main parse,
+    /// so named types resolve regardless of order (self/mutual reference
+    /// included). Does not consume tokens.
+    fn prescan_type_names(&mut self) {
+        let reserved: Vec<(String, u32, Visibility, Position, TypeKind)> = self
+            .tokens
             .windows(2)
             .enumerate()
-            .filter_map(|(i, w)| match (&w[0].kind, &w[1].kind) {
-                (TokenKind::Keyword(k), TokenKind::Identifier(name)) if *k == kw => {
-                    let vis = if i > 0
-                        && matches!(
-                            self.tokens[i - 1].kind,
-                            TokenKind::Keyword(Keyword::Public)
-                        ) {
-                        Visibility::Public
-                    } else {
-                        Visibility::Private
-                    };
-                    Some((name.clone(), w[0].pos.file_id, vis))
-                }
-                _ => None,
+            .filter_map(|(i, w)| {
+                let TokenKind::Keyword(kw) = &w[0].kind else {
+                    return None;
+                };
+                let TokenKind::Identifier(name) = &w[1].kind else {
+                    return None;
+                };
+                let kind = match kw {
+                    Keyword::Type => TypeKind::Struct(StructBody::default()),
+                    Keyword::Enum => TypeKind::Enum(EnumBody::default()),
+                    Keyword::Sum => TypeKind::Sum(SumBody::default()),
+                    _ => return None,
+                };
+                let vis = if i > 0
+                    && matches!(self.tokens[i - 1].kind, TokenKind::Keyword(Keyword::Public))
+                {
+                    Visibility::Public
+                } else {
+                    Visibility::Private
+                };
+                Some((name.clone(), w[0].pos.file_id, vis, w[0].pos, kind))
             })
-            .collect()
-    }
-
-    /// Reserves an id for every `type <Name>` before the main parse, so named
-    /// types resolve regardless of order (self/mutual reference included).
-    fn prescan_type_names(&mut self) {
-        for (name, file_id, vis) in self.prescan_named(Keyword::Type) {
-            self.module.intern_struct(&name, file_id, vis);
-        }
-    }
-
-    /// The enum twin of [`Self::prescan_type_names`]: reserves an id for every
-    /// `enum <Name>`, so forward references and import cycles resolve.
-    fn prescan_enum_names(&mut self) {
-        for (name, file_id, vis) in self.prescan_named(Keyword::Enum) {
-            self.module.intern_enum(&name, file_id, vis);
-        }
-    }
-
-    /// The sum twin of [`Self::prescan_type_names`]: reserves an id for every
-    /// `sum <Name>`, so forward references and import cycles resolve.
-    fn prescan_sum_names(&mut self) {
-        for (name, file_id, vis) in self.prescan_named(Keyword::Sum) {
-            self.module.intern_sum(&name, file_id, vis);
+            .collect();
+        for (name, file_id, vis, pos, kind) in reserved {
+            self.module.intern_type(&name, file_id, vis, pos, kind);
         }
     }
 
@@ -248,15 +229,11 @@ impl Parser {
         let pos = pos!();
         kw!(Alias);
         let name = ident!();
-        if self.module.resolve_alias(&name).is_some()
-            || self.module.struct_id(&name).is_some()
-            || self.module.enum_id(&name).is_some()
-            || self.module.sum_id(&name).is_some()
-        {
+        if self.module.type_id(&name).is_some() {
             return Err(ParserError::DuplicateType(name, pos));
         }
         let target = self.parse_type()?;
-        self.module.define_alias(name, target, pos.file_id);
+        self.module.define_alias(&name, target, pos.file_id, pos);
         self.alias_prescan_sites.insert(site);
         Ok(())
     }
@@ -355,15 +332,11 @@ impl Parser {
         if self.alias_prescan_sites.contains(&site) {
             self.parse_type()?;
         } else {
-            if self.module.resolve_alias(&name).is_some()
-                || self.module.struct_id(&name).is_some()
-                || self.module.enum_id(&name).is_some()
-                || self.module.sum_id(&name).is_some()
-            {
+            if self.module.type_id(&name).is_some() {
                 return Err(ParserError::DuplicateType(name, pos));
             }
             let target = self.parse_type()?;
-            self.module.define_alias(name, target, pos.file_id);
+            self.module.define_alias(&name, target, pos.file_id, pos);
         }
         term!();
         Ok(())

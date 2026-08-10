@@ -10,6 +10,7 @@ use inkwell::OptimizationLevel;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::raw::c_char;
+use std::rc::Rc;
 
 use crate::codegen::scope::ScopeStack;
 use crate::codegen::value_emitter::{ConstantEmitter, RuntimeEmitter};
@@ -25,12 +26,11 @@ pub struct CodeGenerator<'ctx> {
 
     pub(crate) functions: HashMap<String, FunctionValue<'ctx>>,
 
-    /// Parameter LangTypes per function name — needed for arg coercion at call sites.
-    pub(crate) function_lang_params: HashMap<String, Vec<LangType>>,
-
-    /// Return LangType per function name — needed at call sites to detect
-    /// struct-by-value (`sret`) returns.
-    pub(crate) function_return_types: HashMap<String, LangType>,
+    /// Every signature, field layout and variant payload is read from here —
+    /// codegen keeps no index of its own, or the two could disagree. `Rc::clone`
+    /// it rather than borrow it: a walk needs the table open across `&mut self`
+    /// recursion.
+    pub(crate) symbols: Rc<crate::symbol::module::ModuleSymbols>,
 
     /// While generating a struct-returning function, the hidden `sret`
     /// out-pointer that `return` stores through. `None` for scalar/void returns.
@@ -47,24 +47,12 @@ pub struct CodeGenerator<'ctx> {
     /// bounds check).
     pub(crate) opt_level: u8,
 
-    /// Named LLVM storage type per sum id: `{ i32 tag, [k x iN] }` sized and
-    /// aligned to the largest variant payload, payload at a uniform offset.
+    /// Named LLVM storage type per sum id: `{ tag, [k x iN] }` — the tag being
+    /// the smallest int fitting the variant count — sized and aligned to the
+    /// largest variant payload, payload at a uniform offset.
     /// Built opaque before struct bodies (so struct fields may hold sums by
     /// value), filled in after them.
     pub(crate) sum_types: HashMap<u32, inkwell::types::StructType<'ctx>>,
-
-    /// Per sum id, per variant (declaration order): the payload field types in
-    /// binding order — a codegen-local copy of the shared registry, mirroring
-    /// `struct_fields` (the walker is not threaded the `Program`).
-    pub(crate) sum_variant_fields: HashMap<u32, Vec<Vec<LangType>>>,
-
-    /// `(field name, field type)` in GEP-index order — a codegen-local copy of
-    /// the shared registry (the walker is not threaded the `Program`).
-    pub(crate) struct_fields: HashMap<u32, Vec<(String, LangType)>>,
-
-    /// Indexed by `TypeBase::FnPtr(u32)`; cloned from `program.symbols` during
-    /// `generate` since `walk_expression` doesn't carry the `Program`.
-    pub(crate) fnptr_sigs: Vec<crate::symbol::module::FnPtrSig>,
 
     /// Copied from `Program` so `format_error` resolves a codegen error's
     /// position to the file it came from.
@@ -195,15 +183,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             builder,
             target_machine,
             functions: HashMap::new(),
-            function_lang_params: HashMap::new(),
-            function_return_types: HashMap::new(),
+            symbols: Rc::new(crate::symbol::module::ModuleSymbols::new()),
             current_sret: None,
             struct_types: HashMap::new(),
-            struct_fields: HashMap::new(),
             opt_level: 0,
             sum_types: HashMap::new(),
-            sum_variant_fields: HashMap::new(),
-            fnptr_sigs: Vec::new(),
             source_files: Vec::new(),
             scope: ScopeStack::new(),
             current_function: None,
@@ -230,6 +214,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Seed the file registry so any error we hit below resolves to the
         // file it actually came from, not the entry source.
         self.source_files = program.source_files.clone();
+        self.symbols = Rc::clone(&program.symbols);
 
         // Generate global string literals first (they might be referenced by globals)
         for (i, s) in program.string_literals.iter().enumerate() {
@@ -247,9 +232,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         if let Err(e) = self.register_sum_bodies(program) {
             anyhow::bail!("{}: failed to register sum layouts", self.format_error(&e));
         }
-
-        // Seed the codegen-local FnPtr signature cache from the shared registry.
-        self.fnptr_sigs = program.symbols.all_fnptr_sigs().to_vec();
 
         // Does this program define its own allocator (STD_NO_LIBC)? A defined
         // `malloc`/`calloc`/`realloc`/`free` means every function must opt out

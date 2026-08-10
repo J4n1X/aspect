@@ -1,16 +1,21 @@
 //! Unified, cross-phase module symbol table.
 //!
 //! [`ModuleSymbols`] is the single authoritative table of a program's global
-//! symbols (functions, type-structs, enums, aliases). Built by the parser and
-//! riding on [`crate::parser::Program`], so the checker and codegen consume the
-//! *same* table. Struct *ids* are interned once at parse time and codegen's GEP
-//! field indices must agree with them, so the registry cannot be rebuilt per
-//! phase.
+//! symbols. Built by the parser and shared by handle off
+//! [`crate::parser::Program`], so the checker and codegen read the *same* table.
+//! Type *ids* are interned once at parse time and codegen's GEP field indices
+//! must agree with them, so the registry cannot be rebuilt per phase.
+//!
+//! Every named type — type-struct, enum, sum, alias — is one [`TypeDef`] in one
+//! id space, with only the kind-specific part in [`TypeKind`]. That is what
+//! makes "is this name taken?", the visibility gate and the prescan single
+//! pieces of code: a new kind adds a `TypeKind` variant, not a parallel
+//! registry.
 //!
 //! The parser's per-function *variable* scope is separate and transient — it
 //! lives in [`crate::symbol::table::SymbolTable`], not here.
 
-use crate::lexer::LangType;
+use crate::lexer::{LangType, Position};
 use crate::symbol::table::{FunctionSymbol, SymbolError};
 use std::collections::HashMap;
 
@@ -62,43 +67,6 @@ pub struct MethodSig {
     pub vis: Visibility,
 }
 
-/// A registered type-struct: its name, ordered fields, and methods.
-#[derive(Debug, Clone, PartialEq)]
-pub struct StructInfo {
-    pub id: u32,
-    pub name: String,
-    /// `Position::file_id` of the declaring file — the provenance the
-    /// import-visibility check resolves to a defining module.
-    pub file_id: u32,
-    /// `public type` makes the struct nameable from other modules. Fixed at
-    /// intern (prescan) time, since under import cycles a module's uses can
-    /// precede the definition in the inlined token stream.
-    pub vis: Visibility,
-    /// Fields in declaration/layout order. Empty until [`ModuleSymbols::set_fields`].
-    pub fields: Vec<FieldInfo>,
-    /// Field name -> index into `fields` (mirrors the LLVM struct element order).
-    pub field_index: HashMap<String, usize>,
-    pub methods: HashMap<String, MethodSig>,
-}
-
-/// Shaped in parallel to [`StructInfo`] (id, `file_id`, `vis`, `attrs`) so the
-/// visibility check treats both item kinds uniformly. An enum has no layout or
-/// methods — a variant's value is its index into `variants`, lowering to `i32`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct EnumInfo {
-    pub id: u32,
-    pub name: String,
-    /// `Position::file_id` of the declaring file — provenance for the
-    /// import-visibility check.
-    pub file_id: u32,
-    /// `public enum` makes the enum nameable from other modules. Fixed at
-    /// intern time, like [`StructInfo::vis`].
-    pub vis: Visibility,
-    /// Variant names in declaration order; the index *is* the variant's value.
-    /// Empty until [`ModuleSymbols::set_enum_variants`].
-    pub variants: Vec<String>,
-}
-
 /// One variant of a `sum` type: its name and payload fields in declaration
 /// (and binding) order. A payload-less variant has an empty `fields`.
 #[derive(Debug, Clone, PartialEq)]
@@ -109,40 +77,140 @@ pub struct SumVariant {
     pub fields: Vec<(String, LangType)>,
 }
 
-/// A registered `sum` type. Shaped in parallel to [`StructInfo`]/[`EnumInfo`]
-/// (id, `file_id`, `vis`) so the visibility check treats all three item kinds
-/// uniformly. The discriminant of a value is the variant's index into
-/// `variants`, lowered as `i32` at offset 0.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct StructBody {
+    pub fields: Vec<FieldInfo>,
+    /// Field name -> index into `fields` (mirrors the LLVM struct element order).
+    pub field_index: HashMap<String, usize>,
+    pub methods: HashMap<String, MethodSig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct EnumBody {
+    /// Variant names in declaration order; the index *is* the variant's value.
+    pub variants: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SumBody {
+    /// Variants in declaration order; the index *is* the discriminant value.
+    /// There is no per-variant visibility: exhaustive matching needs all
+    /// variants or none.
+    pub variants: Vec<SumVariant>,
+}
+
+/// The kind-specific half of a named type. The shared header lives on
+/// [`TypeDef`], so code that treats all named types alike never matches here.
 #[derive(Debug, Clone, PartialEq)]
-pub struct SumInfo {
+pub enum TypeKind {
+    Struct(StructBody),
+    Enum(EnumBody),
+    Sum(SumBody),
+    Alias(LangType),
+}
+
+impl TypeKind {
+    /// The single spelling authority, so the visibility gate and every
+    /// duplicate/private diagnostic agree on what to call a kind.
+    #[must_use]
+    pub fn noun(&self) -> &'static str {
+        match self {
+            TypeKind::Struct(_) => "type-struct",
+            TypeKind::Enum(_) => "enum",
+            TypeKind::Sum(_) => "sum",
+            TypeKind::Alias(_) => "type alias",
+        }
+    }
+
+    #[must_use]
+    pub fn keyword(&self) -> &'static str {
+        match self {
+            TypeKind::Struct(_) => "type",
+            TypeKind::Enum(_) => "enum",
+            TypeKind::Sum(_) => "sum",
+            TypeKind::Alias(_) => "alias",
+        }
+    }
+}
+
+/// One named type. `id` indexes the registry and is what
+/// `TypeBase::{Struct,Enum,Sum}` carries; sharing that id space with one name
+/// map is what makes interning a name as two kinds at once impossible.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeDef {
     pub id: u32,
     pub name: String,
-    /// `Position::file_id` of the declaring file — provenance for the
-    /// import-visibility check.
+    /// `Position::file_id` of the declaring file — the provenance the
+    /// import-visibility check resolves to a defining module.
     pub file_id: u32,
-    /// `public sum` makes the sum nameable from other modules. Fixed at
-    /// intern time, like [`StructInfo::vis`]. There is no per-variant
-    /// visibility: exhaustive matching needs all variants or none.
+    /// `public` makes the type nameable from other modules. Fixed at intern
+    /// (prescan) time, since under import cycles a module's uses can precede
+    /// the definition in the inlined token stream.
     pub vis: Visibility,
-    /// Variants in declaration order; the index *is* the discriminant value.
-    /// Empty until [`ModuleSymbols::set_sum_variants`].
-    pub variants: Vec<SumVariant>,
+    /// The declaring keyword's position, recorded at intern time so diagnostics
+    /// firing long after the body parsed — the containment-cycle check, codegen
+    /// layout failures — can still name the declaration site.
+    pub pos: Position,
+    /// `false` between the prescan reserving the name and the body being parsed;
+    /// a second body for an already-`defined` name is the duplicate-type error.
+    /// Deliberately not inferred from an empty body, so whether an empty
+    /// `type`/`enum`/`sum` is legal stays a language question.
+    pub defined: bool,
+    pub kind: TypeKind,
+}
+
+impl TypeDef {
+    /// # Panics
+    /// If this def is not a type-struct. Ids reach the `as_*` accessors either
+    /// from a `TypeBase` variant or a kind-filtered lookup, both of which
+    /// already establish the kind.
+    #[must_use]
+    pub fn as_struct(&self) -> &StructBody {
+        match &self.kind {
+            TypeKind::Struct(body) => body,
+            other => unreachable!("type '{}' is a {}, not a type-struct", self.name, other.noun()),
+        }
+    }
+
+    #[must_use]
+    pub fn as_enum(&self) -> &EnumBody {
+        match &self.kind {
+            TypeKind::Enum(body) => body,
+            other => unreachable!("type '{}' is a {}, not an enum", self.name, other.noun()),
+        }
+    }
+
+    #[must_use]
+    pub fn as_sum(&self) -> &SumBody {
+        match &self.kind {
+            TypeKind::Sum(body) => body,
+            other => unreachable!("type '{}' is a {}, not a sum", self.name, other.noun()),
+        }
+    }
+
+    #[must_use]
+    pub fn alias_target(&self) -> Option<LangType> {
+        match &self.kind {
+            TypeKind::Alias(ty) => Some(*ty),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn noun(&self) -> &'static str {
+        self.kind.noun()
+    }
 }
 
 /// A distinct function-pointer signature (`fn(params) -> return_type`).
 /// Two FnPtr ids are equal iff their `FnPtrSig`s compare equal.
+///
+/// Not a [`TypeDef`]: a fn-pointer type is structural and unnamed, so it has no
+/// name to collide, no module to belong to and no visibility to gate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnPtrSig {
     pub params: Vec<LangType>,
     pub return_type: LangType,
-}
-
-/// The eagerly-resolved target type plus the `file_id` of the declaring file
-/// (provenance for the import-visibility check).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct AliasInfo {
-    pub ty: LangType,
-    pub file_id: u32,
 }
 
 /// The program-wide table of resolved global symbols.
@@ -150,20 +218,11 @@ pub struct AliasInfo {
 pub struct ModuleSymbols {
     /// Functions by name (the de-duplicated signature store).
     functions: HashMap<String, FunctionSymbol>,
-    /// Type-structs indexed by id (index into the vec == the id).
-    structs_by_id: Vec<StructInfo>,
-    /// Struct name -> id.
-    structs_by_name: HashMap<String, u32>,
-    /// Enums indexed by id (index into the vec == the id).
-    enums_by_id: Vec<EnumInfo>,
-    /// Enum name -> id.
-    enums_by_name: HashMap<String, u32>,
-    /// Sums indexed by id (index into the vec == the id).
-    sums_by_id: Vec<SumInfo>,
-    /// Sum name -> id.
-    sums_by_name: HashMap<String, u32>,
-    /// Alias name -> the type it resolves to plus its declaring file.
-    aliases: HashMap<String, AliasInfo>,
+    /// Every named type, indexed by id (index into the vec == the id).
+    types: Vec<TypeDef>,
+    /// The one type namespace, so a collision between any two kinds is a single
+    /// lookup instead of a check per kind.
+    types_by_name: HashMap<String, u32>,
     /// Function-pointer signatures, interned by structural identity.
     /// Index into the vec == the FnPtr id stored in `TypeBase::FnPtr(u32)`.
     fnptr_sigs: Vec<FnPtrSig>,
@@ -212,188 +271,188 @@ impl ModuleSymbols {
         self.functions.iter()
     }
 
-    // ── Type-structs ────────────────────────────────────────────────────────────
+    // ── Named types ──────────────────────────────────────────────────────────
 
-    /// Called during the parser's prescan so struct names resolve regardless of
-    /// declaration order (self/mutual reference included). Returns the existing
-    /// id if already interned — the first declaration's `file_id`/`vis` win, and
-    /// a second `type` body is a duplicate-type error downstream.
-    pub fn intern_struct(&mut self, name: &str, file_id: u32, vis: Visibility) -> u32 {
-        if let Some(&id) = self.structs_by_name.get(name) {
+    /// Reserve an id during the parser's prescan, so names resolve regardless of
+    /// declaration order (self/mutual reference included). `kind` normally
+    /// arrives with an empty body, filled in later by
+    /// `set_fields`/`set_*_variants`.
+    ///
+    /// An already-interned name keeps its first id, kind, `vis` and `pos`, so a
+    /// redeclaration under a different kind is caught at the body parse — where
+    /// the diagnostic belongs.
+    pub fn intern_type(
+        &mut self,
+        name: &str,
+        file_id: u32,
+        vis: Visibility,
+        pos: Position,
+        kind: TypeKind,
+    ) -> u32 {
+        if let Some(&id) = self.types_by_name.get(name) {
             return id;
         }
-        let id = u32::try_from(self.structs_by_id.len())
-            .expect("number of type-structs exceeds u32::MAX");
-        self.structs_by_id.push(StructInfo {
+        let id = u32::try_from(self.types.len()).expect("number of named types exceeds u32::MAX");
+        self.types.push(TypeDef {
             id,
             name: name.to_string(),
             file_id,
             vis,
-            fields: Vec::new(),
-            field_index: HashMap::new(),
-            methods: HashMap::new(),
+            pos,
+            defined: false,
+            kind,
         });
-        self.structs_by_name.insert(name.to_string(), id);
+        self.types_by_name.insert(name.to_string(), id);
         id
+    }
+
+    /// The id of any named type, whatever its kind — the single "is this name
+    /// taken?" query.
+    #[must_use]
+    pub fn type_id(&self, name: &str) -> Option<u32> {
+        self.types_by_name.get(name).copied()
+    }
+
+    #[must_use]
+    pub fn lookup_type(&self, name: &str) -> Option<&TypeDef> {
+        self.types_by_name
+            .get(name)
+            .map(|&id| &self.types[id as usize])
+    }
+
+    /// # Panics
+    /// If `id` was never interned. Ids reach callers only from a `LangType` or a
+    /// lookup, both of which come from this table.
+    #[must_use]
+    pub fn type_def(&self, id: u32) -> &TypeDef {
+        &self.types[id as usize]
+    }
+
+    pub fn types(&self) -> impl Iterator<Item = &TypeDef> {
+        self.types.iter()
+    }
+
+    fn id_of_kind(&self, name: &str, want: fn(&TypeKind) -> bool) -> Option<u32> {
+        let def = self.lookup_type(name)?;
+        want(&def.kind).then_some(def.id)
     }
 
     #[must_use]
     pub fn struct_id(&self, name: &str) -> Option<u32> {
-        self.structs_by_name.get(name).copied()
+        self.id_of_kind(name, |k| matches!(k, TypeKind::Struct(_)))
     }
 
     #[must_use]
-    pub fn struct_info(&self, id: u32) -> &StructInfo {
-        &self.structs_by_id[id as usize]
+    pub fn enum_id(&self, name: &str) -> Option<u32> {
+        self.id_of_kind(name, |k| matches!(k, TypeKind::Enum(_)))
     }
 
-    /// All registered structs, in id order.
-    pub fn structs(&self) -> impl Iterator<Item = &StructInfo> {
-        self.structs_by_id.iter()
+    #[must_use]
+    pub fn sum_id(&self, name: &str) -> Option<u32> {
+        self.id_of_kind(name, |k| matches!(k, TypeKind::Sum(_)))
     }
 
-    /// Replace a struct's fields and rebuild its `field_index`.
+    /// In id order — codegen's registration passes depend on it.
+    pub fn structs(&self) -> impl Iterator<Item = &TypeDef> {
+        self.types
+            .iter()
+            .filter(|d| matches!(d.kind, TypeKind::Struct(_)))
+    }
+
+    pub fn enums(&self) -> impl Iterator<Item = &TypeDef> {
+        self.types
+            .iter()
+            .filter(|d| matches!(d.kind, TypeKind::Enum(_)))
+    }
+
+    pub fn sums(&self) -> impl Iterator<Item = &TypeDef> {
+        self.types
+            .iter()
+            .filter(|d| matches!(d.kind, TypeKind::Sum(_)))
+    }
+
+    /// Also marks the declaration defined.
     pub fn set_fields(&mut self, id: u32, fields: Vec<FieldInfo>) {
         let field_index = fields
             .iter()
             .enumerate()
             .map(|(i, f)| (f.name.clone(), i))
             .collect();
-        let info = &mut self.structs_by_id[id as usize];
-        info.fields = fields;
-        info.field_index = field_index;
+        let def = &mut self.types[id as usize];
+        def.defined = true;
+        match &mut def.kind {
+            TypeKind::Struct(body) => {
+                body.fields = fields;
+                body.field_index = field_index;
+            }
+            other => unreachable!("set_fields on a {}", other.noun()),
+        }
     }
 
-    /// Look up a field by name, returning its layout index and info.
-    #[must_use]
-    pub fn field(&self, id: u32, name: &str) -> Option<(usize, &FieldInfo)> {
-        let info = &self.structs_by_id[id as usize];
-        let idx = *info.field_index.get(name)?;
-        Some((idx, &info.fields[idx]))
+    pub fn set_enum_variants(&mut self, id: u32, variants: Vec<String>) {
+        let def = &mut self.types[id as usize];
+        def.defined = true;
+        match &mut def.kind {
+            TypeKind::Enum(body) => body.variants = variants,
+            other => unreachable!("set_enum_variants on a {}", other.noun()),
+        }
+    }
+
+    pub fn set_sum_variants(&mut self, id: u32, variants: Vec<SumVariant>) {
+        let def = &mut self.types[id as usize];
+        def.defined = true;
+        match &mut def.kind {
+            TypeKind::Sum(body) => body.variants = variants,
+            other => unreachable!("set_sum_variants on a {}", other.noun()),
+        }
     }
 
     pub fn add_method(&mut self, id: u32, name: String, sig: MethodSig) {
-        self.structs_by_id[id as usize].methods.insert(name, sig);
-    }
-
-    // ── Enums ─────────────────────────────────────────────────────────────────
-
-    /// The enum twin of [`Self::intern_struct`]: prescan-called so enum names
-    /// resolve regardless of order; returns the existing id if already interned.
-    pub fn intern_enum(&mut self, name: &str, file_id: u32, vis: Visibility) -> u32 {
-        if let Some(&id) = self.enums_by_name.get(name) {
-            return id;
+        match &mut self.types[id as usize].kind {
+            TypeKind::Struct(body) => {
+                body.methods.insert(name, sig);
+            }
+            other => unreachable!("add_method on a {}", other.noun()),
         }
-        let id = u32::try_from(self.enums_by_id.len()).expect("number of enums exceeds u32::MAX");
-        self.enums_by_id.push(EnumInfo {
-            id,
-            name: name.to_string(),
-            file_id,
-            vis,
-            variants: Vec::new(),
-        });
-        self.enums_by_name.insert(name.to_string(), id);
-        id
     }
 
     #[must_use]
-    pub fn enum_id(&self, name: &str) -> Option<u32> {
-        self.enums_by_name.get(name).copied()
+    pub fn field(&self, id: u32, name: &str) -> Option<(usize, &FieldInfo)> {
+        let body = self.type_def(id).as_struct();
+        let idx = *body.field_index.get(name)?;
+        Some((idx, &body.fields[idx]))
     }
 
-    #[must_use]
-    pub fn enum_info(&self, id: u32) -> &EnumInfo {
-        &self.enums_by_id[id as usize]
-    }
-
-    /// All registered enums, in id order.
-    pub fn enums(&self) -> impl Iterator<Item = &EnumInfo> {
-        self.enums_by_id.iter()
-    }
-
-    /// Replace an enum's variant list (finalising its `enum` body).
-    pub fn set_enum_variants(&mut self, id: u32, variants: Vec<String>) {
-        self.enums_by_id[id as usize].variants = variants;
-    }
-
-    /// The value (index) of a variant by name, or `None` if the enum has no
-    /// such variant.
     #[must_use]
     pub fn enum_variant_index(&self, id: u32, variant: &str) -> Option<usize> {
-        self.enums_by_id[id as usize]
+        self.type_def(id)
+            .as_enum()
             .variants
             .iter()
             .position(|v| v == variant)
     }
 
-    // ── Sums ──────────────────────────────────────────────────────────────────
-
-    /// The sum twin of [`Self::intern_struct`]: prescan-called so sum names
-    /// resolve regardless of order; returns the existing id if already interned.
-    pub fn intern_sum(&mut self, name: &str, file_id: u32, vis: Visibility) -> u32 {
-        if let Some(&id) = self.sums_by_name.get(name) {
-            return id;
-        }
-        let id = u32::try_from(self.sums_by_id.len()).expect("number of sums exceeds u32::MAX");
-        self.sums_by_id.push(SumInfo {
-            id,
-            name: name.to_string(),
-            file_id,
-            vis,
-            variants: Vec::new(),
-        });
-        self.sums_by_name.insert(name.to_string(), id);
-        id
-    }
-
-    #[must_use]
-    pub fn sum_id(&self, name: &str) -> Option<u32> {
-        self.sums_by_name.get(name).copied()
-    }
-
-    #[must_use]
-    pub fn sum_info(&self, id: u32) -> &SumInfo {
-        &self.sums_by_id[id as usize]
-    }
-
-    /// All registered sums, in id order.
-    pub fn sums(&self) -> impl Iterator<Item = &SumInfo> {
-        self.sums_by_id.iter()
-    }
-
-    /// Replace a sum's variant list (finalising its `sum` body).
-    pub fn set_sum_variants(&mut self, id: u32, variants: Vec<SumVariant>) {
-        self.sums_by_id[id as usize].variants = variants;
-    }
-
-    /// The discriminant (index) of a variant by name, or `None` if the sum
-    /// has no such variant.
     #[must_use]
     pub fn sum_variant_index(&self, id: u32, variant: &str) -> Option<usize> {
-        self.sums_by_id[id as usize]
+        self.type_def(id)
+            .as_sum()
             .variants
             .iter()
             .position(|v| v.name == variant)
     }
 
-    // ── Aliases ───────────────────────────────────────────────────────────────
-
-    /// Define a type alias (`alias New Target`). `file_id` records the
-    /// declaring file (from the `alias` keyword token) for the
-    /// import-visibility check.
-    pub fn define_alias(&mut self, name: String, ty: LangType, file_id: u32) {
-        self.aliases.insert(name, AliasInfo { ty, file_id });
+    /// `alias New Target`. Interned like any other named type — same id space,
+    /// same visibility gate — and `defined` immediately, its target having
+    /// resolved eagerly.
+    pub fn define_alias(&mut self, name: &str, ty: LangType, file_id: u32, pos: Position) -> u32 {
+        let id = self.intern_type(name, file_id, Visibility::Private, pos, TypeKind::Alias(ty));
+        self.types[id as usize].defined = true;
+        id
     }
 
     #[must_use]
     pub fn resolve_alias(&self, name: &str) -> Option<LangType> {
-        self.aliases.get(name).map(|info| info.ty)
-    }
-
-    /// Full alias entry — the resolved type plus its declaring file.
-    #[must_use]
-    pub fn alias_info(&self, name: &str) -> Option<AliasInfo> {
-        self.aliases.get(name).copied()
+        self.lookup_type(name)?.alias_target()
     }
 
     // ── Function-pointer signatures ──────────────────────────────────────────
@@ -415,14 +474,13 @@ impl ModuleSymbols {
         id
     }
 
-    /// Resolve a FnPtr id back to its signature.
     #[must_use]
     pub fn fnptr_sig(&self, id: u32) -> &FnPtrSig {
         &self.fnptr_sigs[id as usize]
     }
 
-    /// All registered FnPtr signatures, indexed by id. Used by codegen to seed
-    /// its local cache (the walker is not threaded the `Program`).
+    /// All registered FnPtr signatures, indexed by id. Unlike
+    /// [`Self::fnptr_sig`], probing an out-of-range id here does not panic.
     #[must_use]
     pub fn all_fnptr_sigs(&self) -> &[FnPtrSig] {
         &self.fnptr_sigs

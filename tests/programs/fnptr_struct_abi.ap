@@ -1,0 +1,69 @@
+# expected: 87
+#-
+  Indirect calls must apply the same struct ABI as direct ones. They used to
+  build the function type straight from the signature, so a struct-by-value
+  argument was passed first-class while the callee declared `byval(%T)` — and a
+  struct return was read as a first-class value while the callee wrote through
+  its `sret` pointer. That miscompiled silently and differently per level: -O0
+  died on garbage, -O2 returned nonsense. Both the declaration and the call site
+  now derive their shape from `abi_fn_type`, and the indirect site carries the
+  `sret`/`byval` attributes LLVM cannot get from an absent declaration.
+
+  Sums are aggregates on the same path, so one payload-carrying sum goes through
+  a fn-pointer too.
+-#
+
+type Point {
+    public i32 x
+    public i32 y
+}
+
+sum Shape {
+    Dot
+    Mark(i32 v)
+}
+
+fn sum_point(Point p) -> i32 {
+    return p.x + p.y
+}
+
+fn make_point(i32 x, i32 y) -> Point {
+    return Point { x = x, y = y }
+}
+
+fn shift(Point p, i32 by) -> Point {
+    return Point { x = p.x + by, y = p.y + by }
+}
+
+fn mark_value(Shape s) -> i32 {
+    if s is Shape.Mark(v) {
+        return v
+    }
+    return 0
+}
+
+fn main(u32 argc, u8 **argv) -> i32 {
+    i32 total = 0
+
+    # struct passed by value through a fn-pointer
+    fn(Point) -> i32 take = sum_point
+    Point p = Point { x = 3, y = 4 }
+    total = total + take(p)                     # 7
+
+    # struct returned by value through a fn-pointer (sret)
+    fn(i32, i32) -> Point build = make_point
+    Point q = build(10, 20)
+    total = total + q.x + q.y                   # 30 -> 37
+
+    # both directions at once
+    fn(Point, i32) -> Point move = shift
+    Point r = move(q, 5)
+    total = total + r.x + r.y                   # 40 -> 77
+
+    # a sum crosses the same path
+    fn(Shape) -> i32 probe = mark_value
+    total = total + probe(Shape.Mark(10))       # 10 -> 87
+    total = total + probe(Shape.Dot)            # 0
+
+    return total
+}

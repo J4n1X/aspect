@@ -20,13 +20,15 @@ pub(crate) enum Node {
 fn edges(module: &ModuleSymbols, node: Node) -> Vec<Node> {
     let field_types: Vec<LangType> = match node {
         Node::Struct(id) => module
-            .struct_info(id)
+            .type_def(id)
+            .as_struct()
             .fields
             .iter()
             .map(|f| f.ty)
             .collect(),
         Node::Sum(id) => module
-            .sum_info(id)
+            .type_def(id)
+            .as_sum()
             .variants
             .iter()
             .flat_map(|v| v.fields.iter().map(|(_, ty)| *ty))
@@ -82,7 +84,14 @@ pub(crate) fn find_byvalue_cycles(module: &ModuleSymbols) -> Vec<Node> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::symbol::module::{FieldInfo, SumVariant, Visibility};
+    use crate::lexer::Position;
+    use crate::symbol::module::{
+        FieldInfo, StructBody, SumBody, SumVariant, TypeKind, Visibility,
+    };
+
+    fn intern(module: &mut ModuleSymbols, name: &str, kind: TypeKind) -> u32 {
+        module.intern_type(name, 0, Visibility::Private, Position::new(0, 0), kind)
+    }
 
     fn field(name: &str, ty: LangType) -> FieldInfo {
         FieldInfo {
@@ -95,7 +104,7 @@ mod tests {
     #[test]
     fn struct_containing_itself_is_cyclic() {
         let mut module = ModuleSymbols::new();
-        let s = module.intern_struct("S", 0, Visibility::Private);
+        let s = intern(&mut module, "S", TypeKind::Struct(StructBody::default()));
         module.set_fields(s, vec![field("s", LangType::struct_type(s))]);
 
         let cyclic = find_byvalue_cycles(&module);
@@ -107,8 +116,8 @@ mod tests {
     #[test]
     fn mutual_struct_sum_cycle_is_detected() {
         let mut module = ModuleSymbols::new();
-        let a = module.intern_struct("A", 0, Visibility::Private);
-        let b = module.intern_sum("B", 0, Visibility::Private);
+        let a = intern(&mut module, "A", TypeKind::Struct(StructBody::default()));
+        let b = intern(&mut module, "B", TypeKind::Sum(SumBody::default()));
         module.set_fields(a, vec![field("b", LangType::sum_type(b))]);
         module.set_sum_variants(
             b,
@@ -125,7 +134,7 @@ mod tests {
     #[test]
     fn pointer_field_breaks_the_cycle() {
         let mut module = ModuleSymbols::new();
-        let s = module.intern_struct("S", 0, Visibility::Private);
+        let s = intern(&mut module, "S", TypeKind::Struct(StructBody::default()));
         let self_ptr = LangType {
             pointer_depth: 1,
             ..LangType::struct_type(s)

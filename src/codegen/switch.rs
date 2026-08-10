@@ -88,10 +88,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let s_ty = scrutinee.expr_type;
 
         let mut sum_slot = None;
-        let disc = if s_ty.pointer_depth <= 1
-            && !s_ty.is_array()
-            && let TypeBase::Sum(sum_id) = s_ty.base
-        {
+        let disc = if let Some(sum_id) = crate::variants::sum_scrutinee(&s_ty) {
             let storage = *self.sum_types.get(&sum_id).ok_or_else(|| {
                 CodegenError::TypeError(format!("unregistered sum id {sum_id}"), pos)
             })?;

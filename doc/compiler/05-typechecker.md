@@ -19,7 +19,7 @@ final type directly instead of re-deriving it. See
 | `checker/aggregates.rs` | Struct-literal and sum-construction synthesis |
 | `checker/calls.rs` | Direct and indirect call checking |
 | `checker/statements.rs` | Per-statement checking, conditions, termination analysis |
-| `checker/switch.rs` | `switch` checking: scrutinee classes, patterns, exhaustiveness |
+| `checker/switch.rs` | `switch` checking: patterns, duplicates, exhaustiveness (taxonomy from `variants.rs`) |
 | `checker/asm.rs` | `asm fn` / `naked fn` register checks |
 | `types.rs` | Pure helper functions for type coercibility and literal compatibility |
 | `errors.rs` | `TypeCheckError` enum |
@@ -207,8 +207,10 @@ All functions are pure (no side effects):
 
 ### Switch checking (`check_switch`)
 
-Scrutinee classes: plain integers, `bool`, enums, sums — floats are rejected
-with a use-if/elif hint, pointers and other types outright. Constant patterns
+The scrutinee is classified by `VariantSpace::of` (`src/variants.rs`, shared
+with the parser and codegen): `Open` for plain integers, `Closed` for `bool`,
+enums and sums, `Unmatchable` for everything else — floats are rejected with a
+use-if/elif hint, pointers and other types outright. Constant patterns
 are `check_expression`-ed against the scrutinee type (so literal fitting and
 enum nominality come free) and must be literals or enum values
 (`NonConstantPattern` otherwise); duplicates are compared **after** evaluation
@@ -216,8 +218,9 @@ enum nominality come free) and must be literals or enum values
 defined in a fresh scope. Exhaustiveness is one rule — "a switch must cover
 its scrutinee; `default` covers the rest": integers require `default`
 (`SwitchMissingDefault`); bool needs both literals; enums/sums need every
-variant listed (`SwitchNonExhaustive` names the missing ones) — and a
-`default` on a fully-listed enum/sum switch draws a dead-arm **warning**
+variant listed (`SwitchNonExhaustive` names the missing ones, spelled by
+`ClosedSpace::missing_label`) — and a `default` on a fully-listed enum/sum
+switch draws a dead-arm **warning**
 (`TypeWarning`, non-fatal). `stmt_always_returns` counts a switch as
 returning iff it is coverage-complete (the parser-computed `complete` flag,
 or a `default`) and every body always returns — this is what lets a switch

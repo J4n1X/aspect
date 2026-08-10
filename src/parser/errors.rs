@@ -3,6 +3,17 @@ use crate::symbol::table::SymbolError;
 use aspect_macros::ErrorPosition;
 use thiserror::Error;
 
+/// Payload of [`ParserError::PrivateNamedType`]. `noun`/`keyword` come from
+/// `TypeKind`, so the wording cannot drift from the kind it describes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivateTypeDetail {
+    pub noun: &'static str,
+    pub keyword: &'static str,
+    pub name: String,
+    pub defining: String,
+    pub referring: String,
+}
+
 #[derive(Error, Debug, ErrorPosition)]
 pub enum ParserError {
     #[error("Unexpected token '{0}' at {1}")]
@@ -57,33 +68,15 @@ pub enum ParserError {
         pos: Position,
     },
 
-    /// The defining module is imported, but the type-struct itself was not
-    /// exported (`public type`).
-    #[error("type-struct '{name}' is private to {defining} and cannot be used from {referring} — declare it `public type` to export it at {pos}")]
-    PrivateType {
-        name: String,
-        defining: String,
-        referring: String,
-        pos: Position,
-    },
-
-    /// The defining module is imported, but the enum itself was not exported
-    /// (`public enum`).
-    #[error("enum '{name}' is private to {defining} and cannot be used from {referring} — declare it `public enum` to export it at {pos}")]
-    PrivateEnum {
-        name: String,
-        defining: String,
-        referring: String,
-        pos: Position,
-    },
-
-    /// The defining module is imported, but the sum itself was not exported
-    /// (`public sum`).
-    #[error("sum '{name}' is private to {defining} and cannot be used from {referring} — declare it `public sum` to export it at {pos}")]
-    PrivateSum {
-        name: String,
-        defining: String,
-        referring: String,
+    /// The defining module is imported, but the named type itself was not
+    /// exported (`public type`/`enum`/`sum`). Boxed to keep `ParserError` — the
+    /// `Err` of every parse function — small.
+    #[error(
+        "{} '{}' is private to {} and cannot be used from {} — declare it `public {}` to export it at {pos}",
+        detail.noun, detail.name, detail.defining, detail.referring, detail.keyword
+    )]
+    PrivateNamedType {
+        detail: Box<PrivateTypeDetail>,
         pos: Position,
     },
 
@@ -179,46 +172,21 @@ impl ParserError {
     }
 
     #[must_use]
-    pub(crate) fn private_type(
+    pub(crate) fn private_named_type(
+        kind: &crate::symbol::module::TypeKind,
         name: &str,
         defining_module: &str,
         referring_module: &str,
         pos: Position,
     ) -> Self {
-        ParserError::PrivateType {
-            name: name.to_string(),
-            defining: Self::describe_module(defining_module),
-            referring: Self::describe_module(referring_module),
-            pos,
-        }
-    }
-
-    #[must_use]
-    pub(crate) fn private_enum(
-        name: &str,
-        defining_module: &str,
-        referring_module: &str,
-        pos: Position,
-    ) -> Self {
-        ParserError::PrivateEnum {
-            name: name.to_string(),
-            defining: Self::describe_module(defining_module),
-            referring: Self::describe_module(referring_module),
-            pos,
-        }
-    }
-
-    #[must_use]
-    pub(crate) fn private_sum(
-        name: &str,
-        defining_module: &str,
-        referring_module: &str,
-        pos: Position,
-    ) -> Self {
-        ParserError::PrivateSum {
-            name: name.to_string(),
-            defining: Self::describe_module(defining_module),
-            referring: Self::describe_module(referring_module),
+        ParserError::PrivateNamedType {
+            detail: Box::new(PrivateTypeDetail {
+                noun: kind.noun(),
+                keyword: kind.keyword(),
+                name: name.to_string(),
+                defining: Self::describe_module(defining_module),
+                referring: Self::describe_module(referring_module),
+            }),
             pos,
         }
     }

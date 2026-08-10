@@ -1,12 +1,9 @@
 use crate::lexer::{Keyword, LangType, TokenKind, TypeBase};
 use crate::parser::expressions::Parser;
-use crate::parser::{ExprKind, Expression, ParserError, Statement, StatementKind};
+use crate::parser::patterns::SWITCH_ARM;
+use crate::parser::{Expression, ParserError, Statement, StatementKind};
+use crate::variants::VariantSpace;
 use aspect_macros::parse_rule;
-
-fn covers_all<T: Eq + std::hash::Hash>(seen: impl Iterator<Item = T>, total: usize) -> bool {
-    use std::collections::HashSet;
-    seen.collect::<HashSet<T>>().len() == total
-}
 
 impl Parser {
     /// `switch scrutinee { case … { } … default { } }`. The scrutinee's
@@ -136,18 +133,18 @@ impl Parser {
     ) -> Result<crate::parser::SwitchPattern, ParserError> {
         use crate::parser::SwitchPattern;
 
-        let s_ty = scrutinee.expr_type;
-        if s_ty.pointer_depth <= 1
-            && !s_ty.is_array()
-            && let TypeBase::Sum(sum_id) = s_ty.base
-        {
-            let sum_name = self.module.sum_info(sum_id).name.clone();
-            return self.parse_sum_variant_pattern(sum_id, &sum_name);
+        if let Some(sum_id) = crate::variants::sum_scrutinee(&scrutinee.expr_type) {
+            let pattern = self.parse_variant_pattern(sum_id, &SWITCH_ARM)?;
+            return Ok(SwitchPattern::SumVariant {
+                variant: pattern.variant,
+                binders: pattern.binders,
+            });
         }
 
         // A bare enum variant name gets a qualify hint rather than the
         // undefined-variable error `parse_expression` would produce; the
         // qualified form falls through and builds the `EnumValue`.
+        let s_ty = scrutinee.expr_type;
         if s_ty.pointer_depth == 0
             && let TypeBase::Enum(enum_id) = s_ty.base
             && let Some(pattern) = self.parse_enum_variant_pattern(enum_id)?
@@ -156,95 +153,6 @@ impl Parser {
         }
 
         Ok(SwitchPattern::Const(self.parse_expression()?))
-    }
-
-    /// The sum-scrutinee branch of `parse_switch_pattern`: a mandatory
-    /// `Sum.Variant` qualified pattern, then an optional positional binder
-    /// list. Always resolves the whole pattern — unlike the enum branch,
-    /// there's no fall-through case.
-    fn parse_sum_variant_pattern(
-        &mut self,
-        sum_id: u32,
-        sum_name: &str,
-    ) -> Result<crate::parser::SwitchPattern, ParserError> {
-        use crate::parser::SwitchPattern;
-
-        let pos = self.peek().pos;
-        let head = self.parse_ident("variant pattern")?;
-        if head == "_" {
-            return Err(ParserError::UnexpectedToken(
-                format!(
-                    "sum '{sum_name}' has no variant '_' — use `default` to cover the remaining variants"
-                ),
-                pos,
-            ));
-        }
-        if head != sum_name {
-            // A bare variant name gets the fix spelled out; anything else is
-            // an unknown variant of this sum.
-            if self.module.sum_variant_index(sum_id, &head).is_some() {
-                return Err(ParserError::UnexpectedToken(
-                    format!("variant patterns are qualified — write `{sum_name}.{head}`"),
-                    pos,
-                ));
-            }
-            return Err(ParserError::UnknownSumVariant {
-                sum_name: sum_name.to_string(),
-                variant: head,
-                pos,
-            });
-        }
-        self.expect(&TokenKind::Dot, ".")?;
-        let variant_name = self.parse_ident("variant name")?;
-        let Some(idx) = self.module.sum_variant_index(sum_id, &variant_name) else {
-            return Err(ParserError::UnknownSumVariant {
-                sum_name: sum_name.to_string(),
-                variant: variant_name,
-                pos,
-            });
-        };
-        let field_types: Vec<LangType> = self.module.sum_info(sum_id).variants[idx]
-            .fields
-            .iter()
-            .map(|(_, ty)| *ty)
-            .collect();
-
-        let binders: Vec<Option<(String, LangType)>> = if self.match_token(&[TokenKind::OpenParen])
-        {
-            if self.check(&TokenKind::CloseParen) {
-                return Err(ParserError::UnexpectedToken(
-                    format!(
-                        "empty pattern parens on '{variant_name}' — a bare `{variant_name}` ignores the payload"
-                    ),
-                    self.peek().pos,
-                ));
-            }
-            let names = self.parse_comma_separated(&TokenKind::CloseParen, |p| {
-                p.parse_ident("binding name or `_`")
-            })?;
-            if names.len() != field_types.len() {
-                return Err(ParserError::UnexpectedToken(
-                    format!(
-                        "pattern '{variant_name}' binds {} of {} payload fields — bind every field positionally (use `_` to discard)",
-                        names.len(),
-                        field_types.len()
-                    ),
-                    pos,
-                ));
-            }
-            names
-                .into_iter()
-                .zip(field_types)
-                .map(|(n, ty)| if n == "_" { None } else { Some((n, ty)) })
-                .collect()
-        } else {
-            // Bare variant: match, ignore any payload.
-            vec![None; field_types.len()]
-        };
-        Ok(SwitchPattern::SumVariant {
-            variant: u32::try_from(idx).expect("variant index fits u32"),
-            binders,
-        })
     }
 
     /// The enum-scrutinee branch of `parse_switch_pattern`: patterns are
@@ -268,7 +176,7 @@ impl Parser {
         {
             return Ok(None);
         }
-        let enum_name = self.module.enum_info(enum_id).name.clone();
+        let enum_name = self.module.type_def(enum_id).name.clone();
         if self.module.enum_variant_index(enum_id, &name).is_some() {
             return Err(ParserError::UnexpectedToken(
                 format!("variant patterns are qualified — write `{enum_name}.{name}`"),
@@ -282,54 +190,16 @@ impl Parser {
         })
     }
 
-    /// Dedup-aware coverage: do the arms alone cover the scrutinee?
+    /// Do the arms alone cover the scrutinee? Only a closed space can be
+    /// covered without a `default`.
     fn switch_coverage_complete(
         &self,
         scrutinee: &Expression,
         arms: &[crate::parser::SwitchArm],
     ) -> bool {
-        use crate::parser::{LiteralValue, SwitchPattern};
-
-        let s_ty = scrutinee.expr_type;
-        // Single-level pointers to sums auto-deref; everything else
-        // pointer-shaped can't be covered.
-        if s_ty.is_array()
-            || s_ty.pointer_depth > 1
-            || (s_ty.pointer_depth == 1 && !matches!(s_ty.base, TypeBase::Sum(_)))
-        {
-            return false;
-        }
-        let patterns = arms.iter().flat_map(|a| a.patterns.iter());
-        match s_ty.base {
-            TypeBase::Sum(id) => covers_all(
-                patterns.filter_map(|p| match p {
-                    SwitchPattern::SumVariant { variant, .. } => Some(*variant),
-                    SwitchPattern::Const(_) => None,
-                }),
-                self.module.sum_info(id).variants.len(),
-            ),
-            TypeBase::Enum(id) => covers_all(
-                patterns.filter_map(|p| match p {
-                    SwitchPattern::Const(Expression {
-                        kind: ExprKind::EnumValue { value, .. },
-                        ..
-                    }) => Some(*value),
-                    _ => None,
-                }),
-                self.module.enum_info(id).variants.len(),
-            ),
-            TypeBase::Bool => covers_all(
-                patterns.filter_map(|p| match p {
-                    SwitchPattern::Const(Expression {
-                        kind: ExprKind::Literal(LiteralValue::Bool(b)),
-                        ..
-                    }) => Some(*b),
-                    _ => None,
-                }),
-                2,
-            ),
-            _ => false,
-        }
+        VariantSpace::of(&scrutinee.expr_type, &self.module)
+            .closed()
+            .is_some_and(|space| space.covered_by(arms.iter().flat_map(|a| a.patterns.iter())))
     }
 
     pub(crate) fn case_outside_switch(&mut self) -> Result<Statement, ParserError> {

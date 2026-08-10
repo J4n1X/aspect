@@ -19,6 +19,8 @@
 //! at field 1's address — relative offsets agree because the array's
 //! alignment is ≥ every payload field's.
 
+use std::rc::Rc;
+
 use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicValueEnum, IntValue, PointerValue};
 
@@ -26,23 +28,15 @@ use crate::codegen::generator::CodeGenerator;
 use crate::codegen::CodegenError;
 use crate::lexer::{LangType, Position, TypeBase};
 use crate::parser::{Expression, Program};
-use crate::symbol::module::SumInfo;
+use crate::symbol::module::TypeDef;
 
 impl<'ctx> CodeGenerator<'ctx> {
     /// Create the named opaque type for every sum, before struct bodies are
-    /// set — a struct field of sum type resolves against this cache. Also
-    /// seeds the codegen-local variant-field cache (the expression walker is
-    /// not threaded the `Program`, mirroring `struct_fields`).
+    /// set — a struct field of sum type resolves against this cache.
     pub(crate) fn register_sums_opaque(&mut self, program: &Program) {
         for info in program.symbols.sums() {
             let llvm = self.context.opaque_struct_type(&info.name);
             self.sum_types.insert(info.id, llvm);
-            let variants = info
-                .variants
-                .iter()
-                .map(|v| v.fields.iter().map(|(_, ty)| *ty).collect())
-                .collect();
-            self.sum_variant_fields.insert(info.id, variants);
         }
     }
 
@@ -56,7 +50,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         sum_id: u32,
         pos: Position,
     ) -> Result<inkwell::types::IntType<'ctx>, CodegenError> {
-        let count = self.sum_variant_fields[&sum_id].len();
+        let count = self.symbols.type_def(sum_id).as_sum().variants.len();
         match count {
             0..=0x100 => Ok(self.context.i8_type()),
             0x101..=0x1_0000 => Ok(self.context.i16_type()),
@@ -78,7 +72,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         sum_id: u32,
         variant: usize,
     ) -> Result<Option<inkwell::types::StructType<'ctx>>, crate::codegen::TypeLoweringError> {
-        let fields = &self.sum_variant_fields[&sum_id][variant];
+        let fields = &self.symbols.type_def(sum_id).as_sum().variants[variant].fields;
         if fields.is_empty() {
             return Ok(None);
         }
@@ -88,11 +82,11 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     fn sum_field_llvm_types(
         &self,
-        fields: &[LangType],
+        fields: &[(String, LangType)],
     ) -> Result<Vec<BasicTypeEnum<'ctx>>, crate::codegen::TypeLoweringError> {
         fields
             .iter()
-            .map(|ty| {
+            .map(|(_, ty)| {
                 if ty.is_array() {
                     self.lang_type_to_llvm_array(ty).map(Into::into)
                 } else {
@@ -107,7 +101,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// fixpoint; by-value cycles are rejected at parse time, so each round
     /// resolves at least one sum.
     pub(crate) fn register_sum_bodies(&mut self, program: &Program) -> Result<(), CodegenError> {
-        let mut pending: Vec<&SumInfo> = program.symbols.sums().collect();
+        let mut pending: Vec<&TypeDef> = program.symbols.sums().collect();
         while !pending.is_empty() {
             let before = pending.len();
             let mut still_waiting = Vec::new();
@@ -125,7 +119,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         "cannot lay out sum `{}` — by-value containment cycle survived parsing",
                         pending[0].name
                     ),
-                    Position::new(0, 0),
+                    pending[0].pos,
                 ));
             }
         }
@@ -135,8 +129,9 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// True when every type reachable from `info`'s payloads through by-value
     /// members (struct fields, nested payloads, arrays) has a computable size —
     /// i.e. no reachable sum is still opaque.
-    fn sum_layout_ready(&self, info: &SumInfo) -> bool {
-        info.variants
+    fn sum_layout_ready(&self, info: &TypeDef) -> bool {
+        info.as_sum()
+            .variants
             .iter()
             .flat_map(|v| v.fields.iter())
             .all(|(_, ty)| self.type_layout_ready(ty))
@@ -152,30 +147,31 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .get(&id)
                 .is_some_and(|t| !t.is_opaque()),
             TypeBase::Struct(id) => self
-                .struct_fields
-                .get(&id)
-                .is_some_and(|fields| fields.iter().all(|(_, fty)| self.type_layout_ready(fty))),
+                .symbols
+                .type_def(id)
+                .as_struct()
+                .fields
+                .iter()
+                .all(|f| self.type_layout_ready(&f.ty)),
             _ => true,
         }
     }
 
-    fn set_sum_body(&mut self, info: &SumInfo) -> Result<(), CodegenError> {
+    fn set_sum_body(&mut self, info: &TypeDef) -> Result<(), CodegenError> {
 
         let target_data = self.target_machine.get_target_data();
-        let tag: BasicTypeEnum<'ctx> = self.sum_tag_type(info.id, Position::new(0, 0))?.into();
+        let tag: BasicTypeEnum<'ctx> = self.sum_tag_type(info.id, info.pos)?.into();
 
         // Size/align of the largest *bare payload* struct — not `{i32, …}`
         // views: the payload starts at the uniform offset for every variant.
         let mut max_payload: u64 = 0;
         let mut max_align: u32 = 1;
-        for variant in &info.variants {
+        for variant in &info.as_sum().variants {
             if variant.fields.is_empty() {
                 continue;
             }
-            let field_tys: Vec<LangType> =
-                variant.fields.iter().map(|(_, ty)| *ty).collect();
             let elems = self
-                .sum_field_llvm_types(&field_tys)
+                .sum_field_llvm_types(&variant.fields)
                 .map_err(|e| e.without_pos())?;
             let payload = self.context.struct_type(&elems, false);
             max_payload = max_payload.max(target_data.get_store_size(&payload));
@@ -281,8 +277,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .sum_payload_type(sum_id, variant as usize)
                 .map_err(|e| e.with_pos(pos))?
                 .expect("variant with args has a payload type");
-            let field_tys = self.sum_variant_fields[&sum_id][variant as usize].clone();
-            for (i, (arg, fty)) in args.iter().zip(field_tys).enumerate() {
+            let syms = Rc::clone(&self.symbols);
+            let field_tys = &syms.type_def(sum_id).as_sum().variants[variant as usize].fields;
+            for (i, (arg, (_, fty))) in args.iter().zip(field_tys).enumerate() {
+                let fty = *fty;
                 let fptr = self.builder.build_struct_gep(
                     payload_ty,
                     payload_ptr,
