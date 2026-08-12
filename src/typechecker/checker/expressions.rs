@@ -3,6 +3,7 @@ use crate::lexer::{LangType, TypeBase};
 use crate::parser::{BinaryOp, ComparisonOp, ExprKind, Expression, LiteralValue};
 use crate::symbol::module::Visibility;
 use crate::typechecker::errors::TypeCheckError;
+use crate::symbol::ids::StructId;
 use crate::typechecker::types::{
     cast_valid, literal_float_compatible, literal_int_fits, types_coercible,
 };
@@ -325,7 +326,7 @@ impl TypeChecker {
 
     /// `true` when the function being checked is a method of the given
     /// type-struct (its mangled name begins with `"<TypeName>$"`).
-    pub(crate) fn is_inside_struct_methods(&self, struct_id: u32) -> bool {
+    pub(crate) fn is_inside_struct_methods(&self, struct_id: StructId) -> bool {
         let Some(current) = self.current_function.as_deref() else {
             return false;
         };

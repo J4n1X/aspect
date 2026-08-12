@@ -6,6 +6,7 @@ use crate::parser::{BinaryOp, ComparisonOp, ExprKind, Expression, LiteralValue, 
 use crate::symbol::module::ModuleSymbols;
 use crate::symbol::table::SymbolTable;
 use aspect_macros::parse_rule;
+use crate::symbol::ids::StructId;
 
 #[derive(Clone, Copy)]
 enum OpKind {
@@ -958,7 +959,7 @@ impl Parser {
     #[parse_rule]
     fn parse_struct_literal(
         &mut self,
-        struct_id: u32,
+        struct_id: StructId,
         pos: Position,
     ) -> Result<Expression, ParserError> {
         token!(OpenBrace);

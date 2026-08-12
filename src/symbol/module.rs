@@ -16,8 +16,10 @@
 //! lives in [`crate::symbol::table::SymbolTable`], not here.
 
 use crate::lexer::{LangType, Position};
+use crate::symbol::ids::{EnumId, SigId, StructId, SumId, TypeDefId};
 use crate::symbol::table::{FunctionSymbol, SymbolError};
 use std::collections::HashMap;
+use std::ops::Index;
 
 /// Build the mangled free-function name a type-struct method lowers to:
 /// `Type$method`. The single authority for the mangling scheme — see also
@@ -138,7 +140,7 @@ impl TypeKind {
 /// map is what makes interning a name as two kinds at once impossible.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeDef {
-    pub id: u32,
+    pub id: TypeDefId,
     pub name: String,
     /// `Position::file_id` of the declaring file — the provenance the
     /// import-visibility check resolves to a defining module.
@@ -165,7 +167,7 @@ impl TypeDef {
     /// from a `TypeBase` variant or a kind-filtered lookup, both of which
     /// already establish the kind.
     #[must_use]
-    pub fn as_struct(&self) -> &StructBody {
+    fn struct_body(&self) -> &StructBody {
         match &self.kind {
             TypeKind::Struct(body) => body,
             other => unreachable!("type '{}' is a {}, not a type-struct", self.name, other.noun()),
@@ -173,7 +175,7 @@ impl TypeDef {
     }
 
     #[must_use]
-    pub fn as_enum(&self) -> &EnumBody {
+    fn enum_body(&self) -> &EnumBody {
         match &self.kind {
             TypeKind::Enum(body) => body,
             other => unreachable!("type '{}' is a {}, not an enum", self.name, other.noun()),
@@ -181,7 +183,7 @@ impl TypeDef {
     }
 
     #[must_use]
-    pub fn as_sum(&self) -> &SumBody {
+    fn sum_body(&self) -> &SumBody {
         match &self.kind {
             TypeKind::Sum(body) => body,
             other => unreachable!("type '{}' is a {}, not a sum", self.name, other.noun()),
@@ -222,7 +224,7 @@ pub struct ModuleSymbols {
     types: Vec<TypeDef>,
     /// The one type namespace, so a collision between any two kinds is a single
     /// lookup instead of a check per kind.
-    types_by_name: HashMap<String, u32>,
+    types_by_name: HashMap<String, TypeDefId>,
     /// Function-pointer signatures, interned by structural identity.
     /// Index into the vec == the FnPtr id stored in `TypeBase::FnPtr(u32)`.
     fnptr_sigs: Vec<FnPtrSig>,
@@ -235,6 +237,28 @@ impl ModuleSymbols {
     }
 
     // ── Functions ─────────────────────────────────────────────────────────────
+
+    /// Prove `id` names a type-struct, yielding the id that indexes its body
+    /// infallibly. `None` is a real diagnostic ("`Foo` is a sum, not a
+    /// type-struct"), not an internal error.
+    #[must_use]
+    pub fn as_struct(&self, id: TypeDefId) -> Option<StructId> {
+        matches!(self.types.get(id.raw() as usize)?.kind, TypeKind::Struct(_)).then_some(StructId(id))
+    }
+
+    /// See [`ModuleSymbols::as_struct`].
+    #[must_use]
+    pub fn as_sum(&self, id: TypeDefId) -> Option<SumId> {
+        matches!(self.types.get(id.raw() as usize)?.kind, TypeKind::Sum(_)).then_some(SumId(id))
+    }
+
+    /// See [`ModuleSymbols::as_struct`].
+    #[must_use]
+    pub fn as_enum(&self, id: TypeDefId) -> Option<EnumId> {
+        matches!(self.types.get(id.raw() as usize)?.kind, TypeKind::Enum(_)).then_some(EnumId(id))
+    }
+
+
 
     /// A declaration may be followed by a matching definition, but two bodies —
     /// or a definition disagreeing with an earlier declaration — are errors.
@@ -288,11 +312,13 @@ impl ModuleSymbols {
         vis: Visibility,
         pos: Position,
         kind: TypeKind,
-    ) -> u32 {
+    ) -> TypeDefId {
         if let Some(&id) = self.types_by_name.get(name) {
             return id;
         }
-        let id = u32::try_from(self.types.len()).expect("number of named types exceeds u32::MAX");
+        let id = TypeDefId::from_raw(
+            u32::try_from(self.types.len()).expect("number of named types exceeds u32::MAX"),
+        );
         self.types.push(TypeDef {
             id,
             name: name.to_string(),
@@ -309,7 +335,7 @@ impl ModuleSymbols {
     /// The id of any named type, whatever its kind — the single "is this name
     /// taken?" query.
     #[must_use]
-    pub fn type_id(&self, name: &str) -> Option<u32> {
+    pub fn type_id(&self, name: &str) -> Option<TypeDefId> {
         self.types_by_name.get(name).copied()
     }
 
@@ -317,68 +343,92 @@ impl ModuleSymbols {
     pub fn lookup_type(&self, name: &str) -> Option<&TypeDef> {
         self.types_by_name
             .get(name)
-            .map(|&id| &self.types[id as usize])
+            .map(|&id| &self.types[id.raw() as usize])
     }
 
     /// # Panics
     /// If `id` was never interned. Ids reach callers only from a `LangType` or a
     /// lookup, both of which come from this table.
     #[must_use]
-    pub fn type_def(&self, id: u32) -> &TypeDef {
-        &self.types[id as usize]
+    pub fn type_def(&self, id: impl Into<TypeDefId>) -> &TypeDef {
+        &self.types[id.into().raw() as usize]
     }
 
     pub fn types(&self) -> impl Iterator<Item = &TypeDef> {
         self.types.iter()
     }
 
-    fn id_of_kind(&self, name: &str, want: fn(&TypeKind) -> bool) -> Option<u32> {
+    fn id_of_kind(&self, name: &str, want: fn(&TypeKind) -> bool) -> Option<TypeDefId> {
         let def = self.lookup_type(name)?;
         want(&def.kind).then_some(def.id)
     }
 
+    /// The `LangType` that spells this declaration: the nominal type for a
+    /// struct/enum/sum, or the target an alias stands for. Total by
+    /// construction — minting the proof id here is what keeps callers from
+    /// needing an unwrap to name a type they just looked up.
     #[must_use]
-    pub fn struct_id(&self, name: &str) -> Option<u32> {
+    pub fn named_type(&self, id: impl Into<TypeDefId>) -> LangType {
+        let id = id.into();
+        match &self.types[id.raw() as usize].kind {
+            TypeKind::Struct(_) => LangType::struct_type(StructId(id)),
+            TypeKind::Enum(_) => LangType::enum_type(EnumId(id)),
+            TypeKind::Sum(_) => LangType::sum_type(SumId(id)),
+            TypeKind::Alias(target) => *target,
+        }
+    }
+
+    /// Kind-filtered name lookup — one of the two places a [`StructId`] is
+    /// minted (the other is [`Self::as_struct`]).
+    #[must_use]
+    pub fn struct_id(&self, name: &str) -> Option<StructId> {
         self.id_of_kind(name, |k| matches!(k, TypeKind::Struct(_)))
+            .map(StructId)
     }
 
     #[must_use]
-    pub fn enum_id(&self, name: &str) -> Option<u32> {
+    pub fn enum_id(&self, name: &str) -> Option<EnumId> {
         self.id_of_kind(name, |k| matches!(k, TypeKind::Enum(_)))
+            .map(EnumId)
     }
 
     #[must_use]
-    pub fn sum_id(&self, name: &str) -> Option<u32> {
+    pub fn sum_id(&self, name: &str) -> Option<SumId> {
         self.id_of_kind(name, |k| matches!(k, TypeKind::Sum(_)))
+            .map(SumId)
     }
 
-    /// In id order — codegen's registration passes depend on it.
-    pub fn structs(&self) -> impl Iterator<Item = &TypeDef> {
+    /// In id order — codegen's registration passes depend on it. The filter
+    /// establishes the kind, so each item carries its proof id.
+    pub fn structs(&self) -> impl Iterator<Item = (StructId, &TypeDef)> {
         self.types
             .iter()
             .filter(|d| matches!(d.kind, TypeKind::Struct(_)))
+            .map(|d| (StructId(d.id), d))
     }
 
-    pub fn enums(&self) -> impl Iterator<Item = &TypeDef> {
+    pub fn enums(&self) -> impl Iterator<Item = (EnumId, &TypeDef)> {
         self.types
             .iter()
             .filter(|d| matches!(d.kind, TypeKind::Enum(_)))
+            .map(|d| (EnumId(d.id), d))
     }
 
-    pub fn sums(&self) -> impl Iterator<Item = &TypeDef> {
+    pub fn sums(&self) -> impl Iterator<Item = (SumId, &TypeDef)> {
         self.types
             .iter()
             .filter(|d| matches!(d.kind, TypeKind::Sum(_)))
+            .map(|d| (SumId(d.id), d))
     }
 
     /// Also marks the declaration defined.
-    pub fn set_fields(&mut self, id: u32, fields: Vec<FieldInfo>) {
+    pub fn set_fields(&mut self, id: TypeDefId, fields: Vec<FieldInfo>) {
         let field_index = fields
             .iter()
             .enumerate()
             .map(|(i, f)| (f.name.clone(), i))
             .collect();
-        let def = &mut self.types[id as usize];
+        let def = &mut self.types[id.raw() as usize];
         def.defined = true;
         match &mut def.kind {
             TypeKind::Struct(body) => {
@@ -389,8 +439,8 @@ impl ModuleSymbols {
         }
     }
 
-    pub fn set_enum_variants(&mut self, id: u32, variants: Vec<String>) {
-        let def = &mut self.types[id as usize];
+    pub fn set_enum_variants(&mut self, id: TypeDefId, variants: Vec<String>) {
+        let def = &mut self.types[id.raw() as usize];
         def.defined = true;
         match &mut def.kind {
             TypeKind::Enum(body) => body.variants = variants,
@@ -398,8 +448,8 @@ impl ModuleSymbols {
         }
     }
 
-    pub fn set_sum_variants(&mut self, id: u32, variants: Vec<SumVariant>) {
-        let def = &mut self.types[id as usize];
+    pub fn set_sum_variants(&mut self, id: TypeDefId, variants: Vec<SumVariant>) {
+        let def = &mut self.types[id.raw() as usize];
         def.defined = true;
         match &mut def.kind {
             TypeKind::Sum(body) => body.variants = variants,
@@ -407,8 +457,8 @@ impl ModuleSymbols {
         }
     }
 
-    pub fn add_method(&mut self, id: u32, name: String, sig: MethodSig) {
-        match &mut self.types[id as usize].kind {
+    pub fn add_method(&mut self, id: TypeDefId, name: String, sig: MethodSig) {
+        match &mut self.types[id.raw() as usize].kind {
             TypeKind::Struct(body) => {
                 body.methods.insert(name, sig);
             }
@@ -417,36 +467,34 @@ impl ModuleSymbols {
     }
 
     #[must_use]
-    pub fn field(&self, id: u32, name: &str) -> Option<(usize, &FieldInfo)> {
-        let body = self.type_def(id).as_struct();
+    pub fn field(&self, id: StructId, name: &str) -> Option<(usize, &FieldInfo)> {
+        let body = &self[id];
         let idx = *body.field_index.get(name)?;
         Some((idx, &body.fields[idx]))
     }
 
     #[must_use]
-    pub fn enum_variant_index(&self, id: u32, variant: &str) -> Option<usize> {
-        self.type_def(id)
-            .as_enum()
-            .variants
-            .iter()
-            .position(|v| v == variant)
+    pub fn enum_variant_index(&self, id: EnumId, variant: &str) -> Option<usize> {
+        self[id].variants.iter().position(|v| v == variant)
     }
 
     #[must_use]
-    pub fn sum_variant_index(&self, id: u32, variant: &str) -> Option<usize> {
-        self.type_def(id)
-            .as_sum()
-            .variants
-            .iter()
-            .position(|v| v.name == variant)
+    pub fn sum_variant_index(&self, id: SumId, variant: &str) -> Option<usize> {
+        self[id].variants.iter().position(|v| v.name == variant)
     }
 
     /// `alias New Target`. Interned like any other named type — same id space,
     /// same visibility gate — and `defined` immediately, its target having
     /// resolved eagerly.
-    pub fn define_alias(&mut self, name: &str, ty: LangType, file_id: u32, pos: Position) -> u32 {
+    pub fn define_alias(
+        &mut self,
+        name: &str,
+        ty: LangType,
+        file_id: u32,
+        pos: Position,
+    ) -> TypeDefId {
         let id = self.intern_type(name, file_id, Visibility::Private, pos, TypeKind::Alias(ty));
-        self.types[id as usize].defined = true;
+        self.types[id.raw() as usize].defined = true;
         id
     }
 
@@ -460,23 +508,25 @@ impl ModuleSymbols {
     /// Intern a function-pointer signature, returning a stable id. Identical
     /// signatures return the same id (structural deduplication), so two FnPtr
     /// types are compared by id alone — `LangType` stays `Copy`/`Eq`.
-    pub fn intern_fnptr(&mut self, params: Vec<LangType>, return_type: LangType) -> u32 {
+    pub fn intern_fnptr(&mut self, params: Vec<LangType>, return_type: LangType) -> SigId {
         let sig = FnPtrSig {
             params,
             return_type,
         };
         if let Some(idx) = self.fnptr_sigs.iter().position(|s| *s == sig) {
-            return u32::try_from(idx).expect("fnptr signature index overflows u32");
+            return SigId::from_raw(u32::try_from(idx).expect("fnptr signature index overflows u32"));
         }
-        let id = u32::try_from(self.fnptr_sigs.len())
-            .expect("number of fn-ptr signatures exceeds u32::MAX");
+        let id = SigId::from_raw(
+            u32::try_from(self.fnptr_sigs.len())
+                .expect("number of fn-ptr signatures exceeds u32::MAX"),
+        );
         self.fnptr_sigs.push(sig);
         id
     }
 
     #[must_use]
-    pub fn fnptr_sig(&self, id: u32) -> &FnPtrSig {
-        &self.fnptr_sigs[id as usize]
+    pub fn fnptr_sig(&self, id: SigId) -> &FnPtrSig {
+        &self.fnptr_sigs[id.raw() as usize]
     }
 
     /// All registered FnPtr signatures, indexed by id. Unlike
@@ -484,5 +534,34 @@ impl ModuleSymbols {
     #[must_use]
     pub fn all_fnptr_sigs(&self) -> &[FnPtrSig] {
         &self.fnptr_sigs
+    }
+}
+
+fn as_module_index(id: impl Into<TypeDefId>) -> usize {
+    id.into().raw() as usize
+}
+
+
+impl Index<StructId> for ModuleSymbols {
+    type Output = StructBody;
+
+    fn index(&self, index: StructId) -> &Self::Output {
+        self.types[as_module_index(index)].struct_body()
+    }
+}
+
+impl Index<SumId> for ModuleSymbols {
+    type Output = SumBody;
+
+    fn index(&self, index: SumId) -> &Self::Output {
+        self.types[as_module_index(index)].sum_body()
+    }
+}
+
+impl Index<EnumId> for ModuleSymbols {
+    type Output = EnumBody;
+
+    fn index(&self, index: EnumId) -> &Self::Output {
+        self.types[as_module_index(index)].enum_body()
     }
 }

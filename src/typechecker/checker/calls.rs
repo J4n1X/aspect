@@ -23,7 +23,7 @@ impl TypeChecker {
         let Some(id) = self.symbols.struct_id(type_name) else {
             return;
         };
-        let vis = match self.symbols.type_def(id).as_struct().methods.get(method_name) {
+        let vis = match self.symbols[id].methods.get(method_name) {
             Some(sig) => sig.vis,
             None => return,
         };

@@ -442,7 +442,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
         let syms = Rc::clone(&self.symbols);
-        let sig = syms.all_fnptr_sigs().get(id as usize).ok_or_else(|| {
+        let sig = syms.all_fnptr_sigs().get(id.raw() as usize).ok_or_else(|| {
             CodegenError::TypeError(format!("unregistered fn-ptr signature id {id}"), pos)
         })?;
 

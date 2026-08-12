@@ -10,6 +10,7 @@ use crate::codegen::generator::CodeGenerator;
 use crate::codegen::CodegenError;
 use crate::lexer::{LangType, Position, TypeBase};
 use crate::parser::{ExprKind, Expression, LiteralValue, Statement, SwitchArm, SwitchPattern};
+use crate::symbol::ids::SumId;
 
 impl<'ctx> CodeGenerator<'ctx> {
     /// Lower a `switch`: evaluate the scrutinee exactly once, LLVM `switch`
@@ -84,7 +85,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         scrutinee: &Expression,
         function: FunctionValue<'ctx>,
         pos: Position,
-    ) -> Result<(IntValue<'ctx>, Option<(PointerValue<'ctx>, u32)>), CodegenError> {
+    ) -> Result<(IntValue<'ctx>, Option<(PointerValue<'ctx>, SumId)>), CodegenError> {
         let s_ty = scrutinee.expr_type;
 
         let mut sum_slot = None;
@@ -164,7 +165,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     fn bind_switch_arm_payload(
         &mut self,
         function: FunctionValue<'ctx>,
-        sum_slot: (PointerValue<'ctx>, u32),
+        sum_slot: (PointerValue<'ctx>, SumId),
         variant: u32,
         binders: &[Option<(String, LangType)>],
         pos: Position,

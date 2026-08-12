@@ -63,19 +63,19 @@ impl Parser {
         };
         let id = def.id;
         let is_alias = matches!(def.kind, TypeKind::Alias(_));
-        let base = match &def.kind {
-            TypeKind::Struct(_) => LangType::struct_type(id),
-            TypeKind::Enum(_) => LangType::enum_type(id),
-            TypeKind::Sum(_) => LangType::sum_type(id),
-            TypeKind::Alias(target) => *target,
-        };
+        let base = self.module.named_type(id);
 
         self.check_type_visibility(id, pos)?;
-        if is_alias
-            && let TypeBase::Struct(target) | TypeBase::Enum(target) | TypeBase::Sum(target) =
-                base.base
-        {
-            self.check_type_visibility(target, pos)?;
+        if is_alias {
+            let target = match base.base {
+                TypeBase::Struct(target) => Some(target.def()),
+                TypeBase::Enum(target) => Some(target.def()),
+                TypeBase::Sum(target) => Some(target.def()),
+                _ => None,
+            };
+            if let Some(target) = target {
+                self.check_type_visibility(target, pos)?;
+            }
         }
         Ok(self.apply_type_modifiers(base))
     }

@@ -1,5 +1,6 @@
 use crate::lexer::{LangType, Position, TokenKind, TypeBase};
 use crate::parser::{ExprKind, Expression, Parser, ParserError};
+use crate::symbol::ids::StructId;
 
 impl Parser {
     /// The `.` was already consumed. Distinguishes `base.method(args)` (a
@@ -120,7 +121,7 @@ impl Parser {
                 pos,
             }));
         };
-        let field_count = self.module.type_def(id).as_sum().variants[idx].fields.len();
+        let field_count = self.module[id].variants[idx].fields.len();
         let ty = LangType::sum_type(id);
         let variant = u32::try_from(idx).expect("variant index fits u32");
 
@@ -188,7 +189,7 @@ impl Parser {
     ) -> Option<Result<Expression, ParserError>> {
         let var_name = self.unshadowed_named_ref(base)?;
         let id = self.module.struct_id(var_name)?;
-        if !self.module.type_def(id).as_struct().methods.contains_key(name) {
+        if !self.module[id].methods.contains_key(name) {
             return None;
         }
         if let Err(e) = self.check_type_visibility(id, pos) {
@@ -233,7 +234,7 @@ impl Parser {
 
     fn build_static_method_call(
         &mut self,
-        id: u32,
+        id: StructId,
         method_name: &str,
         args: Vec<Expression>,
         pos: Position,
@@ -293,14 +294,14 @@ impl Parser {
     /// each syntactic form must resolve to its matching kind.
     fn resolve_method_target(
         &mut self,
-        id: u32,
+        id: StructId,
         method_name: &str,
         want_static: bool,
         pos: Position,
     ) -> Result<(String, LangType), ParserError> {
         self.check_type_visibility(id, pos)?;
         let type_name = self.module.type_def(id).name.clone();
-        if let Some(sig) = self.module.type_def(id).as_struct().methods.get(method_name)
+        if let Some(sig) = self.module[id].methods.get(method_name)
             && sig.is_static != want_static
         {
             let msg = if sig.is_static {

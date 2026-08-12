@@ -17,6 +17,7 @@ use crate::codegen::value_emitter::{ConstantEmitter, RuntimeEmitter};
 use crate::codegen::CodegenError;
 use crate::parser::{FunctionBody, LangType, Program};
 use crate::target::TargetSpec;
+use crate::symbol::ids::{StructId, SumId};
 
 pub struct CodeGenerator<'ctx> {
     pub(crate) context: &'ctx Context,
@@ -37,7 +38,7 @@ pub struct CodeGenerator<'ctx> {
     pub(crate) current_sret: Option<inkwell::values::PointerValue<'ctx>>,
 
     /// Named LLVM struct type per type-struct id (built in the registration pass).
-    pub(crate) struct_types: HashMap<u32, inkwell::types::StructType<'ctx>>,
+    pub(crate) struct_types: HashMap<StructId, inkwell::types::StructType<'ctx>>,
 
     /// Optimization level the emitted module is destined for (set before
     /// `generate` by the CLI and test harness; defaults to 0). Codegen makes
@@ -52,7 +53,7 @@ pub struct CodeGenerator<'ctx> {
     /// largest variant payload, payload at a uniform offset.
     /// Built opaque before struct bodies (so struct fields may hold sums by
     /// value), filled in after them.
-    pub(crate) sum_types: HashMap<u32, inkwell::types::StructType<'ctx>>,
+    pub(crate) sum_types: HashMap<SumId, inkwell::types::StructType<'ctx>>,
 
     /// Copied from `Program` so `format_error` resolves a codegen error's
     /// position to the file it came from.

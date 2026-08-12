@@ -8,6 +8,7 @@
 use crate::lexer::{LangType, TokenKind};
 use crate::parser::expressions::Parser;
 use crate::parser::ParserError;
+use crate::symbol::ids::SumId;
 
 /// The wording a pattern site needs; everything else about parsing one is
 /// identical between `switch` and `is`.
@@ -43,7 +44,7 @@ impl Parser {
     /// variant access — and a binder list must name every payload field.
     pub(crate) fn parse_variant_pattern(
         &mut self,
-        sum_id: u32,
+        sum_id: SumId,
         site: &PatternSite,
     ) -> Result<VariantPattern, ParserError> {
         let pos = self.peek().pos;
@@ -84,7 +85,7 @@ impl Parser {
                 pos,
             });
         };
-        let field_types: Vec<LangType> = self.module.type_def(sum_id).as_sum().variants[idx]
+        let field_types: Vec<LangType> = self.module[sum_id].variants[idx]
             .fields
             .iter()
             .map(|(_, ty)| *ty)

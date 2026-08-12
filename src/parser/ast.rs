@@ -1,4 +1,6 @@
-use crate::{lexer::{LangType, Position}, symbol::module::Visibility};
+use crate::lexer::{LangType, Position};
+use crate::symbol::ids::{EnumId, StructId, SumId};
+use crate::symbol::module::Visibility;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LiteralValue {
@@ -83,7 +85,7 @@ pub enum ExprKind {
     /// Named struct literal `Name { field = expr, ... }`. The struct is
     /// identified by its interned id; `fields` are in source order.
     StructLiteral {
-        struct_id: u32,
+        struct_id: StructId,
         fields: Vec<(String, Expression)>,
     },
     /// An enum variant value `EnumName.Variant`, resolved to the variant's enum
@@ -91,7 +93,7 @@ pub enum ExprKind {
     /// the checker never lets it coerce to a bare integer: an enum value only
     /// ever satisfies its own enum type. Lowers to a compile-time `i32`.
     EnumValue {
-        enum_id: u32,
+        enum_id: EnumId,
         value: i64,
     },
     /// Sum construction `SumName.Variant(args…)` (bare `SumName.Variant` for a
@@ -99,7 +101,7 @@ pub enum ExprKind {
     /// at parse time; `args` are the payload values in field order — arity was
     /// already checked by the parser, argument *types* by the checker.
     SumConstruct {
-        sum_id: u32,
+        sum_id: SumId,
         variant: u32,
         args: Vec<Expression>,
     },
@@ -108,7 +110,7 @@ pub enum ExprKind {
     /// expression at the comparison tier, usable anywhere.
     Is {
         scrutinee: Box<Expression>,
-        sum_id: u32,
+        sum_id: SumId,
         variant: u32,
     },
     /// Binding `is` probe: `scrutinee is Variant(a, _, b)`. **Not an
@@ -119,7 +121,7 @@ pub enum ExprKind {
     /// the success block.
     IsBinding {
         scrutinee: Box<Expression>,
-        sum_id: u32,
+        sum_id: SumId,
         variant: u32,
         binders: Vec<Option<(String, LangType)>>,
     },

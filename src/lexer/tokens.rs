@@ -1,4 +1,5 @@
 use crate::lexer::Position;
+use crate::symbol::ids::{EnumId, SigId, StructId, SumId};
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,19 +173,19 @@ pub enum TypeBase {
     Bool,   // Boolean (i1 value, i8 storage with !range 0..1)
     /// Interned id into the program's `ModuleSymbols` struct registry. The id
     /// (not the name) keeps `LangType` `Copy`/`Eq`.
-    Struct(u32),
+    Struct(StructId),
     /// Interned id into the `ModuleSymbols` enum registry. The representation
     /// is `i32`, but the id makes the type *nominal* — two enums are distinct
     /// types even though both lower to `i32`.
-    Enum(u32),
+    Enum(EnumId),
     /// Interned id into the `ModuleSymbols` sum registry. Like `Struct`, the
     /// value is an aggregate (`i32` tag + payload storage) whose LLVM shape
     /// lives in codegen's cache; the id keeps `LangType` `Copy`/`Eq`.
-    Sum(u32),
+    Sum(SumId),
     /// Interned id into the `ModuleSymbols` function-signature registry.
     /// `fn(args) -> R` *is* the pointer (machine functions are always called
     /// through an address).
-    FnPtr(u32),
+    FnPtr(SigId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
@@ -236,24 +237,24 @@ impl LangType {
     pub const U8_PTR: Self = Self::plain(TypeBase::UInt, 8, 1);
 
     #[must_use]
-    pub const fn struct_type(id: u32) -> Self {
+    pub const fn struct_type(id: StructId) -> Self {
         Self::plain(TypeBase::Struct(id), 0, 0)
     }
 
     /// `size_bits` is 32 — the width codegen's `i32` lowering and `sizeof`
     /// agree on.
     #[must_use]
-    pub const fn enum_type(id: u32) -> Self {
+    pub const fn enum_type(id: EnumId) -> Self {
         Self::plain(TypeBase::Enum(id), 32, 0)
     }
 
     #[must_use]
-    pub const fn fnptr_type(id: u32) -> Self {
+    pub const fn fnptr_type(id: SigId) -> Self {
         Self::plain(TypeBase::FnPtr(id), 0, 0)
     }
 
     #[must_use]
-    pub const fn sum_type(id: u32) -> Self {
+    pub const fn sum_type(id: SumId) -> Self {
         Self::plain(TypeBase::Sum(id), 0, 0)
     }
 
@@ -396,10 +397,10 @@ impl fmt::Display for LangType {
         // render real names. `fn(...) -> R` is itself a pointer, so a trailing
         // `*` after `fn#id` means pointer-to-fn-ptr.
         let nominal = match self.base {
-            TypeBase::Struct(id) => Some(("struct", id)),
-            TypeBase::FnPtr(id) => Some(("fn", id)),
-            TypeBase::Enum(id) => Some(("enum", id)),
-            TypeBase::Sum(id) => Some(("sum", id)),
+            TypeBase::Struct(id) => Some(("struct", id.def().raw())),
+            TypeBase::FnPtr(id) => Some(("fn", id.raw())),
+            TypeBase::Enum(id) => Some(("enum", id.def().raw())),
+            TypeBase::Sum(id) => Some(("sum", id.def().raw())),
             _ => None,
         };
         if let Some((kind, id)) = nominal {

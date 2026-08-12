@@ -9,6 +9,7 @@ use crate::codegen::generator::CodeGenerator;
 use crate::codegen::{CodegenError, LangTypeExt, TypeLoweringError};
 use crate::lexer::{LangType, Position, TypeBase};
 use crate::parser::{ExprKind, Expression, Program};
+use crate::symbol::ids::StructId;
 
 /// True when `ty` is a type-struct or sum passed/stored *by value* (not a
 /// pointer or array). These cross function boundaries via the `sret`/`byval`
@@ -24,16 +25,15 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// bodies. Two passes (opaque-then-body) so by-value/self-referential field
     /// types can refer to structs declared later.
     pub(crate) fn register_structs(&mut self, program: &Program) -> Result<(), CodegenError> {
-        for info in program.symbols.structs() {
+        for (id, info) in program.symbols.structs() {
             let llvm_struct = self.context.opaque_struct_type(&info.name);
-            self.struct_types.insert(info.id, llvm_struct);
+            self.struct_types.insert(id, llvm_struct);
         }
 
         // A bad field type is reported at the `type` keyword: `FieldInfo` records
         // no site of its own, so this is as precise as it gets.
-        for info in program.symbols.structs() {
-            let field_types: Result<Vec<BasicTypeEnum<'ctx>>, _> = info
-                .as_struct()
+        for (id, info) in program.symbols.structs() {
+            let field_types: Result<Vec<BasicTypeEnum<'ctx>>, _> = program.symbols[id]
                 .fields
                 .iter()
                 .map(|f| {
@@ -42,7 +42,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 })
                 .collect();
             let field_types = field_types?;
-            self.struct_types[&info.id].set_body(&field_types, false);
+            self.struct_types[&id].set_body(&field_types, false);
         }
         Ok(())
     }
@@ -90,14 +90,14 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Field layout index and type for `field` of struct `id`.
-    pub(crate) fn struct_field(&self, id: u32, field: &str) -> Option<(usize, LangType)> {
+    pub(crate) fn struct_field(&self, id: StructId, field: &str) -> Option<(usize, LangType)> {
         self.symbols.field(id, field).map(|(idx, f)| (idx, f.ty))
     }
 
     /// Build a struct literal aggregate field-by-field via `insertvalue`.
     pub(crate) fn emit_struct_literal(
         &mut self,
-        struct_id: u32,
+        struct_id: StructId,
         fields: &[(String, Expression)],
         pos: Position,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
@@ -229,7 +229,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     fn struct_address_of(
         &mut self,
         base: &Expression,
-    ) -> Result<(PointerValue<'ctx>, u32), CodegenError> {
+    ) -> Result<(PointerValue<'ctx>, StructId), CodegenError> {
         let bt = base.expr_type;
         let TypeBase::Struct(id) = bt.base else {
             return Err(CodegenError::TypeError(

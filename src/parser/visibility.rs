@@ -1,5 +1,6 @@
 use crate::lexer::Position;
 use crate::parser::{Parser, ParserError};
+use crate::symbol::ids::TypeDefId;
 use crate::symbol::module::{TypeKind, Visibility};
 
 impl Parser {
@@ -47,7 +48,7 @@ impl Parser {
     ///
     /// An alias carries no visibility of its own yet, so only the import rule
     /// gates it; its target is checked where the alias resolves.
-    pub(crate) fn check_type_visibility(&self, id: u32, use_pos: Position) -> Result<(), ParserError> {
+    pub(crate) fn check_type_visibility(&self, id: impl Into<TypeDefId>, use_pos: Position) -> Result<(), ParserError> {
         let def = self.module.type_def(id);
         self.check_import_visibility(def.noun(), &def.name, def.file_id, use_pos)?;
         if matches!(def.kind, TypeKind::Alias(_)) {

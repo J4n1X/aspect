@@ -1,7 +1,8 @@
 use crate::lexer::{Keyword, LangType, Position, TokenKind, TypeBase};
 use crate::parser::expressions::Parser;
 use crate::parser::{ExprKind, Expression, Function, GlobalVar, ParserError};
-use crate::symbol::module::{TypeKind, Visibility};
+use crate::symbol::ids::{StructId, TypeDefId};
+use crate::symbol::module::{ModuleSymbols, Visibility};
 use aspect_macros::parse_rule;
 
 /// Outcome of parsing one top-level declaration: the free functions/methods it
@@ -197,20 +198,24 @@ impl Parser {
     /// A body may only be parsed against a prescan-reserved def of the matching
     /// kind that nothing has defined yet; either failure is the same
     /// duplicate-type error, reported at this body.
-    fn claim_type_decl(
+    ///
+    /// `prove` is the registry's kind-checked id conversion.
+    fn claim_type_decl<I>(
         &mut self,
         name: &str,
         pos: Position,
-        want: fn(&TypeKind) -> bool,
-    ) -> Result<u32, ParserError> {
+        prove: fn(&ModuleSymbols, TypeDefId) -> Option<I>,
+    ) -> Result<I, ParserError> {
         let def = self
             .module
             .lookup_type(name)
             .expect("type name reserved during prescan");
-        if def.defined || !want(&def.kind) {
-            return Err(ParserError::DuplicateType(name.to_string(), pos));
+        let (id, defined) = (def.id, def.defined);
+        let duplicate = || ParserError::DuplicateType(name.to_string(), pos);
+        if defined {
+            return Err(duplicate());
         }
-        Ok(def.id)
+        prove(&self.module, id).ok_or_else(duplicate)
     }
 
     /// `type Name { [public] Type field ... [const?] fn method(...) {...} ... }`.
@@ -224,7 +229,7 @@ impl Parser {
         let pos = pos!();
         kw!(Type);
         let name = ident!();
-        let id = self.claim_type_decl(&name, pos, |k| matches!(k, TypeKind::Struct(_)))?;
+        let id = self.claim_type_decl(&name, pos, ModuleSymbols::as_struct)?;
 
         token!(OpenBrace);
 
@@ -252,7 +257,7 @@ impl Parser {
             // a function-pointer *field* type is `fn (`.
             if self.upcoming_is_method() {
                 if !fields_set {
-                    self.module.set_fields(id, std::mem::take(&mut fields));
+                    self.module.set_fields(id.def(), std::mem::take(&mut fields));
                     fields_set = true;
                 }
                 let is_const_fn = self.check_keyword(&Keyword::Const);
@@ -284,7 +289,7 @@ impl Parser {
 
         // A method-less struct never triggered the transition above.
         if !fields_set {
-            self.module.set_fields(id, fields);
+            self.module.set_fields(id.def(), fields);
         }
 
         Ok(methods)
@@ -298,7 +303,7 @@ impl Parser {
         let pos = pos!();
         kw!(Enum);
         let name = ident!();
-        let id = self.claim_type_decl(&name, pos, |k| matches!(k, TypeKind::Enum(_)))?;
+        let id = self.claim_type_decl(&name, pos, ModuleSymbols::as_enum)?;
 
         token!(OpenBrace);
 
@@ -327,7 +332,7 @@ impl Parser {
         }
         token!(CloseBrace);
 
-        self.module.set_enum_variants(id, variants);
+        self.module.set_enum_variants(id.def(), variants);
         Ok(())
     }
 
@@ -342,7 +347,7 @@ impl Parser {
         let pos = pos!();
         kw!(Sum);
         let name = ident!();
-        let id = self.claim_type_decl(&name, pos, |k| matches!(k, TypeKind::Sum(_)))?;
+        let id = self.claim_type_decl(&name, pos, ModuleSymbols::as_sum)?;
 
         token!(OpenBrace);
 
@@ -418,7 +423,7 @@ impl Parser {
         }
         token!(CloseBrace);
 
-        self.module.set_sum_variants(id, variants);
+        self.module.set_sum_variants(id.def(), variants);
         Ok(())
     }
 
@@ -432,7 +437,8 @@ impl Parser {
 
         for node in find_byvalue_cycles(&self.module) {
             let def = self.module.type_def(match node {
-                Node::Struct(id) | Node::Sum(id) => id,
+                Node::Struct(id) => id.def(),
+                Node::Sum(id) => id.def(),
             });
             self.errors
                 .push(ParserError::RecursiveByValue(def.name.clone(), def.pos));
@@ -460,7 +466,7 @@ impl Parser {
     #[parse_rule]
     fn parse_method(
         &mut self,
-        struct_id: u32,
+        struct_id: StructId,
         struct_name: &str,
         is_const_fn: bool,
         vis: crate::symbol::module::Visibility,
@@ -534,7 +540,7 @@ impl Parser {
             params.clone()
         };
         self.module.add_method(
-            struct_id,
+            struct_id.def(),
             method_name,
             MethodSig {
                 mangled_name: mangled,
@@ -564,12 +570,7 @@ impl Parser {
     pub(crate) fn identifier_is_method_of_base(&self, base: &Expression, name: &str) -> bool {
         // Instance: base's type is a type-struct (value or pointer).
         if let TypeBase::Struct(id) = base.expr_type.base
-            && self
-                .module
-                .type_def(id)
-                .as_struct()
-                .methods
-                .contains_key(name)
+            && self.module[id].methods.contains_key(name)
         {
             return true;
         }
@@ -578,7 +579,7 @@ impl Parser {
         if let ExprKind::Variable(var_name) = &base.kind
             && let Some(id) = self.module.struct_id(var_name)
             && self.symbol_table.lookup_variable(var_name).is_none()
-            && self.module.type_def(id).as_struct().methods.contains_key(name)
+            && self.module[id].methods.contains_key(name)
         {
             return true;
         }
@@ -792,7 +793,7 @@ mod tests {
     fn enum_registers_variants_in_order() {
         let program = parse("enum Color { Red, Green, Blue }\nfn f() -> i32 {\n    return 0\n}");
         let id = program.symbols.enum_id("Color").expect("Color interned");
-        let info = program.symbols.type_def(id).as_enum();
+        let info = &program.symbols[id];
         assert_eq!(info.variants, ["Red", "Green", "Blue"]);
         assert_eq!(program.symbols.enum_variant_index(id, "Blue"), Some(2));
         assert_eq!(program.symbols.enum_variant_index(id, "Cyan"), None);
@@ -803,7 +804,7 @@ mod tests {
     fn enum_variants_may_be_newline_separated() {
         let program = parse("enum E {\n    A\n    B,\n    C\n}\nfn f() -> i32 {\n    return 0\n}");
         let id = program.symbols.enum_id("E").expect("E interned");
-        assert_eq!(program.symbols.type_def(id).as_enum().variants, ["A", "B", "C"]);
+        assert_eq!(program.symbols[id].variants, ["A", "B", "C"]);
     }
 
     /// An enum with no variants is uninhabited and rejected.

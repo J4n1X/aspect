@@ -4,6 +4,7 @@ use crate::parser::patterns::SWITCH_ARM;
 use crate::parser::{Expression, ParserError, Statement, StatementKind};
 use crate::variants::VariantSpace;
 use aspect_macros::parse_rule;
+use crate::symbol::ids::EnumId;
 
 impl Parser {
     /// `switch scrutinee { case … { } … default { } }`. The scrutinee's
@@ -164,7 +165,7 @@ impl Parser {
     /// `parse_expression`, which builds the qualified `EnumValue`.
     fn parse_enum_variant_pattern(
         &mut self,
-        enum_id: u32,
+        enum_id: EnumId,
     ) -> Result<Option<crate::parser::SwitchPattern>, ParserError> {
         let pos = self.peek().pos;
         let TokenKind::Identifier(name) = &self.peek().kind else {

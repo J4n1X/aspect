@@ -11,12 +11,13 @@ use std::collections::HashSet;
 
 use crate::lexer::{LangType, TypeBase};
 use crate::parser::{ExprKind, Expression, LiteralValue, SwitchPattern};
+use crate::symbol::ids::{EnumId, SumId};
 use crate::symbol::module::ModuleSymbols;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClosedKind {
-    Enum(u32),
-    Sum(u32),
+    Enum(EnumId),
+    Sum(SumId),
     Bool,
 }
 
@@ -44,7 +45,7 @@ pub enum VariantSpace {
 /// auto-derefs like field access does; deeper pointers and arrays are not
 /// scrutinees. Also the "does this switch need a payload slot" test in codegen.
 #[must_use]
-pub fn sum_scrutinee(ty: &LangType) -> Option<u32> {
+pub fn sum_scrutinee(ty: &LangType) -> Option<SumId> {
     if ty.is_array() || ty.pointer_depth > 1 {
         return None;
     }
@@ -60,7 +61,7 @@ impl VariantSpace {
         if let Some(id) = sum_scrutinee(ty) {
             return Self::Closed(ClosedSpace {
                 kind: ClosedKind::Sum(id),
-                count: symbols.type_def(id).as_sum().variants.len(),
+                count: symbols[id].variants.len(),
             });
         }
         if ty.is_array() || ty.pointer_depth > 0 {
@@ -74,7 +75,7 @@ impl VariantSpace {
             }),
             TypeBase::Enum(id) => Self::Closed(ClosedSpace {
                 kind: ClosedKind::Enum(id),
-                count: symbols.type_def(id).as_enum().variants.len(),
+                count: symbols[id].variants.len(),
             }),
             _ => Self::Unmatchable,
         }
@@ -128,15 +129,11 @@ impl ClosedSpace {
     #[must_use]
     pub fn slot_label(&self, slot: usize, symbols: &ModuleSymbols) -> String {
         match self.kind {
-            ClosedKind::Enum(id) => symbols
-                .type_def(id)
-                .as_enum()
+            ClosedKind::Enum(id) => symbols[id]
                 .variants
                 .get(slot)
                 .map_or_else(|| "'?'".to_string(), |name| format!("'{name}'")),
-            ClosedKind::Sum(id) => symbols
-                .type_def(id)
-                .as_sum()
+            ClosedKind::Sum(id) => symbols[id]
                 .variants
                 .get(slot)
                 .map_or_else(|| "'?'".to_string(), |v| format!("'{}'", v.name)),
@@ -175,13 +172,14 @@ impl ClosedSpace {
 mod tests {
     use super::*;
     use crate::lexer::Position;
+    use crate::symbol::ids::StructId;
     use crate::symbol::module::{
-        EnumBody, SumBody, SumVariant, TypeKind, Visibility,
+        EnumBody, StructBody, SumBody, SumVariant, TypeKind, Visibility,
     };
 
-    /// A registry holding `enum Color { Red, Green }` and
-    /// `sum Shape { Dot, Mark(i32) }`.
-    fn symbols() -> (ModuleSymbols, u32, u32) {
+    /// A registry holding `enum Color { Red, Green }`,
+    /// `sum Shape { Dot, Mark(i32) }` and an empty `type Blob {}`.
+    fn symbols() -> (ModuleSymbols, EnumId, SumId, StructId) {
         let mut m = ModuleSymbols::new();
         let color = m.intern_type(
             "Color",
@@ -211,7 +209,19 @@ mod tests {
                 },
             ],
         );
-        (m, color, shape)
+        let blob = m.intern_type(
+            "Blob",
+            0,
+            Visibility::Private,
+            Position::new(0, 0),
+            TypeKind::Struct(StructBody::default()),
+        );
+        let (color, shape, blob) = (
+            m.as_enum(color).expect("Color is an enum"),
+            m.as_sum(shape).expect("Shape is a sum"),
+            m.as_struct(blob).expect("Blob is a type-struct"),
+        );
+        (m, color, shape, blob)
     }
 
     fn variant_pattern(variant: u32) -> SwitchPattern {
@@ -225,9 +235,10 @@ mod tests {
     /// auto-derefs); deeper pointers and arrays are not scrutinees at all.
     #[test]
     fn sum_scrutinee_accepts_one_pointer_level_only() {
-        let sum = LangType::sum_type(7);
-        assert_eq!(sum_scrutinee(&sum), Some(7));
-        assert_eq!(sum_scrutinee(&sum.with_pointer_depth(1)), Some(7));
+        let (_m, _color, shape, _blob) = symbols();
+        let sum = LangType::sum_type(shape);
+        assert_eq!(sum_scrutinee(&sum), Some(shape));
+        assert_eq!(sum_scrutinee(&sum.with_pointer_depth(1)), Some(shape));
         assert_eq!(sum_scrutinee(&sum.with_pointer_depth(2)), None);
         assert_eq!(sum_scrutinee(&sum.with_array_size(3)), None);
         assert_eq!(sum_scrutinee(&LangType::I32), None);
@@ -235,7 +246,7 @@ mod tests {
 
     #[test]
     fn classification_covers_every_scrutinee_shape() {
-        let (m, color, shape) = symbols();
+        let (m, color, shape, blob) = symbols();
         let closed = |ty: &LangType| VariantSpace::of(ty, &m).closed();
 
         assert_eq!(VariantSpace::of(&LangType::I32, &m), VariantSpace::Open);
@@ -252,7 +263,7 @@ mod tests {
         for unmatchable in [
             LangType::F64,
             LangType::U8_PTR,
-            LangType::struct_type(0),
+            LangType::struct_type(blob),
             LangType::enum_type(color).with_pointer_depth(1),
         ] {
             assert_eq!(
@@ -267,7 +278,7 @@ mod tests {
     /// `complete` trustworthy for the checker's dead-`default` warning.
     #[test]
     fn coverage_is_dedup_aware() {
-        let (m, _, shape) = symbols();
+        let (m, _color, shape, _blob) = symbols();
         let space = VariantSpace::of(&LangType::sum_type(shape), &m)
             .closed()
             .expect("sum is closed");
@@ -280,7 +291,7 @@ mod tests {
     /// The three diagnostic spellings the switch errors depend on.
     #[test]
     fn slot_labels_match_the_diagnostics() {
-        let (m, color, shape) = symbols();
+        let (m, color, shape, _blob) = symbols();
         let enum_space = VariantSpace::of(&LangType::enum_type(color), &m)
             .closed()
             .unwrap();

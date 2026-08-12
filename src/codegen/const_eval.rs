@@ -16,6 +16,7 @@ use crate::codegen::types::LangTypeExt;
 use crate::codegen::value_emitter::ValueEmitter;
 use crate::lexer::{LangType, Position, TypeBase};
 use crate::parser::{ExprKind, Expression, LiteralValue};
+use crate::symbol::ids::{StructId, SumId};
 
 /// Evaluate `expr` as a compile-time constant, producing an LLVM constant value.
 ///
@@ -260,7 +261,7 @@ pub(crate) fn const_eval<'ctx>(
 /// the uniform layout — no endianness games serializing fields into the unit
 /// array.
 fn const_eval_sum_construct<'ctx>(
-    sum_id: &u32,
+    sum_id: &SumId,
     variant: &u32,
     args: &[Expression],
     pos: Position,
@@ -282,7 +283,7 @@ fn const_eval_sum_construct<'ctx>(
     let tag = tag_ty.const_int(u64::from(*variant), false);
     let tag_size = u64::from(tag_ty.get_bit_width() / 8);
     let syms = std::rc::Rc::clone(&cg.symbols);
-    let field_tys = &syms.type_def(*sum_id).as_sum().variants[*variant as usize].fields;
+    let field_tys = &syms[*sum_id].variants[*variant as usize].fields;
 
     let mut members: Vec<BasicValueEnum> = vec![tag.into()];
     if field_tys.is_empty() {
@@ -318,7 +319,7 @@ fn const_eval_sum_construct<'ctx>(
 }
 
 fn const_eval_struct_literal<'ctx>(
-    struct_id: &u32,
+    struct_id: &StructId,
     fields: &[(String, Expression)],
     pos: Position,
     cg: &mut CodeGenerator<'ctx>,
@@ -328,7 +329,7 @@ fn const_eval_struct_literal<'ctx>(
     })?;
 
     let syms = std::rc::Rc::clone(&cg.symbols);
-    let layout = &syms.type_def(*struct_id).as_struct().fields;
+    let layout = &syms[*struct_id].fields;
     let mut vals = Vec::with_capacity(layout.len());
     for declared in layout {
         let (fname, fty) = (&declared.name, &declared.ty);

@@ -174,14 +174,15 @@ pub fn cast_valid(from: &LangType, to: &LangType) -> bool {
 mod tests {
     use super::*;
     use crate::lexer::LangType;
+    use crate::symbol::ids::{EnumId, SumId};
 
     /// An enum coerces to the same enum only — never to a different enum or to
     /// its underlying integer.
     #[test]
     fn enum_coerces_only_to_same_enum() {
-        let color = LangType::enum_type(0);
-        let color2 = LangType::enum_type(0);
-        let dir = LangType::enum_type(1);
+        let color = LangType::enum_type(EnumId::for_test(0));
+        let color2 = LangType::enum_type(EnumId::for_test(0));
+        let dir = LangType::enum_type(EnumId::for_test(1));
         assert!(types_coercible(&color, &color2));
         assert!(!types_coercible(&color, &dir));
         assert!(!types_coercible(&color, &LangType::I32));
@@ -192,9 +193,9 @@ mod tests {
     /// value in either direction — not even the identity cast.
     #[test]
     fn sum_nominal_no_casts() {
-        let shape = LangType::sum_type(0);
-        let shape2 = LangType::sum_type(0);
-        let other = LangType::sum_type(1);
+        let shape = LangType::sum_type(SumId::for_test(0));
+        let shape2 = LangType::sum_type(SumId::for_test(0));
+        let other = LangType::sum_type(SumId::for_test(1));
         assert!(types_coercible(&shape, &shape2));
         assert!(types_coercible(&shape.with_const(true), &shape2));
         assert!(!types_coercible(&shape, &other));
@@ -212,8 +213,8 @@ mod tests {
     /// repr), but not to/from a float or a pointer.
     #[test]
     fn enum_casts_to_int_and_enum_only() {
-        let color = LangType::enum_type(0);
-        let dir = LangType::enum_type(1);
+        let color = LangType::enum_type(EnumId::for_test(0));
+        let dir = LangType::enum_type(EnumId::for_test(1));
         assert!(cast_valid(&color, &LangType::I32));
         assert!(cast_valid(&LangType::I32, &color));
         assert!(cast_valid(&color, &dir));
