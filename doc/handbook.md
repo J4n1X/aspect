@@ -1241,6 +1241,21 @@ i32 *second = xs + 1     # pointer arithmetic: `+ 1` moves by sizeof(i32)
 free(xs)
 ```
 
+Pointer arithmetic also works in a **global initializer**, provided the base
+is an address the linker knows — another global, or an array global decaying
+to its first element. It folds to a link-time constant, so no start-up code
+runs:
+
+```aspect
+i32[5] table = {10, 20, 30, 40, 50}
+i32*   third = table + 2     # link-time constant, not a start-up store
+i32*   fifth = 2 + third     # a previously folded global is itself a base
+```
+
+A base the linker cannot resolve — a `malloc` result, a function parameter,
+any runtime value — is still rejected at compile time, since a global's
+initializer must be a constant.
+
 ### List initializers
 
 ```aspect

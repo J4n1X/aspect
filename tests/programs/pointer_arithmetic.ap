@@ -1,4 +1,11 @@
-# expected: 165
+# expected: 45
+# Global-scope pointer arithmetic folds to a link-time constant `getelementptr`
+# (LLVM keeps GEP as a constant expression), so `&table + n` needs no runtime
+# instruction — the C `static char *p = &arr[3];` case.
+i32[5] table = {10, 20, 30, 40, 50}
+i32* third = table + 2
+i32* fifth = 2 + third
+
 fn main(u32 argc, u8 **argv) -> i32 {
     # Plain `ptr + int`.
     i32 *ptr = 123 as i32*
@@ -15,5 +22,9 @@ fn main(u32 argc, u8 **argv) -> i32 {
     i64 c = *(p - 1)
     i32 s2 = (a + b + c - 18) as i32            # 42
 
-    return s1 + s2                              # 123 + 42 = 165
+    # The two globals above were folded at compile time, not initialised by a
+    # start-up store.
+    i32 s3 = *third + *fifth + *(fifth - 1)     # 30 + 50 + 40 = 120
+
+    return s1 + s2 - s3                         # 123 + 42 - 120 = 45
 }

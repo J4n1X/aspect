@@ -1,5 +1,5 @@
 pub mod asm;
-pub mod const_eval;
+pub mod comptime_eval;
 pub mod errors;
 pub mod expressions;
 pub mod functions;
@@ -12,6 +12,7 @@ pub mod sums;
 pub mod switch;
 pub mod types;
 pub mod value_emitter;
+pub mod eval;
 
 pub use errors::*;
 pub use generator::*;

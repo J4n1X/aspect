@@ -81,7 +81,7 @@ pub struct CodeGenerator<'ctx> {
     /// True only while folding a *global* initializer, which is order-sensitive
     /// static init: reading another global there yields its start value, so
     /// folding a global reference is correct. Everywhere else a mutable global
-    /// is a runtime load, so `const_eval` must refuse to fold it.
+    /// is a runtime load, so `comptime_eval` must refuse to fold it.
     pub(crate) in_global_init: bool,
 
     /// True when the program defines its own libc allocation function

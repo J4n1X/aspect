@@ -1,12 +1,14 @@
 //! Runtime expression code-generation: `walk_expression` emits LLVM IR via the
 //! builder (`RuntimeEmitter`). Its compile-time counterpart (`ConstantEmitter`)
-//! lives in [`super::const_eval`].
+//! lives in [`super::comptime_eval`].
 
 use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::values::{BasicValue, BasicValueEnum, PointerValue};
 use inkwell::{AddressSpace, IntPredicate};
 
 use crate::codegen::CodegenError;
+use crate::codegen::eval::runtime::RuntimeEval;
+use crate::codegen::eval::walk;
 use crate::codegen::generator::CodeGenerator;
 use crate::codegen::types::{
     LangTypeExt, float_cmp_pred, int_cmp_pred, widen_floats_to_match, widen_ints_to_match,
@@ -47,7 +49,7 @@ pub(crate) fn emit_binary_dispatch<'ctx>(
 /// Lower `ptr ± int` (or `int + ptr`) to an in-bounds GEP scaled by the
 /// pointee type. Runtime only — the caller has already rejected `Constant`
 /// mode.
-fn emit_pointer_arithmetic<'ctx>(
+pub(crate) fn emit_pointer_arithmetic<'ctx>(
     cg: &mut CodeGenerator<'ctx>,
     op: &BinaryOp,
     left: &Expression,
@@ -102,7 +104,7 @@ fn emit_pointer_arithmetic<'ctx>(
 /// Lower `&&`/`||` with real short-circuit control flow: the right operand
 /// evaluates in its own block, entered only when the left doesn't already
 /// decide the result; a phi merges the two paths as `i1`.
-fn emit_short_circuit<'ctx>(
+pub(crate) fn emit_short_circuit<'ctx>(
     cg: &mut CodeGenerator<'ctx>,
     op: &BinaryOp,
     left: &Expression,
@@ -144,7 +146,7 @@ fn emit_short_circuit<'ctx>(
 
 /// Load a variable's value; an array-typed variable decays to its base
 /// pointer, matching the `FieldAccess` array rule.
-fn emit_variable_load<'ctx>(
+pub(crate) fn emit_variable_load<'ctx>(
     cg: &mut CodeGenerator<'ctx>,
     name: &str,
     pos: Position,
@@ -202,7 +204,7 @@ fn emit_variable_load<'ctx>(
 
 /// Non-pointer comparison. Both operands evaluate unconditionally, so unlike
 /// `emit_pointer_arithmetic` there's nothing for the caller to hoist.
-fn emit_comparison<'ctx>(
+pub(crate) fn emit_comparison<'ctx>(
     cg: &mut CodeGenerator<'ctx>,
     left: &Expression,
     op: &ComparisonOp,
@@ -245,7 +247,7 @@ fn emit_comparison<'ctx>(
 /// `&expr`: variable/dereference/field-access lvalues yield their address
 /// directly; anything else must be a struct/sum rvalue materialised into a
 /// temporary so its address can be taken.
-fn emit_reference<'ctx>(
+pub(crate) fn emit_reference<'ctx>(
     cg: &mut CodeGenerator<'ctx>,
     inner: &Expression,
 ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
@@ -292,7 +294,7 @@ fn emit_reference<'ctx>(
 
 /// `!expr`: on a pointer this is a null test; otherwise a logical NOT that
 /// yields `i1` (callers extend if they need a wider integer).
-fn emit_unary_not<'ctx>(
+pub(crate) fn emit_unary_not<'ctx>(
     cg: &mut CodeGenerator<'ctx>,
     inner: &Expression,
 ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
@@ -324,180 +326,12 @@ fn emit_unary_not<'ctx>(
 // ─── Main walker ──────────────────────────────────────────────────────────────
 
 /// The runtime-only walker; compile-time folding lives in
-/// [`super::const_eval::const_eval`].
+/// [`super::comptime_eval::comptime_eval`].
 pub(crate) fn walk_expression<'ctx>(
     expr: &Expression,
     cg: &mut CodeGenerator<'ctx>,
 ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-    match &expr.kind {
-        ExprKind::Literal(lit) => match lit {
-            LiteralValue::Integer(val) => cg
-                .runtime_emitter()
-                .emit_int_literal(*val, &expr.expr_type)
-                .map_err(|e| e.with_pos(expr.pos)),
-            LiteralValue::Float(val) => cg
-                .runtime_emitter()
-                .emit_float_literal(*val, &expr.expr_type)
-                .map_err(|e| e.with_pos(expr.pos)),
-            LiteralValue::String(index) => cg.emit_string_ptr(*index),
-            // Boolean literal: an i1 value (zero-extended to i8 when stored).
-            LiteralValue::Bool(b) => Ok(cg
-                .context
-                .bool_type()
-                .const_int(u64::from(*b), false)
-                .into()),
-        },
-
-        ExprKind::Variable(name) => emit_variable_load(cg, name, expr.pos),
-
-        ExprKind::Binary { left, op, right } => {
-            // `&&`/`||` short-circuit: the right operand must not evaluate
-            // when the left already decides — both for C semantics
-            // (`p != null && check(*p)`) and because an `is`-chain conjunct
-            // may read bindings its predecessor only stores on the true edge.
-            if matches!(op, BinaryOp::LogicalAnd | BinaryOp::LogicalOr) {
-                return emit_short_circuit(cg, op, left, right, expr.pos);
-            }
-            let left_val = walk_expression(left, cg)?;
-            let right_val = walk_expression(right, cg)?;
-
-            // Pointer arithmetic lowers to a GEP; everything else is scalar.
-            if left.expr_type.pointer_depth > 0 || right.expr_type.pointer_depth > 0 {
-                return emit_pointer_arithmetic(cg, op, left, right, left_val, right_val);
-            }
-
-            emit_binary_dispatch(
-                &cg.runtime_emitter(),
-                left_val,
-                right_val,
-                op,
-                &left.expr_type,
-                &right.expr_type,
-                expr.pos,
-            )
-        }
-
-        ExprKind::Comparison { left, op, right } => emit_comparison(cg, left, op, right),
-
-        ExprKind::Reference(inner) => emit_reference(cg, inner),
-
-        ExprKind::Dereference(inner_expr) => {
-            let ptr = walk_expression(inner_expr, cg)?;
-            if inner_expr.expr_type.pointer_depth == 0 {
-                return Err(CodegenError::TypeError(
-                    "Cannot dereference a non-pointer type".to_string(),
-                    expr.pos,
-                ));
-            }
-            // Cache-aware lowering: `*(Pair*)` loads a struct value, which the
-            // context-only `to_llvm` cannot resolve.
-            let pointee_type = cg
-                .lang_type_to_llvm(&inner_expr.expr_type.pointee())
-                .map_err(|e| e.with_pos(inner_expr.pos))?;
-            Ok(cg
-                .builder
-                .build_load(pointee_type, ptr.into_pointer_value(), "deref")?)
-        }
-
-        ExprKind::FunctionCall { name, args } => cg.generate_function_call(name, args, expr.pos),
-
-        ExprKind::Cast {
-            expr: inner,
-            target_type,
-        } => {
-            let val = walk_expression(inner, cg)?;
-            let target_llvm = target_type
-                .to_llvm(cg.context)
-                .map_err(|e| e.with_pos(expr.pos))?;
-            cg.runtime_emitter()
-                .emit_cast(val, target_llvm, &inner.expr_type, target_type, inner.pos)
-        }
-
-        ExprKind::Alloc { alloc_type, count } => cg.generate_alloc(alloc_type, count),
-
-        ExprKind::UnaryNot(inner) => emit_unary_not(cg, inner),
-
-        ExprKind::BitwiseNot(inner) => {
-            let val = walk_expression(inner, cg)?.into_int_value();
-            Ok(cg.builder.build_not(val, "bnottmp")?.into())
-        }
-
-        ExprKind::ListInitializer(_) => Err(CodegenError::InvalidOperation(
-            "list initializer is only valid in a variable declaration".to_string(),
-            expr.pos,
-        )),
-
-        ExprKind::FieldAccess { .. } => {
-            let (field_ptr, field_ty) = cg.emit_address(expr)?;
-            // Arrays decay to a pointer (matching the variable-load rule);
-            // scalars and nested struct values are loaded.
-            if field_ty.is_array() {
-                return Ok(field_ptr.into());
-            }
-            let field_llvm = cg
-                .lang_type_to_llvm(&field_ty)
-                .map_err(|e| e.with_pos(expr.pos))?;
-            Ok(cg.builder.build_load(field_llvm, field_ptr, "field")?)
-        }
-
-        ExprKind::StructLiteral { struct_id, fields } => {
-            cg.emit_struct_literal(*struct_id, fields, expr.pos)
-        }
-
-        ExprKind::SumConstruct {
-            sum_id,
-            variant,
-            args,
-        } => cg.emit_sum_construct(*sum_id, *variant, args, expr.pos),
-
-        ExprKind::Is {
-            scrutinee,
-            sum_id,
-            variant,
-        } => {
-            let (matched, _slot) = cg.emit_sum_probe(scrutinee, *sum_id, *variant, expr.pos)?;
-            Ok(matched.into())
-        }
-
-        ExprKind::IsBinding {
-            scrutinee,
-            sum_id,
-            variant,
-            binders,
-        } => cg.emit_is_binding(scrutinee, *sum_id, *variant, binders, expr.pos),
-
-        // A bare function name is a link-time-constant address.
-        ExprKind::FunctionRef(name) => {
-            let function = cg
-                .functions
-                .get(name)
-                .copied()
-                .ok_or_else(|| CodegenError::UndefinedFunction(name.clone(), expr.pos))?;
-            Ok(function.as_global_value().as_pointer_value().into())
-        }
-
-        ExprKind::EnumValue { value, .. } => {
-            Ok(cg.context.i32_type().const_int(*value as u64, false).into())
-        }
-
-        ExprKind::IndirectCall { callee, args } => cg.generate_indirect_call(callee, args),
-
-        ExprKind::SizeOf(ty) => {
-            let bytes = cg.sizeof_lang_type(ty, expr.pos)?;
-            Ok(cg.context.i64_type().const_int(bytes, false).into())
-        }
-
-        // All pointer types lower to LLVM `ptr`, so one null covers them all.
-        ExprKind::Null => Ok(cg
-            .context
-            .ptr_type(inkwell::AddressSpace::default())
-            .const_null()
-            .into()),
-
-        ExprKind::ValueBlock(stmts) => {
-            cg.generate_value_block(stmts, expr.expr_type, expr.pos)
-        }
-    }
+    walk::<RuntimeEval>(cg, expr)
 }
 
 // ─── impl CodeGenerator — expression entry-points ────────────────────────────

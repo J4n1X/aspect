@@ -8,7 +8,10 @@ The codegen module (`src/codegen/`) emits LLVM IR via Inkwell (pinned to LLVM 19
 |------|---------|
 | `generator.rs` | `CodeGenerator` struct + orchestration (`new`, `generate`, public API) |
 | `expressions.rs` | `walk_expression` — the runtime expression walker + `CodeGenerator` expression entry-points. `&&`/`||` lower with **real short-circuit control flow** (`emit_short_circuit`: rhs in its own block, `i1` phi — the rhs must not evaluate when the lhs decides, both for C semantics and because an `is`-chain conjunct reads bindings its predecessor stores only on the true edge). `is` (`emit_sum_probe`): scrutinee once into an entry slot, tag load, `icmp eq`; the binding form adds unconditional entry-block binder allocas whose payload copies run in a conditional `is.bind` block — initialized exactly when readable. `if`/`while` codegen wraps condition + then/body in one scope (tri-scope invariant; this also fixed body-local shadowing silently clobbering outer variables) |
-| `const_eval.rs` | `const_eval` — the compile-time-constant expression evaluator (folds via `ConstantEmitter`) |
+| `eval/mod.rs` | The `Eval` trait and `walk` — **the one expression traversal**, shared by both modes |
+| `eval/runtime.rs` | `RuntimeEval` — the runtime mode: 11 required methods plus 8 overrides of the refusing defaults |
+| `eval/comptime.rs` | `ComptimeEval` — the compile-time mode: the 11 required methods and *no* overrides |
+| `comptime_eval.rs` | `comptime_eval` entry point (delegates to `walk::<ComptimeEval>`) plus the aggregate folders `comptime_struct_literal`/`comptime_sum_construct` |
 | `statements.rs` | `generate_statement` and the statement generators (minus `switch`) |
 | `switch.rs` | `generate_switch`: scrutinee evaluated once (a sum scrutinee is recognised by `variants::sum_scrutinee`, the same test the parser and checker use, and stored into an entry-block slot, tag loaded from field 0; bool normalized to `i1`), one LLVM `switch` over the discriminant, per-arm blocks copy bound payload fields out of the slot through the variant's payload struct (arrays memcpy'd) into fresh locals; the else edge is the `default` block, or — on a fully-listed enum/sum switch — a `llvm.trap` + `unreachable` block at `-O0` (forged tags halt debuggably; `llvm.trap`, never libc `abort`, keeps freestanding targets libc-free) and a bare `unreachable` when optimizing (forgery is UB; no jump-table bounds check) |
 | `functions.rs` | `declare_function`, `generate_function`, `FunctionScope` RAII, and `abi_fn_type` — the one place the struct ABI's LLVM shape is derived, so a declaration and every call site (direct or through a fn-pointer) agree |
@@ -149,37 +152,72 @@ Two implementations:
 - **`RuntimeEmitter<'a,'ctx>`** — borrows `builder: &'a Builder<'ctx>` + `context`; emits actual LLVM IR
 - **`ConstantEmitter<'ctx>`** — borrows only `context`; performs Rust-level constant folding and returns LLVM constants without touching the builder
 
-## Expression Walker (`expressions.rs`) and Constant Evaluator (`const_eval.rs`)
+## The expression walk (`eval/`)
 
-Runtime and compile-time-constant code generation are handled by two distinct
-recursive walkers that share the same leaf-level `ValueEmitter` operations:
-
-- **`walk_expression(expr, gen)`** (`expressions.rs`) — the walker for *runtime*
-  expressions; emits LLVM IR via `RuntimeEmitter`.
-- **`const_eval(expr, gen)`** (`const_eval.rs`) — the evaluator for *constant*
-  expressions; folds via `ConstantEmitter` and returns LLVM constants without
-  touching the builder. It errors — with the same diagnostics the runtime-only
-  kinds always produced — on expression kinds that have no constant form
-  (function/indirect calls, comparisons, dereferences, field access,
-  value-blocks, pointer arithmetic, address-of-field/non-lvalue).
+Runtime code-generation and compile-time folding are **one traversal**, not
+two. `walk` (`eval/mod.rs`) owns the single `match` over `ExprKind`; the
+`Eval` trait carries the only two things the modes actually differ in — which
+`ValueEmitter` materialises the leaves, and which nodes the mode can express
+at all.
 
 ```rust
-pub(crate) fn walk_expression<'ctx>(
-    expr: &Expression,
-    gen: &mut CodeGenerator<'ctx>,
-) -> Result<BasicValueEnum<'ctx>, CodegenError>
+pub(crate) trait Eval<'ctx> {
+    const MODE: &'static str;
+    fn emitter<'a>(cg: &'a CodeGenerator<'ctx>) -> impl ValueEmitter<'ctx> + 'a;
+    // required where both modes have a real implementation; defaulted otherwise
+}
 
-pub(crate) fn const_eval<'ctx>(
+pub(crate) fn walk<'ctx, E: Eval<'ctx>>(
+    cg: &mut CodeGenerator<'ctx>,
     expr: &Expression,
-    gen: &mut CodeGenerator<'ctx>,
 ) -> Result<BasicValueEnum<'ctx>, CodegenError>
 ```
 
+**Defaults refuse.** A node a mode cannot express needs no arm — the
+inherited default reports `"<what> not supported in <MODE>"`.
+`ComptimeEval` therefore overrides *nothing*: comparisons, dereferences,
+field access, calls, indirect calls, `is` and value-blocks are all refused by
+inheritance, with `MODE = "constant expressions"` supplying the wording.
+Adding an expression form costs one arm in `walk` plus at most one override,
+and forgetting the constant path is the correct outcome rather than a missing
+arm.
+
+Nodes identical in both modes (`Null`, `SizeOf`, `EnumValue`, `FunctionRef`,
+`Alloc`, `ListInitializer`) live directly in `walk`. `Binary` recurses through
+`walk::<E>` and dispatches on `E::emitter(cg)`.
+
+Two nodes deliberately receive **unfolded** operands, because a bottom-up fold
+cannot express them:
+
+- **`logical`** — `&&`/`||`. Runtime must not evaluate the right operand when
+  the left decides (C semantics, and an `is`-chain conjunct reads bindings its
+  predecessor stores only on the true edge), so it lowers to real
+  short-circuit control flow. Comptime has no control flow and folds both.
+- **`pointer_arithmetic`** — receives the folded values *and* the operand
+  expressions, since the GEP needs the pointee type from the pointer operand.
+
 Emitters are created transiently (after all recursive sub-expression calls
-return) to avoid borrow-checker conflicts. The constant `Variable` case checks
-local const values first, then falls back to global initializers. The shared
-per-op dispatch (`emit_binary_dispatch`) is parameterised over a `&dyn
-ValueEmitter`, so both walkers reuse it with their respective emitter.
+return) to avoid borrow-checker conflicts — `RuntimeEmitter` borrows the
+builder out of `CodeGenerator`, so it must never be bound across a `&mut`
+use. The shared per-op dispatch (`emit_binary_dispatch`) takes a `&dyn
+ValueEmitter`, so both modes reuse it with their own.
+
+### Constant pointer arithmetic
+
+`getelementptr` survives as an LLVM *constant expression*, so
+`ComptimeEval::pointer_arithmetic` folds `&global + n` to a link-time address
+via `PointerValue::const_in_bounds_gep` — the C `static char *p = &arr[3];`
+case. `i32* third = table + 2` emits:
+
+```llvm
+@third = private global ptr getelementptr inbounds (i32, ptr @table, i32 2)
+```
+
+with no start-up store. The base must be link-time constant; a non-constant
+one would be an LLVM assertion rather than an error, so an `is_const` guard
+turns it into a diagnostic. An array global decays to its base address here
+exactly as `emit_variable_load` does at runtime — its *initializer* is the
+element data, which is not what a use of the name means.
 
 ### Public Entry-Points on `CodeGenerator`
 
@@ -369,7 +407,7 @@ every program at both `-O0` and `-O2` and requiring they agree.
 
 ### `try_fold_constant_expression`
 
-Delegates to `const_eval(expr, self).ok()`.
+Delegates to `comptime_eval(expr, self).ok()`.
 Returns `Option<BasicValueEnum>` — `None` for any non-constant sub-expression.
 
 If folding succeeds, `generate_var_decl` stores the constant to the alloca and records it in `LocalVar::const_value`. Subsequent reads bypass the `load` instruction.
@@ -490,14 +528,14 @@ All `alloca` instructions are placed in the **function entry block**, not at the
 1. Compute LLVM type (arrays → `CodeGenerator::lang_type_to_llvm_array`, scalars → `lang_type_to_llvm`; both cache-aware for type-structs)
 2. `module.add_global()`
 3. For **array** initializers: `generate_constant_array_value` → LLVM `ConstantArray`
-4. For **scalar** initializers: `const_eval(expr, self)`
+4. For **scalar** initializers: `comptime_eval(expr, self)`
 5. For no initializer: `const_zero()`
 6. Register in scope
 
 ### Constant Folding
 
 All constant expression evaluation (global initializers, `const` local folding) goes through
-`const_eval(expr, gen)` (`const_eval.rs`), which uses `ConstantEmitter`.
+`comptime_eval(expr, gen)` (`comptime_eval.rs`), which walks with `ComptimeEval`.
 
 LLVM 19 removed almost all `LLVMConst*` arithmetic functions. `ConstantEmitter` performs
 all arithmetic in Rust and reconstructs LLVM constants via `IntType::const_int` /

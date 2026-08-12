@@ -46,7 +46,8 @@ aspect/
 │   ├── codegen/             # LLVM IR emission
 │   │   ├── generator.rs     # CodeGenerator struct + orchestration (not the bulk of IR gen)
 │   │   ├── expressions.rs   # walk_expression: the unified expression walker
-│   │   ├── const_eval.rs    # Compile-time constant folding
+│   │   ├── comptime_eval.rs # Compile-time constant folding entry + aggregate folders
+│   │   ├── eval/           # The shared expression walk: Eval trait, RuntimeEval, ComptimeEval
 │   │   ├── statements.rs    # Statement generators (minus switch)
 │   │   ├── switch.rs        # switch lowering (tag dispatch, binder copies, trap edge)
 │   │   ├── value_emitter.rs # ValueEmitter trait + RuntimeEmitter + ConstantEmitter

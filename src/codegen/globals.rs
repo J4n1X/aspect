@@ -4,7 +4,7 @@ use inkwell::values::{BasicValueEnum, FloatValue, IntValue, PointerValue, Struct
 use inkwell::AddressSpace;
 
 use crate::lexer::Position;
-use crate::codegen::const_eval::const_eval;
+use crate::codegen::comptime_eval::comptime_eval;
 use crate::codegen::generator::CodeGenerator;
 use crate::codegen::scope::GlobalVarInfo;
 use crate::codegen::CodegenError;
@@ -33,7 +33,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Sum globals with an initializer are declared with the *folded
         // constant's* anonymous padded type (payload fields at natural types;
-        // see `const_eval`'s SumConstruct arm) — readers load through the
+        // see `comptime_eval`'s SumConstruct arm) — readers load through the
         // named storage type at the same address, which opaque pointers make
         // immaterial. The storage alignment is forced explicitly: the padded
         // type's natural alignment can be smaller when this variant's payload
@@ -45,7 +45,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         {
             let prev_in_global_init = self.in_global_init;
             self.in_global_init = true;
-            let folded = const_eval(init_expr, self);
+            let folded = comptime_eval(init_expr, self);
             self.in_global_init = prev_in_global_init;
             let folded = folded?;
 
@@ -85,7 +85,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         if let Some(init_expr) = &global.initializer {
             // A global initializer legitimately reads another global's start
             // value, which is why declaration order is significant here. Flag
-            // the context so `const_eval` folds those references (it refuses
+            // the context so `comptime_eval` folds those references (it refuses
             // them for a runtime/local initializer).
             let prev_in_global_init = self.in_global_init;
             self.in_global_init = true;
@@ -94,7 +94,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             } else {
                 // Cast the constant to the declared global type if widths differ
                 // (e.g. integer literal emitted as i32 into a u8/i16/i64 global).
-                const_eval(init_expr, self)
+                comptime_eval(init_expr, self)
                     .map(|v| coerce_constant_to_type(v, global_type))
             };
             self.in_global_init = prev_in_global_init;
@@ -187,7 +187,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // element surfaces its own error.
         let mut const_vals: Vec<BasicValueEnum<'ctx>> = Vec::with_capacity(array_size);
         for elem in elements {
-            const_vals.push(const_eval(elem, self)?);
+            const_vals.push(comptime_eval(elem, self)?);
         }
 
         while const_vals.len() < array_size {
@@ -216,7 +216,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     const_vals.iter().map(|v| v.into_pointer_value()).collect();
                 Ok(ptr_ty.const_array(&vals).into())
             }
-            // Struct-literal elements fold (via `const_eval`) to
+            // Struct-literal elements fold (via `comptime_eval`) to
             // `const_named_struct` values of this same cached struct type;
             // assemble them into a `[N x %T]` ConstantArray.
             BasicTypeEnum::StructType(struct_ty) => {

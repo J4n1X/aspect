@@ -3,7 +3,7 @@ use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicValueEnum, FunctionValue, IntValue, PointerValue};
 use inkwell::IntPredicate;
 
-use crate::codegen::const_eval::const_eval;
+use crate::codegen::comptime_eval::comptime_eval;
 use crate::codegen::generator::CodeGenerator;
 use crate::codegen::value_emitter::ValueEmitter;
 use crate::codegen::CodegenError;
@@ -588,7 +588,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         &mut self,
         expr: &Expression,
     ) -> Option<BasicValueEnum<'ctx>> {
-        const_eval(expr, self).ok()
+        comptime_eval(expr, self).ok()
     }
 }
 
