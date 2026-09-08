@@ -56,6 +56,8 @@ pub trait ValueEmitter<'ctx> {
         pos: Position,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError>;
 
+    fn emit_not(&self, val: IntValue<'ctx>) -> Result<BasicValueEnum<'ctx>, CodegenError>;
+
     /// Literals are LLVM constants in both modes, so this shared default serves
     /// both emitters. Returns a positionless [`TypeLoweringError`]; the caller
     /// attaches the position via [`TypeLoweringError::with_pos`].
@@ -315,6 +317,10 @@ impl<'ctx> ValueEmitter<'ctx> for RuntimeEmitter<'_, 'ctx> {
         }
 
         Ok(value)
+    }
+
+    fn emit_not(&self, val: IntValue<'ctx>) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        Ok(self.builder.build_not(val, "bnottmp")?.into())
     }
 
     fn emit_widen_ints(
@@ -639,6 +645,10 @@ impl<'ctx> ValueEmitter<'ctx> for ConstantEmitter<'ctx> {
             ),
             pos,
         ))
+    }
+
+    fn emit_not(&self, val: IntValue<'ctx>) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        Ok(val.const_not().into())
     }
 
     fn emit_widen_ints(

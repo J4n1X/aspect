@@ -1,6 +1,8 @@
 #-
   Binary-search tree demo built on sum types.
   Leaf is a terminal; Node is an internal value with optional children.
+  Destructuring both ways: exhaustive `switch` where every variant does
+  work, and the `is` probe/binding forms where only one variant matters.
 -#
 $import std/mem
 $import std/io
@@ -22,16 +24,13 @@ type Tree {
         if node == null {
             return
         }
-        switch node {
-            case TreeNode.Leaf(_) {
-                free_ptr(node)
-            }
-            case TreeNode.Node(_, left, right) {
-                Tree.free_node(left)
-                Tree.free_node(right)
-                free_ptr(node)          # was missing
-            }
+        # Binding `is` as the whole condition: only the Node variant has
+        # children to recurse into; a Leaf skips straight to its own free.
+        if node is TreeNode.Node(_, left, right) {
+            Tree.free_node(left)
+            Tree.free_node(right)
         }
+        free_ptr(node)
     }
 
     public fn free(this) {
@@ -47,26 +46,22 @@ type Tree {
         }
 
         TreeNode *cur = this.root
-        while true {
-            switch cur {
-                case TreeNode.Leaf(_) {
+        # The `while ... is` walk idiom: the loop destructures cur afresh
+        # each iteration and ends when the probe fails — i.e. on a Leaf.
+        while cur is TreeNode.Node(node_val, left, right) {
+            if val < node_val {
+                if left == null {
                     return cur
                 }
-                case TreeNode.Node(node_val, left, right) {
-                    if val < node_val {
-                        if left == null {
-                            return cur
-                        }
-                        cur = left
-                    } else {
-                        if right == null {
-                            return cur
-                        }
-                        cur = right
-                    }
+                cur = left
+            } else {
+                if right == null {
+                    return cur
                 }
+                cur = right
             }
         }
+        return cur
     }
 
     public fn insert(this, i32 val) {
@@ -124,6 +119,41 @@ type Tree {
     public fn sum_tree(this) -> i32 {
         return Tree.sum_node(this.root)
     }
+
+    public fn contains(this, i32 val) -> bool {
+        if this.root == null {
+            return false
+        }
+        TreeNode *cur = this.root
+        while cur is TreeNode.Node(node_val, left, right) {
+            if node_val == val {
+                return true
+            }
+            if val < node_val {
+                if left == null {
+                    return false
+                }
+                cur = left
+            } else {
+                if right == null {
+                    return false
+                }
+                cur = right
+            }
+        }
+        # Binding + guard in one condition: `leaf_val` is readable in the
+        # second conjunct only because `&&` short-circuits on the match.
+        if cur is TreeNode.Leaf(leaf_val) && leaf_val == val {
+            return true
+        }
+        return false
+    }
+
+    # Parens-less `is` is the binding-free probe — an ordinary bool
+    # expression, legal anywhere a bool is.
+    public fn root_is_leaf(this) -> bool {
+        return this.root != null && this.root is TreeNode.Leaf
+    }
 }
 
 fn main(u32 argc, u8 **argv) -> i32 {
@@ -134,9 +164,31 @@ fn main(u32 argc, u8 **argv) -> i32 {
     }
 
     i32 total = tree.sum_tree()
-    tree.free()
 
     print("Total sum of tree nodes: ")
-    println_i32(total)          # 70
+    println_i32(total)          # 0: the range is symmetric around zero
+
+    print("contains(1000): ")
+    if tree.contains(1000) {
+        println("yes")
+    } else {
+        println("no")
+    }
+    print("contains(5000): ")
+    if tree.contains(5000) {
+        println("yes")
+    } else {
+        println("no")
+    }
+
+    tree.free()
+
+    Tree tiny = Tree.new()
+    tiny.insert(7)
+    if tiny.root_is_leaf() {
+        println("single-insert tree: root is a bare leaf")
+    }
+    tiny.free()
+
     return 0
 }

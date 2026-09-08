@@ -12,6 +12,7 @@ use inkwell::values::BasicValueEnum;
 use crate::codegen::CodegenError;
 use crate::codegen::expressions::emit_binary_dispatch;
 use crate::codegen::generator::CodeGenerator;
+use crate::codegen::types::LangTypeExt;
 use crate::codegen::value_emitter::ValueEmitter;
 use crate::lexer::{LangType, Position};
 use crate::parser::{BinaryOp, ComparisonOp, ExprKind, Expression, LiteralValue, Statement};
@@ -35,7 +36,7 @@ pub(crate) fn unsupported<'ctx>(what: &str, mode: &str, pos: Position) -> EvalRe
 /// One evaluation mode. Implementors are zero-sized markers; every method is
 /// associated (no `self`) so [`walk`] can dispatch statically without carrying
 /// a mode value alongside the `CodeGenerator`.
-pub(crate) trait Eval<'ctx> {
+pub(crate) trait Eval<'ctx>: Sized {
     /// Identifies the mode in error diagnostics. 
     const MODE: &'static str;
 
@@ -79,7 +80,45 @@ pub(crate) trait Eval<'ctx> {
 
     fn unary_not(cg: &mut CodeGenerator<'ctx>, inner: &Expression) -> EvalResult<'ctx>;
 
-    fn bitwise_not(cg: &mut CodeGenerator<'ctx>, inner: &Expression) -> EvalResult<'ctx>;
+    // ── Defaulted: one shared body, the modes differ only in `emitter` ─────
+
+    fn scalar_literal(
+        cg: &mut CodeGenerator<'ctx>,
+        lit: &LiteralValue,
+        ty: &LangType,
+        pos: Position,
+    ) -> EvalResult<'ctx> {
+        match lit {
+            LiteralValue::Integer(v) => Self::emitter(cg)
+                .emit_int_literal(*v, ty)
+                .map_err(|e| e.with_pos(pos)),
+            LiteralValue::Float(v) => Self::emitter(cg)
+                .emit_float_literal(*v, ty)
+                .map_err(|e| e.with_pos(pos)),
+            LiteralValue::Bool(b) => Ok(cg
+                .context
+                .bool_type()
+                .const_int(u64::from(*b), false)
+                .into()),
+            LiteralValue::String(_) => unreachable!("walk routes String to string_literal"),
+        }
+    }
+
+    fn cast(
+        cg: &mut CodeGenerator<'ctx>,
+        inner: &Expression,
+        target: &LangType,
+        pos: Position,
+    ) -> EvalResult<'ctx> {
+        let val = walk::<Self>(cg, inner)?;
+        let target_llvm = target.to_llvm(cg.context).map_err(|e| e.with_pos(pos))?;
+        Self::emitter(cg).emit_cast(val, target_llvm, &inner.expr_type, target, inner.pos)
+    }
+
+    fn bitwise_not(cg: &mut CodeGenerator<'ctx>, inner: &Expression) -> EvalResult<'ctx> {
+        let val = walk::<Self>(cg, inner)?.into_int_value();
+        Self::emitter(cg).emit_not(val)
+    }
 
     // ── Defaulted: absent means "this mode cannot express it" ──────────────
 
@@ -123,8 +162,17 @@ pub(crate) trait Eval<'ctx> {
         unsupported("indirect call", Self::MODE, pos)
     }
 
-    /// Both `is` forms; `binders` is empty for the binding-free probe.
     fn is_probe(
+        _cg: &mut CodeGenerator<'ctx>,
+        _scrutinee: &Expression,
+        _sum_id: SumId,
+        _variant: u32,
+        pos: Position,
+    ) -> EvalResult<'ctx> {
+        unsupported("`is`", Self::MODE, pos)
+    }
+
+    fn is_binding(
         _cg: &mut CodeGenerator<'ctx>,
         _scrutinee: &Expression,
         _sum_id: SumId,
@@ -162,20 +210,6 @@ pub(crate) trait Eval<'ctx> {
         // TODO: We could definitely support this in const mode.
         unsupported("pointer arithmetic", Self::MODE, pos)
     }
-
-    fn scalar_literal(
-        cg: &mut CodeGenerator<'ctx>,
-        lit: &LiteralValue,
-        ty: &LangType,
-        pos: Position,
-    ) -> EvalResult<'ctx>;
-
-    fn cast(
-        cg: &mut CodeGenerator<'ctx>,
-        inner: &Expression,
-        target: &LangType,
-        pos: Position,
-    ) -> EvalResult<'ctx>;
 }
 
 /// The single traversal. Nodes identical in both modes are handled here;
@@ -272,13 +306,13 @@ pub(crate) fn walk<'ctx, E: Eval<'ctx>>(
             scrutinee,
             sum_id,
             variant,
-        } => E::is_probe(cg, scrutinee, *sum_id, *variant, &[], expr.pos),
+        } => E::is_probe(cg, scrutinee, *sum_id, *variant, expr.pos),
         ExprKind::IsBinding {
             scrutinee,
             sum_id,
             variant,
             binders,
-        } => E::is_probe(cg, scrutinee, *sum_id, *variant, binders, expr.pos),
+        } => E::is_binding(cg, scrutinee, *sum_id, *variant, binders, expr.pos),
 
         ExprKind::ValueBlock(stmts) => E::value_block(cg, stmts, expr.expr_type, expr.pos),
     }

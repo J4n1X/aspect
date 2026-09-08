@@ -9,8 +9,8 @@ The codegen module (`src/codegen/`) emits LLVM IR via Inkwell (pinned to LLVM 19
 | `generator.rs` | `CodeGenerator` struct + orchestration (`new`, `generate`, public API) |
 | `expressions.rs` | `walk_expression` — the runtime expression walker + `CodeGenerator` expression entry-points. `&&`/`||` lower with **real short-circuit control flow** (`emit_short_circuit`: rhs in its own block, `i1` phi — the rhs must not evaluate when the lhs decides, both for C semantics and because an `is`-chain conjunct reads bindings its predecessor stores only on the true edge). `is` (`emit_sum_probe`): scrutinee once into an entry slot, tag load, `icmp eq`; the binding form adds unconditional entry-block binder allocas whose payload copies run in a conditional `is.bind` block — initialized exactly when readable. `if`/`while` codegen wraps condition + then/body in one scope (tri-scope invariant; this also fixed body-local shadowing silently clobbering outer variables) |
 | `eval/mod.rs` | The `Eval` trait and `walk` — **the one expression traversal**, shared by both modes |
-| `eval/runtime.rs` | `RuntimeEval` — the runtime mode: 11 required methods plus 8 overrides of the refusing defaults |
-| `eval/comptime.rs` | `ComptimeEval` — the compile-time mode: the 11 required methods and *no* overrides |
+| `eval/runtime.rs` | `RuntimeEval` — the runtime mode: the 7 required methods plus overrides of all 9 refusing defaults |
+| `eval/comptime.rs` | `ComptimeEval` — the compile-time mode: the 7 required methods plus the one refusing default it can express (`pointer_arithmetic`) |
 | `comptime_eval.rs` | `comptime_eval` entry point (delegates to `walk::<ComptimeEval>`) plus the aggregate folders `comptime_struct_literal`/`comptime_sum_construct` |
 | `statements.rs` | `generate_statement` and the statement generators (minus `switch`) |
 | `switch.rs` | `generate_switch`: scrutinee evaluated once (a sum scrutinee is recognised by `variants::sum_scrutinee`, the same test the parser and checker use, and stored into an entry-block slot, tag loaded from field 0; bool normalized to `i1`), one LLVM `switch` over the discriminant, per-arm blocks copy bound payload fields out of the slot through the variant's payload struct (arrays memcpy'd) into fresh locals; the else edge is the `default` block, or — on a fully-listed enum/sum switch — a `llvm.trap` + `unreachable` block at `-O0` (forged tags halt debuggably; `llvm.trap`, never libc `abort`, keeps freestanding targets libc-free) and a bare `unreachable` when optimizing (forgery is UB; no jump-table bounds check) |
@@ -143,6 +143,7 @@ struct-array globals. Regression test: `tests/programs/struct_arrays.ap`.
 | `emit_int_binary` | Integer binary operation |
 | `emit_float_binary` | Float binary operation |
 | `emit_cast` | Type cast |
+| `emit_not` | Bitwise NOT |
 | `emit_int_literal` | Emit an integer literal |
 | `emit_float_literal` | Emit a float literal |
 | `emit_widen_ints` | Widen two ints to match |
@@ -161,10 +162,11 @@ two. `walk` (`eval/mod.rs`) owns the single `match` over `ExprKind`; the
 at all.
 
 ```rust
-pub(crate) trait Eval<'ctx> {
+pub(crate) trait Eval<'ctx>: Sized {
     const MODE: &'static str;
     fn emitter<'a>(cg: &'a CodeGenerator<'ctx>) -> impl ValueEmitter<'ctx> + 'a;
-    // required where both modes have a real implementation; defaulted otherwise
+    // required where the modes genuinely differ; defaulted with one shared
+    // emitter-dispatching body where they don't; refusing default otherwise
 }
 
 pub(crate) fn walk<'ctx, E: Eval<'ctx>>(
@@ -173,9 +175,12 @@ pub(crate) fn walk<'ctx, E: Eval<'ctx>>(
 ) -> Result<BasicValueEnum<'ctx>, CodegenError>
 ```
 
-**Defaults refuse.** A node a mode cannot express needs no arm — the
-inherited default reports `"<what> not supported in <MODE>"`.
-`ComptimeEval` therefore overrides *nothing*: comparisons, dereferences,
+**Two kinds of defaults.** Leaves that are the same operation in both modes —
+`scalar_literal`, `cast`, `bitwise_not` — carry one shared default body that
+dispatches through `Self::emitter(cg)`; neither mode overrides them. Every
+other default refuses: a node a mode cannot express needs no arm — the
+inherited default reports `"<what> not supported in <MODE>"`. `ComptimeEval`
+overrides only `pointer_arithmetic` (below): comparisons, dereferences,
 field access, calls, indirect calls, `is` and value-blocks are all refused by
 inheritance, with `MODE = "constant expressions"` supplying the wording.
 Adding an expression form costs one arm in `walk` plus at most one override,
