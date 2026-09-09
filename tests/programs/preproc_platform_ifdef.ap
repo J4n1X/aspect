@@ -1,4 +1,5 @@
 # expected: 1
+# requires_os: linux
 # Platform smoke test: the compiler seeds OS_LINUX on Linux (where CI
 # runs), so `$ifdef OS_LINUX` must select the passing branch.
 

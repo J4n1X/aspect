@@ -127,6 +127,18 @@ pub enum PreprocessError {
     },
 }
 
+/// Render a path for diagnostics: forward slashes on every platform and no
+/// Windows `\\?\` extended-path prefix, so error text is stable across OSes
+/// and tests can match on `no/such/module.ap` instead of `no\such\module.ap`.
+pub(crate) fn display_path_stable(path: &std::path::Path) -> String {
+    let s = path.display().to_string();
+    let s = s
+        .strip_prefix(r"\\?\")
+        .unwrap_or(&s)
+        .replace('\\', "/");
+    s
+}
+
 /// Render the candidate list of a [`PreprocessError::ModuleNotFound`]: every
 /// path resolution tried, or a hint that no `-I` roots were given at all.
 fn format_candidates(candidates: &[PathBuf]) -> String {
@@ -136,7 +148,7 @@ fn format_candidates(candidates: &[PathBuf]) -> String {
     let mut out = "; tried:".to_string();
     for candidate in candidates {
         out.push_str("\n  ");
-        out.push_str(&candidate.display().to_string());
+        out.push_str(&display_path_stable(candidate));
     }
     out
 }

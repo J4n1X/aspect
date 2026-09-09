@@ -172,13 +172,21 @@ impl Scanner {
             '\n' => TokenKind::Newline,
 
             // `\` at line end is a continuation: splice the next line on.
+            // Accept both LF and CRLF (Windows autocrlf checkouts).
             '\\' => {
+                if self.match_char('\r') {
+                    // CRLF: the \n must follow; a lone \r is not a line ending here.
+                    if !self.match_char('\n') {
+                        return Err(LexerError::UnexpectedChar('\\', start_pos));
+                    }
+                    self.skip_whitespace()?;
+                    return self.scan_token();
+                }
                 if self.match_char('\n') {
                     self.skip_whitespace()?;
                     return self.scan_token();
-                } else {
-                    return Err(LexerError::UnexpectedChar('\\', start_pos));
                 }
+                return Err(LexerError::UnexpectedChar('\\', start_pos));
             },
 
             '=' => {

@@ -1,5 +1,6 @@
 # expected: 42
 # requires_arch: ARCH_X86_64
+# requires_os: linux
 #-
   `naked fn`: lowered with LLVM's `naked` attribute — no prologue/epilogue, the
   body IS the function's assembly. Arguments arrive in their SysV ABI registers
