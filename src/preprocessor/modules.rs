@@ -413,9 +413,9 @@ mod tests {
         // File form + directory form, per root.
         assert_eq!(candidates.len(), 4);
         let message = err.to_string();
-        // Candidates render with the platform separator, so build the fragment.
-        let file_form: PathBuf = ["no", "such", "module.ap"].iter().collect();
-        assert!(message.contains(&file_form.display().to_string()));
+        // Candidates render with stable forward slashes on every platform
+        // (see display_path_stable), so match the portable fragment.
+        assert!(message.contains("no/such/module.ap"));
         assert!(message.contains("modules_alt"));
     }
 
