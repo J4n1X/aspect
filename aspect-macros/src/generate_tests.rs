@@ -16,6 +16,7 @@ struct Annotation {
     run_args: Vec<String>,
     compile_args: Vec<String>,
     requires_arch: Option<String>,
+    requires_os: Option<String>,
     /// `# expected_warning: "frag"` — a fragment that must appear in the
     /// checker's warnings. Only meaningful on a runtime test.
     expected_warning: Option<String>,
@@ -60,12 +61,17 @@ fn parse_string_list(s: &str) -> Vec<String> {
 /// *running* program can gate itself with `$ifdef` and match in the `$else`,
 /// but a program asserting a *compile error* can't — gating it away leaves a
 /// clean-compiling program, so the test must be gated from outside.
+///
+/// `# requires_os: linux` does the same for the host OS (`linux`, `windows`,
+/// `macos` — the `cfg(target_os = ..)` value verbatim). Unrecognised names
+/// leave the test ungated, same as an unrecognised arch.
 fn parse_annotation(path: &Path) -> Option<Annotation> {
     let source = fs::read_to_string(path).ok()?;
     let mut expected: Option<Expected> = None;
     let mut run_args: Vec<String> = Vec::new();
     let mut compile_args: Vec<String> = Vec::new();
     let mut requires_arch: Option<String> = None;
+    let mut requires_os: Option<String> = None;
     let mut expected_warning: Option<String> = None;
 
     for line in source.lines().take(10) {
@@ -90,6 +96,8 @@ fn parse_annotation(path: &Path) -> Option<Annotation> {
             compile_args = parse_string_list(rest.trim());
         } else if let Some(rest) = trimmed.strip_prefix("# requires_arch:") {
             requires_arch = Some(rest.trim().to_string());
+        } else if let Some(rest) = trimmed.strip_prefix("# requires_os:") {
+            requires_os = Some(rest.trim().to_string());
         }
     }
 
@@ -98,6 +106,7 @@ fn parse_annotation(path: &Path) -> Option<Annotation> {
         run_args,
         compile_args,
         requires_arch,
+        requires_os,
         expected_warning,
     })
 }
@@ -193,6 +202,16 @@ pub fn generate_tests_impl(_input: TokenStream) -> TokenStream {
                     quote! { #[cfg(target_arch = #arch)] }
                 });
 
+            // Same for the OS gate: only linux/windows/macos pass through,
+            // anything else leaves the test ungated (loud typo > silent skip).
+            let os_gate: TokenStream2 = match ann.requires_os.as_deref() {
+                Some("linux" | "windows" | "macos") => {
+                    let os = ann.requires_os.as_deref().unwrap();
+                    quote! { #[cfg(target_os = #os)] }
+                }
+                _ => TokenStream2::new(),
+            };
+
             // An optional `# expected_warning:` assertion, spliced into runtime
             // tests after the exit-code check (a warning never fails the build,
             // so it rides on a passing runtime test).
@@ -210,6 +229,7 @@ pub fn generate_tests_impl(_input: TokenStream) -> TokenStream {
             let test_fn: TokenStream2 = match ann.expected {
             Expected::ExitCode(code) if ann.run_args.is_empty() && compile_args.is_empty() => quote! {
                 #arch_gate
+                #os_gate
                 #[test]
                 fn #test_ident() {
                     let result = compile_and_run(#path_str)
@@ -222,6 +242,7 @@ pub fn generate_tests_impl(_input: TokenStream) -> TokenStream {
                 let args: Vec<&str> = ann.run_args.iter().map(String::as_str).collect();
                 quote! {
                     #arch_gate
+                #os_gate
                     #[test]
                     fn #test_ident() {
                         let result = compile_and_run_with_args(
@@ -236,6 +257,7 @@ pub fn generate_tests_impl(_input: TokenStream) -> TokenStream {
             }
             Expected::ErrorFragments(frags) => quote! {
                 #arch_gate
+                #os_gate
                 #[test]
                 fn #test_ident() {
                     assert_compile_error_contains(

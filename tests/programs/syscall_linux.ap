@@ -1,4 +1,5 @@
 # expected: 0
+# requires_os: linux
 # compile_args: "-I", "lib"
 #-
   std/linux/syscall regression: real kernel calls, no libc on the path.
